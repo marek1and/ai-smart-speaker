@@ -1,0 +1,92 @@
+# Example configuration file for AI Smart Speaker.
+# To use, copy this file to 'config.yml' and fill in your data.
+
+api_keys:
+  # Google API Key (required for Gemini Live API)
+  google_api_key: "YOUR_GOOGLE_API_KEY_HERE"
+  # OpenAI API Key (required for OpenAI Real-time API)
+  openai_api_key: "YOUR_OPENAI_API_KEY_HERE"
+
+audio:
+  # Input settings (microphone)
+  input_sample_rate: 16000
+  input_channels: 2
+  input_chunk: 512
+  input_device: null  # Device name or null for default
+
+  # Output settings (speaker)
+  output_sample_rate: 24000
+  output_channels: 1
+  output_device: null # Device name or null for default
+
+  # Queue sizes
+  input_queue_maxsize: 50
+  output_queue_maxsize: 500
+
+wake_word:
+  model_id: "alexa" # Available: alexa, hey_mycroft, hey_jarvis
+  threshold: 0.65
+  window_seconds: 0.8
+  cooldown_seconds: 2.5
+
+vad:
+  # VAD mode: "silero" (recommended) or "rms"
+  mode: "silero"
+  
+  # Silero VAD settings
+  silero_threshold: 0.6
+  silero_frame_size: 512
+  
+  # RMS VAD settings
+  rms_threshold: 1500.0
+  
+  # Temporal smoothing
+  speech_frames_required: 3
+  silence_frames_required: 15
+
+live:
+  # AI provider selection. Options: "gemini" or "openai"
+  provider: "gemini"
+  
+  # System instruction defining assistant behavior
+  system_instruction: >
+    You are a voice assistant for a smart home.
+    Your name is Alexa, and you should respond in a female voice.
+    You understand and speak only English, unless explicitly asked to translate.
+    You are versatile: you can control the house and answer general knowledge questions.
+    If the audio signal is unclear or noisy, do not guess words and try to find meaning in the whole sentence.
+    Ignore background noise (children, TV) and focus on the nearest adult voice.
+    Respond concisely, in one sentence, unless asked for a detailed explanation.
+
+  temperature: 0.2
+  response_modalities: ["AUDIO"]
+  lang: "en-US"
+  
+  # Audio format settings
+  send_sample_rate: 16000
+  receive_sample_rate: 24000
+  input_mime_type: "audio/pcm;rate=16000"
+  
+  preroll_seconds: 0.8
+  barge_in: true
+  session_inactivity_timeout: 30.0
+  max_reconnect_attempts: 3
+  followup_timeout: 3.0
+  
+  enable_manual_vad: true
+  api_vad_timeout: 2.0
+  vad_threshold: 0.5
+  
+  # Gemini-specific settings
+  model: "gemini-2.5-flash-native-audio-preview-12-2025"
+  voice_name: "Zephyr" # Options: Aoede, Charon, Fenrir, Kore, Puck, Zephyr
+  
+  # OpenAI-specific settings
+  openai_model: "gpt-realtime"
+  openai_voice: "shimmer" # Options: alloy, ash, ballad, coral, echo, sage, shimmer, verse
+
+sound:
+  enabled: true
+  volume: 1.0
+  sounds_dir: null # Custom sounds directory (null = default)
+  output_device: null # Audio device for sounds (null = default)

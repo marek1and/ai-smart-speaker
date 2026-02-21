@@ -1,0 +1,18 @@
+onnxruntime>=1.23
+numpy
+sounddevice>=0.5.5
+soundfile>=0.12
+pyusb>=1.2
+tqdm>=4.67
+scipy>=1.11,<2
+scikit-learn>=1,<2
+requests
+pyyaml>=6.0
+
+# Real-time API providers (install at least one)
+google-genai          # For Gemini Live API
+websockets>=13.0      # For OpenAI Real-time API (WebSocket transport)
+
+# Wake word detection - install with --no-deps on Python 3.12+
+# Use: pip install openwakeword --no-deps
+openwakeword>=0.6.0; python_version < "3.12"

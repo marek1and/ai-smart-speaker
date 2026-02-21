@@ -1,0 +1,30 @@
+"""State management for voice assistant."""
+
+import enum
+import time
+from dataclasses import dataclass, field
+
+
+class SpeakerState(enum.Enum):
+    """State machine states for the voice assistant."""
+    IDLE = "idle"              # Waiting for wake word, NOT sending audio
+    LISTENING = "listening"    # Sending audio to API, waiting for response
+    RESPONDING = "responding"  # AI is responding, NOT sending audio (barge-in via wake word)
+    FOLLOW_UP = "follow_up"    # Waiting for user to speak (local VAD), then -> LISTENING
+
+
+@dataclass
+class AudioFrame:
+    """Wrapper for audio data with metadata."""
+    data: bytes
+    timestamp: float = field(default_factory=time.time)
+    mime_type: str = "audio/pcm;rate=16000"
+
+
+@dataclass
+class WakeWordResult:
+    """Result from wake word detection."""
+    triggered: bool
+    score: float
+    max_score: float
+    timestamp: float = field(default_factory=time.time)
