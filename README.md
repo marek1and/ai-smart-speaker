@@ -4,13 +4,13 @@ This project is a high-end hardware retrofit of the **Edifier D12** 70W Bluetoot
 
 ## 📝 Table of Contents
 
-- [Safety Warning & Disclaimer](#-safety-warning--disclaimer)
+- [Safety Warning & Disclaimer](#️-safety-warning--disclaimer)
 - [Project Philosophy](#-project-philosophy)
-- [Architectural Choice: Real-time API vs. Traditional STT/TTS](#-architectural-choice-real-time-api-vs-traditional-stttts)
+- [Architectural Choice: Real-time API vs. Traditional STT/TTS](#️-architectural-choice-real-time-api-vs-traditional-stttts)
 - [Hardware Architecture](#️-hardware-architecture)
 - [Hardware Implementation](#️-hardware-implementation)
 - [System Configuration](#️-system-configuration)
-- [Future Improvements](#-future-improvements)
+- [Future Improvements](#future-improvements)
 
 ## ⚠️ Safety Warning & Disclaimer
 
@@ -106,7 +106,7 @@ The USB mic array provides onboard DSP for Acoustic Echo Cancellation (AEC), whi
 
 Even with a fixed system clock configured in PipeWire, this delay can drift slightly over hours of operation. This remains an area for potential improvement.
 
-## 🚀 Future Improvements
+## Future Improvements
 
 This project is an ongoing effort. Planned future enhancements include:
 
