@@ -1,9 +1,6 @@
-"""Gemini Live API session management with Manual VAD support."""
-
 import asyncio
 import logging
 from typing import Optional
-
 from google import genai
 from google.genai.live import AsyncSession
 from google.genai.types import (
@@ -21,10 +18,15 @@ from google.genai.types import (
     StartSensitivity,
     Tool,
     VoiceConfig,
+    FunctionCall,
+    FunctionResponse,
+    LiveServerMessage,
 )
 
 from config import AppConfig
 from realtime.base import BaseRealtimeManager
+from functions.registry import get_function
+from functions.schemas import GEMINI_TOOLS as TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +115,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             input_audio_transcription=AudioTranscriptionConfig(),
             output_audio_transcription=AudioTranscriptionConfig(),
             # Enable Google Search tool
-            tools=[Tool(google_search=GoogleSearch())],
+            tools=TOOLS + [Tool(google_search=GoogleSearch())],
         )
 
     async def open_session(self) -> None:
@@ -234,9 +236,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         while self._running and self._session_active:
             try:
                 try:
-                    frame = await asyncio.wait_for(
-                        self._input_queue.get(), timeout=0.5
-                    )
+                    frame = await asyncio.wait_for(self._input_queue.get(), timeout=0.5)
                 except asyncio.TimeoutError:
                     continue
 
@@ -279,7 +279,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     break
                 await asyncio.sleep(0.5)
 
-    async def _process_api_response(self, response: object) -> None:
+    async def _process_api_response(self, response: LiveServerMessage) -> None:
         """Process a single response from the Gemini API."""
         if hasattr(response, "server_content") and response.server_content:
             sc = response.server_content
@@ -300,7 +300,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                                 # Ignore stale audio if we haven't sent enough frames yet
                                 # This prevents old audio from previous turn being counted after barge-in
                                 if (
-                                    self._frames_sent < self._min_frames_for_turn_complete
+                                    self._frames_sent
+                                    < self._min_frames_for_turn_complete
                                     and self._chunks_received == 0
                                 ):
                                     logger.debug(
@@ -324,14 +325,24 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                             if self._on_text_received:
                                 self._on_text_received(part.text)
 
+                        # Handle single function call
+                        if hasattr(part, "function_call") and part.function_call:
+                            await self._handle_tool_calls([part.function_call])
+
             # Handle input transcription (user's speech -> text)
             if hasattr(sc, "input_transcription") and sc.input_transcription:
-                if hasattr(sc.input_transcription, "text") and sc.input_transcription.text:
+                if (
+                    hasattr(sc.input_transcription, "text")
+                    and sc.input_transcription.text
+                ):
                     self._user_transcript += sc.input_transcription.text
 
             # Handle output transcription (AI's speech -> text)
             if hasattr(sc, "output_transcription") and sc.output_transcription:
-                if hasattr(sc.output_transcription, "text") and sc.output_transcription.text:
+                if (
+                    hasattr(sc.output_transcription, "text")
+                    and sc.output_transcription.text
+                ):
                     self._ai_transcript += sc.output_transcription.text
 
             # Handle turn complete
@@ -348,13 +359,13 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                         self._min_frames_for_turn_complete,
                     )
                     return
-                
+
                 # Log full transcripts at end of turn
                 if self._user_transcript.strip():
                     logger.info("📝 USER: %s", self._user_transcript.strip())
                 if self._ai_transcript.strip():
                     logger.info("🤖 AI: %s", self._ai_transcript.strip())
-                
+
                 logger.info("API: turn_complete")
                 if self._on_turn_complete:
                     self._on_turn_complete()
@@ -370,3 +381,44 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
         elif hasattr(response, "tool_call") and response.tool_call:
             logger.info("API: tool_call received")
+            if response.tool_call.function_calls:
+                await self._handle_tool_calls(response.tool_call.function_calls)
+
+    async def _handle_tool_calls(self, function_calls: list[FunctionCall]):
+        """
+        Handle a list of function calls from the API's tool_call.
+
+        Executes each function call and sends the results back to the API
+        in a single tool response.
+        """
+        function_responses = []
+
+        for function_call in function_calls:
+            function_name = function_call.name
+            logger.info(f"Tool call: {function_name} with args {function_call.args}")
+            try:
+                # Get the function from the registry
+                func = get_function(function_name)
+                # Call the function with the provided arguments
+                result = func(**function_call.args)
+
+                function_responses.append(
+                    FunctionResponse(
+                        id=function_call.id,
+                        name=function_name,
+                        response={"result": result},
+                    )
+                )
+                logger.info(f"Tool call {function_name} successful, result: {result}")
+            except Exception as e:
+                logger.error(f"Error executing tool call {function_name}: {e}")
+                function_responses.append(
+                    FunctionResponse(
+                        id=function_call.id,
+                        name=function_name,
+                        response={"error": f"Error executing function: {e}"},
+                    )
+                )
+
+        # Send all responses back to the API in one go
+        await self._session.send_tool_response(function_responses=function_responses)

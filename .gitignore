@@ -5,3 +5,4 @@ recordings/
 *.log
 .env
 config.yml
+typings

@@ -7,8 +7,10 @@ This directory contains the core Python application for the AI Smart Speaker. It
 The project is organized into the following directories:
 
 - `audio/`: Contains modules for audio input/output, VAD, and wake-word detection.
+- `functions/`: Handles the definition and registration of tools (functions) that the AI can call, such as controlling smart home devices.
+- `openhab/`: Contains the client for interacting with the OpenHAB REST API.
 - `realtime/`: Manages the real-time communication with the selected API (Gemini or OpenAI).
-- `sounds/`: Stores sound effects for different events (e.g., wake word, end of conversation).
+- `sounds/`: Stores sound effects for different events (e.g., wake word, end o`f` conversation).
 - `tools/`: Includes utility scripts for tasks like tuning audio delay.
 - `config.py`: Defines the data classes for the application's configuration.
 - `main.py`: The main entry point for the application.
@@ -92,6 +94,53 @@ live:
   system_instruction: >
     You are a helpful assistant.
 ```
+
+### Smart Home Integration (OpenHAB)
+
+This application supports controlling smart home devices through an OpenHAB instance. This is achieved using the "function calling" or "tools" feature of the selected AI model (Gemini or OpenAI). The assistant can understand natural language commands (e.g., "turn on the living room light"), and the LLM will translate this into a call to the appropriate function to interact with the OpenHAB REST API.
+
+#### 1. Configuration
+
+First, you must configure the connection to your OpenHAB server in `config.yml`:
+
+```yaml
+openhab:
+  # URL of your OpenHab instance
+  url: "http://192.168.1.100:8080"
+  # API key for OpenHab (if required)
+  api_key: "YOUR_OPENHAB_API_KEY"
+```
+
+#### 2. Informing the Model About Your Devices
+
+The most critical step is telling the LLM which devices are available to control. **The model does not know your devices automatically.** You must list them explicitly in the system prompt.
+
+The `live.system_instruction` in your `config.yml` is where you provide this context. You should create a clear, structured list of your rooms and devices, including the exact `Item ID` that the function needs to use.
+
+A detailed example of how to structure this prompt is provided in `config.yml.example`. It is highly recommended that you follow this template for best results.
+
+**Example Snippet from `config.yml.example`:**
+
+```yaml
+live:
+  system_instruction: |
+    You are a voice assistant...
+    Here is the complete list of available rooms and devices with their Item IDs that you must use:
+
+    ### GROUND FLOOR (GF)
+
+    **Living Room**
+    *   **Lighting:**
+        *   Main: `GF_LivingRoom_MainLight` (Switch On/Off)
+        *   Dimmer: `GF_LivingRoom_Dimmer` (Dimming 0-100%)
+    *   **Climate:**
+        *   Temperature: `GF_LivingRoom_Temperature` (Read-only)
+
+    ### OPERATING RULES:
+    1. ...
+```
+
+By providing this detailed context, the model will know to call `set_openhab_item_state(item_name='GF_LivingRoom_MainLight', state='ON')` when you say "turn on the main light in the living room."
 
 ## Tools
 

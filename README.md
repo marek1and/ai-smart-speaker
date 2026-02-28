@@ -31,6 +31,14 @@ This is a hobby project driven by two primary goals:
 
 The project prioritizes audio quality, low latency, and a modular software design that allows for future expansion.
 
+## ✨ Key Features
+
+- **High-Fidelity Audio:** Utilizes a dedicated Raspberry Pi DAC+ to deliver audiophile-grade sound through the Edifier D12's excellent stereo drivers.
+- **Real-time Conversational AI:** Leverages the native streaming APIs from **Google Gemini** and **OpenAI** for low-latency, natural-feeling conversations.
+- **Robust Voice Capture:** Employs the reSpeaker XVF3800 microphone array for hardware-accelerated wake word detection, beamforming, and acoustic echo cancellation (AEC).
+- **Smart Home Control via Function Calling:** Integrates seamlessly with **OpenHAB** to control smart devices like lights, switches, and sensors. The LLM uses function calling to interact with the OpenHAB REST API based on natural language commands.
+- **Multi-lingual:** While designed for Polish, the system can be configured for any language supported by the chosen AI provider.
+
 ## ⚖️ Architectural Choice: Real-time API vs. Traditional STT/TTS
 
 Most open-source voice assistant projects, like the excellent [Rhasspy](https://rhasspy.readthedocs.io/), follow a standard offline pipeline:
@@ -110,7 +118,6 @@ Even with a fixed system clock configured in PipeWire, this delay can drift slig
 
 This project is an ongoing effort. Planned future enhancements include:
 
-- **Smart Home Integration:** Adding integration with [OpenHAB](https://www.openhab.org/) to control smart devices (lights, switches, etc.) via voice commands.
 - **Music Streaming:** Integrating music streaming services like Spotify or YouTube Music.
 - **Automatic Delay Calibration:** Implementing a background process to monitor the audio delay between the DAC and the reSpeaker in real-time and automatically adjust the `AUDIO_MGR_SYS_DELAY` to prevent drift.
 - **Custom Linux Distribution:** Building a dedicated, minimal Linux distribution for the speaker using the [Yocto Project](https://www.yoctoproject.org/) to optimize boot time and performance.

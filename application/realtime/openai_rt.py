@@ -17,6 +17,8 @@ from scipy.signal import resample_poly
 
 from config import AppConfig
 from realtime.base import BaseRealtimeManager
+from functions.registry import get_function
+from functions.schemas import OPENAI_TOOLS as TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +129,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
         if not self._activity_started:
             logger.debug("Activity not started, skipping activity_end")
+            return
+
+        if self._is_response_item_in_progress:
+            logger.warning(
+                "Response item is already in progress, skipping activity_end"
+            )
             return
 
         try:
@@ -342,6 +350,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             "model": self.live_cfg.openai_model,
             "output_modalities": ["audio"],
             "instructions": self.live_cfg.system_instruction,
+            "tools": TOOLS,
             "audio": {
                 "input": audio_input,
                 "output": audio_output,
@@ -490,6 +499,17 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             response = event.get("response", {})
             status = response.get("status", "")
 
+            # Handle tool calls if present in the output
+            if "output" in response and response["output"]:
+                tool_calls_handled = False
+                for item in response["output"]:
+                    if item.get("type") == "function_call":
+                        await self._handle_tool_call(item)
+                        tool_calls_handled = True
+                
+                if tool_calls_handled:
+                    return # Stop further processing, as a new response will be created
+
             if status == "cancelled":
                 logger.info("API: response cancelled (via response.done)")
                 if self._on_interrupted:
@@ -586,3 +606,43 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
         else:
             logger.debug("Unhandled event: %s", event_type)
+
+    async def _handle_tool_call(self, tool_call: dict):
+        """Handle a tool call from the API based on the new documentation."""
+        call_id = tool_call.get("call_id")
+        function_name = tool_call.get("name")
+        
+        try:
+            # Arguments are a JSON string
+            args = json.loads(tool_call.get("arguments", "{}"))
+        except json.JSONDecodeError:
+            args = {}
+
+        logger.info(f"Tool call: {function_name} with args {args}")
+        
+        result_payload = {}
+        try:
+            func = get_function(function_name)
+            result = func(**args)
+            result_payload = {"result": result}
+            logger.info(f"Tool call {function_name} successful, result: {result}")
+        except Exception as e:
+            logger.error(f"Error executing tool call {function_name}: {e}")
+            result_payload = {"error": f"Error executing function: {e}"}
+
+        try:
+            # Send the result back to the API
+            await self._ws_send(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(result_payload),
+                    },
+                }
+            )
+            # Ask the model to respond to the tool call result
+            await self._ws_send({"type": "response.create"})
+        except Exception as e:
+            logger.error(f"Failed to send tool call result for {function_name}: {e}")

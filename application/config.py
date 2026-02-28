@@ -2,6 +2,7 @@ import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
+from google.genai.types import Modality
 
 # Default system instruction (in English)
 DEFAULT_SYSTEM_INSTRUCTION = (
@@ -80,7 +81,7 @@ class LiveConfig:
     temperature: float = 0.2  # Lower = more deterministic, higher = more creative
 
     # Response modality - AUDIO only (enforced single modality)
-    response_modalities: Sequence[str] = ("AUDIO",)
+    response_modalities: Sequence[Modality] = (Modality.AUDIO,)
 
     lang: str = "en-US"
 
@@ -119,7 +120,7 @@ class LiveConfig:
 
     # --- OpenAI-specific settings ---
     openai_model: str = "gpt-realtime"
-    openai_voice: str = "shimmer"  # OpenAI voice (alloy, ash, ballad, coral, echo, sage, shimmer, verse)
+    openai_voice: str = "shimmer"  # OpenAI voice (alloy, ash, ballad, coral, echo, sage, marin, shimmer, verse)
 
 
 @dataclass
@@ -141,6 +142,14 @@ class ApiKeys:
 
 
 @dataclass
+class OpenHabConfig:
+    """OpenHab integration configuration."""
+
+    url: str = "http://localhost:8080"
+    api_key: Optional[str] = None
+
+
+@dataclass
 class AppConfig:
     """Root application configuration."""
 
@@ -150,6 +159,7 @@ class AppConfig:
     live: LiveConfig = field(default_factory=LiveConfig)
     sound: SoundConfig = field(default_factory=SoundConfig)
     api_keys: ApiKeys = field(default_factory=ApiKeys)
+    openhab: OpenHabConfig = field(default_factory=OpenHabConfig)
 
     @classmethod
     def from_yaml(cls, path: str = "config.yml") -> "AppConfig":
@@ -167,4 +177,5 @@ class AppConfig:
             live=LiveConfig(**config_data.get("live", {})),
             sound=SoundConfig(**config_data.get("sound", {})),
             api_keys=ApiKeys(**config_data.get("api_keys", {})),
+            openhab=OpenHabConfig(**config_data.get("openhab", {})),
         )
