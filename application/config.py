@@ -13,6 +13,12 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "If the audio signal is unclear or noisy, do not guess words and try to find meaning in the whole sentence. "
     "Ignore background noise (children, TV) and focus on the nearest adult voice. "
     "Respond concisely, in one sentence, unless asked for a detailed explanation."
+    "For any radio-related requests, like 'turn on radio', 'turn off radio', or asking about the status, your first step should always be to call the `get_radio_status` function to understand the current state. "
+    "Based on the status: "
+    "- If the user asks to 'turn on radio' and `is_radio_on_playlist` is true, call `play_internet_radio` without parameters to resume playback. "
+    "- If `is_radio_on_playlist` is false, ask the user for a station name. "
+    "- If the user asks to 'turn off radio' and the `playback_state` is 'play', call the `stop_radio` function. "
+    "- If a specific station name is provided, use the `play_internet_radio` function with the `station_name` parameter."
 )
 
 
@@ -109,11 +115,8 @@ class LiveConfig:
     # API VAD settings (failsafe with long timeout)
     api_vad_timeout: float = 2.0  # API-side silence timeout (failsafe)
 
-    # Local VAD threshold (from VADConfig, duplicated for convenience)
-    vad_threshold: float = 0.5  # Silero threshold for local VAD
-
     # --- Gemini-specific settings ---
-    model: str = "gemini-2.5-flash-native-audio-preview-12-2025"
+    model: str = "gemini-3.1-flash-live-preview"
     voice_name: str = (
         "Zephyr"  # Gemini voice (Aoede, Charon, Fenrir, Kore, Puck, Zephyr)
     )
@@ -150,6 +153,27 @@ class OpenHabConfig:
 
 
 @dataclass
+class RadioConfig:
+    """Internet radio configuration."""
+
+    country: str = "Poland"
+    popular_stations: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MPDConfig:
+    """MPD server configuration."""
+
+    host: str = "localhost"
+    port: int = 6600
+    volume_fade_in_seconds: float = 2.0  # Duration of volume fade-in (resuming)
+    volume_duck_percentage: int = 20  # Volume percentage during conversation
+    default_playback_volume: int = (
+        70  # Default playback volume if no previous volume is known
+    )
+
+
+@dataclass
 class AppConfig:
     """Root application configuration."""
 
@@ -160,6 +184,8 @@ class AppConfig:
     sound: SoundConfig = field(default_factory=SoundConfig)
     api_keys: ApiKeys = field(default_factory=ApiKeys)
     openhab: OpenHabConfig = field(default_factory=OpenHabConfig)
+    radio: RadioConfig = field(default_factory=RadioConfig)
+    mpd: MPDConfig = field(default_factory=MPDConfig)
 
     @classmethod
     def from_yaml(cls, path: str = "config.yml") -> "AppConfig":
@@ -178,4 +204,6 @@ class AppConfig:
             sound=SoundConfig(**config_data.get("sound", {})),
             api_keys=ApiKeys(**config_data.get("api_keys", {})),
             openhab=OpenHabConfig(**config_data.get("openhab", {})),
+            radio=RadioConfig(**config_data.get("radio", {})),
+            mpd=MPDConfig(**config_data.get("mpd", {})),
         )

@@ -7,6 +7,7 @@ Input audio from mic (16kHz) is resampled to 24kHz before sending.
 
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import os
@@ -67,7 +68,9 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
     def initialize(self) -> None:
         """Initialize the OpenAI client."""
-        api_key = self.config.api_keys.openai_api_key or os.environ.get("OPENAI_API_KEY")
+        api_key = self.config.api_keys.openai_api_key or os.environ.get(
+            "OPENAI_API_KEY"
+        )
         if not api_key:
             raise ValueError(
                 "OPENAI_API_KEY is required for OpenAI provider, either in config.yml or as an environment variable"
@@ -180,15 +183,15 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             # so the model knows the user only heard part of the response.
             if self._current_response_item_id and self._audio_bytes_received > 0:
                 # PCM16 @ 24kHz: 2 bytes/sample, 24000 samples/sec
-                audio_end_ms = int(
-                    self._audio_bytes_received / 2 / 24000 * 1000
+                audio_end_ms = int(self._audio_bytes_received / 2 / 24000 * 1000)
+                await self._ws_send(
+                    {
+                        "type": "conversation.item.truncate",
+                        "item_id": self._current_response_item_id,
+                        "content_index": 0,
+                        "audio_end_ms": audio_end_ms,
+                    }
                 )
-                await self._ws_send({
-                    "type": "conversation.item.truncate",
-                    "item_id": self._current_response_item_id,
-                    "content_index": 0,
-                    "audio_end_ms": audio_end_ms,
-                })
                 logger.info(
                     "Truncated assistant audio at %dms (item=%s)",
                     audio_end_ms,
@@ -196,8 +199,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 )
 
             await self._ws_send({"type": "input_audio_buffer.clear"})
-            
-            log_msg = "Cancelled response and cleared audio buffer" if self._is_response_item_in_progress else "Cleared audio buffer"
+
+            log_msg = (
+                "Cancelled response and cleared audio buffer"
+                if self._is_response_item_in_progress
+                else "Cleared audio buffer"
+            )
             logger.info(log_msg)
         except Exception as e:
             logger.error("Failed to cancel/clear: %s", e)
@@ -326,9 +333,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         if self.live_cfg.enable_manual_vad:
             # Manual VAD - disable server-side turn detection
             audio_input["turn_detection"] = None
-            logger.info(
-                "Manual VAD enabled - server-side turn detection DISABLED"
-            )
+            logger.info("Manual VAD enabled - server-side turn detection DISABLED")
         else:
             # Server semantic VAD
             audio_input["turn_detection"] = {
@@ -357,10 +362,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             },
         }
 
-        await self._ws_send({
-            "type": "session.update",
-            "session": session_config,
-        })
+        await self._ws_send(
+            {
+                "type": "session.update",
+                "session": session_config,
+            }
+        )
 
     # -------------------------------------------------------------------------
     # Send / Receive tasks
@@ -371,9 +378,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         while self._running and self._session_active:
             try:
                 try:
-                    frame = await asyncio.wait_for(
-                        self._input_queue.get(), timeout=0.5
-                    )
+                    frame = await asyncio.wait_for(self._input_queue.get(), timeout=0.5)
                 except asyncio.TimeoutError:
                     continue
 
@@ -384,10 +389,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 audio_b64 = base64.b64encode(audio_data).decode("ascii")
 
                 # Send to API
-                await self._ws_send({
-                    "type": "input_audio_buffer.append",
-                    "audio": audio_b64,
-                })
+                await self._ws_send(
+                    {
+                        "type": "input_audio_buffer.append",
+                        "audio": audio_b64,
+                    }
+                )
 
                 self._frames_sent += 1
 
@@ -506,9 +513,9 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                     if item.get("type") == "function_call":
                         await self._handle_tool_call(item)
                         tool_calls_handled = True
-                
+
                 if tool_calls_handled:
-                    return # Stop further processing, as a new response will be created
+                    return  # Stop further processing, as a new response will be created
 
             if status == "cancelled":
                 logger.info("API: response cancelled (via response.done)")
@@ -611,7 +618,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         """Handle a tool call from the API based on the new documentation."""
         call_id = tool_call.get("call_id")
         function_name = tool_call.get("name")
-        
+
         try:
             # Arguments are a JSON string
             args = json.loads(tool_call.get("arguments", "{}"))
@@ -619,11 +626,39 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             args = {}
 
         logger.info(f"Tool call: {function_name} with args {args}")
-        
+
         result_payload = {}
         try:
-            func = get_function(function_name)
-            result = func(**args)
+            # Defer playback volume changes for execution by the orchestrator after the response.
+            # This is handled separately because the function is not executed here, only queued.
+            if function_name == "set_playback_volume":
+                logger.info(
+                    f"Deferring tool call '{function_name}' for post-response execution."
+                )
+                # Use radio_info as a generic queue for a pending action.
+                self.radio_info.append({"type": function_name, "payload": args})
+                result = f"Action '{function_name}' has been queued for execution after the response."
+            else:
+                # Execute all other tools immediately.
+                func = get_function(function_name)
+                result = (
+                    await func(**args)
+                    if inspect.iscoroutinefunction(func)
+                    else func(**args)
+                )
+
+                # For some tools, we also defer the action to the orchestrator based on the result.
+                # This allows the AI to respond verbally before the action (e.g., playing music) starts.
+                if function_name == "play_internet_radio" and isinstance(result, dict):
+                    if "url" in result or ("action" in result and result["action"] == "play"):
+                        self.radio_info.append({"type": function_name, "payload": result})
+                        logger.info("Radio info set for orchestrator: %s", self.radio_info)
+                
+                # Special handling for stop_radio which is also deferred.
+                elif function_name == "stop_radio" and result == "Radio will be stopped.":
+                    self.radio_info.append({"type": function_name, "payload": {}})
+                    logger.info("Radio info set for orchestrator: %s", self.radio_info)
+
             result_payload = {"result": result}
             logger.info(f"Tool call {function_name} successful, result: {result}")
         except Exception as e:

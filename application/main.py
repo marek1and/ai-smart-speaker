@@ -17,10 +17,12 @@ from config import AppConfig
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO,  # Set global level to INFO
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
+# Keep MPD client logs at DEBUG level
+logging.getLogger("mpd_client").setLevel(logging.DEBUG)
 
 logger = logging.getLogger(__name__)
 

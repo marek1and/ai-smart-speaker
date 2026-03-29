@@ -59,6 +59,9 @@ class BaseRealtimeManager(ABC):
         self._user_transcript: str = ""
         self._ai_transcript: str = ""
 
+        # Radio info
+        self.radio_info: list = []
+
     # -------------------------------------------------------------------------
     # Abstract methods (provider-specific)
     # -------------------------------------------------------------------------
@@ -166,6 +169,7 @@ class BaseRealtimeManager(ABC):
         self._activity_started = False
         self._user_transcript = ""
         self._ai_transcript = ""
+        self.radio_info.clear()
         logger.debug("Starting new turn (generation=%d)", self._turn_generation)
 
     def set_callbacks(

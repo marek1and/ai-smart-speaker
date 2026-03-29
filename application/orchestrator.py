@@ -34,10 +34,12 @@ from config import (
     VADConfig,
     WakeWordConfig,
 )
+from mpd_client.client import MPDClientWrapper
 from realtime import BaseRealtimeManager, create_realtime_manager
 from state import AudioFrame, SpeakerState, WakeWordResult
 
 logger = logging.getLogger(__name__)
+
 
 # Constants
 RECORDINGS_DIR = "recordings"
@@ -67,6 +69,8 @@ class AudioOrchestrator:
         self.wake_cfg = config.wake_word
         self.vad_cfg = config.vad
         self.sound_cfg = config.sound
+        self.mpd_cfg = config.mpd
+        self.mpd_client = MPDClientWrapper(config.mpd)
 
         # State
         self._state = SpeakerState.IDLE
@@ -140,6 +144,9 @@ class AudioOrchestrator:
         """Initialize components and start the main loop."""
         logger.info("Starting Voice Assistant...")
 
+        # Initialize MPD state now that event loop is running
+        self.mpd_client.initialize_state()
+
         # Initialize audio I/O (SoundDevice)
         self._audio_input = AudioInput(self.audio_cfg, self._mic_queue)
         self._audio_output = AudioOutput(self.audio_cfg, self._speaker_queue)
@@ -186,12 +193,15 @@ class AudioOrchestrator:
         self._audio_output.start()
 
         logger.info("Barge-in: %s", "enabled" if self.live_cfg.barge_in else "disabled")
-        logger.info("Manual VAD: %s", "enabled" if self.live_cfg.enable_manual_vad else "disabled")
-        
+        logger.info(
+            "Manual VAD: %s",
+            "enabled" if self.live_cfg.enable_manual_vad else "disabled",
+        )
+
         # Play startup sound
         if self._sound_player:
             self._sound_player.play(SoundEvent.STARTUP)
-        
+
         logger.info("Listening for wake word...")
 
         try:
@@ -211,6 +221,9 @@ class AudioOrchestrator:
         if self._api_manager:
             self._api_manager.shutdown()
             await self._api_manager.close_session()
+
+        # Disconnect from MPD
+        self.mpd_client.disconnect()
 
         # Close session recording
         self._close_session_recording()
@@ -235,9 +248,13 @@ class AudioOrchestrator:
         """Main event loop orchestrating all async tasks."""
         tasks = [
             asyncio.create_task(self._audio_capture_task(), name="audio_capture"),
-            asyncio.create_task(self._audio_playback_bridge_task(), name="playback_bridge"),
+            asyncio.create_task(
+                self._audio_playback_bridge_task(), name="playback_bridge"
+            ),
             asyncio.create_task(self._state_machine_task(), name="state_machine"),
-            asyncio.create_task(self._inactivity_monitor_task(), name="inactivity_monitor"),
+            asyncio.create_task(
+                self._inactivity_monitor_task(), name="inactivity_monitor"
+            ),
         ]
 
         try:
@@ -391,6 +408,9 @@ class AudioOrchestrator:
         print()  # New line after status
         logger.info("Wake word detected! (score=%.3f)", result.score)
         self._last_barge_in_time = now
+
+        # Duck radio volume if playing
+        await self._duck_radio_if_playing()
 
         # Play wake word sound
         if self._sound_player:
@@ -672,26 +692,100 @@ class AudioOrchestrator:
 
         await asyncio.sleep(0.3)
 
-        if not self._playback_interrupted:
-            logger.info(
-                "Waiting for follow-up (%.1fs, Silero VAD)...",
-                self.live_cfg.followup_timeout,
-            )
-            # Play follow-up sound
-            if self._sound_player:
-                self._sound_player.play(SoundEvent.FOLLOW_UP)
-            # Reset VAD for follow-up detection
-            if self._hybrid_vad:
-                self._hybrid_vad.reset()
-            self._set_state(SpeakerState.FOLLOW_UP)
-        else:
-            await self._finish_turn()
+        # Unified logic for executing deferred actions and handling state transitions
+        await self._execute_post_response_actions()
 
-    async def _finish_turn(self) -> None:
-        """Common cleanup after conversation turn is finished.
-        
-        Note: Recording continues within session - WAV file is NOT closed here.
+    async def _execute_post_response_actions(self):
         """
+        Handles executing a queue of deferred actions (like radio/volume changes)
+        and subsequent state transitions after the AI response.
+        """
+        pending_actions = list(self._api_manager.radio_info) if self._api_manager else []
+        if self._api_manager:
+            self._api_manager.radio_info.clear()  # Consume the actions
+
+        radio_action_handled = False
+
+        # Execute deferred actions now that the AI has finished speaking
+        # The LLM should provide them in a sensible order (e.g., set volume before play)
+        for action in pending_actions:
+            action_type = action.get("type")
+            payload = action.get("payload", {})
+
+            if action_type == "play_internet_radio":
+                logger.info("AI response finished. Executing deferred action: play_internet_radio")
+                if "url" in payload:
+                    await self.mpd_client.play_station(payload["url"])
+                elif "action" in payload and payload["action"] == "play":
+                    await self.mpd_client.play()
+                radio_action_handled = True
+            elif action_type == "stop_radio":
+                logger.info("AI response finished. Executing deferred action: stop_radio")
+                self.mpd_client.stop()
+                radio_action_handled = True
+            elif action_type == "set_playback_volume":
+                logger.info("AI response finished. Executing deferred action: set_playback_volume")
+                if "volume_percentage" in payload:
+                    # Run volume change in the background. set_volume() updates the
+                    # internal _restore_volume synchronously, so a subsequent play
+                    # action in this loop will use the correct new volume.
+                    asyncio.create_task(self.mpd_client.set_volume(payload["volume_percentage"]))
+                radio_action_handled = True
+
+        # If a radio action was taken, we don't need the default unduck logic
+        if radio_action_handled:
+            if self.mpd_client.is_playing():
+                logger.info("Radio is playing, ending turn.")
+                await self._finish_turn(play_end_sound=False)
+            else:
+                # This path is taken if the action was to stop the radio.
+                logger.info("Radio not playing, proceeding to follow-up.")
+                await self.mpd_client.unduck()
+
+                if not self._playback_interrupted:
+                    logger.info(
+                        "Waiting for follow-up (%.1fs, Silero VAD)...",
+                        self.live_cfg.followup_timeout,
+                    )
+                    if self._sound_player:
+                        self._sound_player.play(SoundEvent.FOLLOW_UP)
+                    if self._hybrid_vad:
+                        self._hybrid_vad.reset()
+                    self._set_state(SpeakerState.FOLLOW_UP)
+                else:
+                    await self._finish_turn()
+            return
+
+        # Decide on next state based on radio status (if no radio action was taken)
+        if self.mpd_client.is_playing():
+            # If radio is playing, unduck volume and end turn without follow-up.
+            logger.info("Radio is playing, restoring volume and ending turn.")
+            await self.mpd_client.unduck()
+            await self._finish_turn(play_end_sound=False)
+        else:
+            # If radio is NOT playing, do the normal follow-up logic.
+            logger.info("Radio not playing, proceeding to follow-up.")
+            await self.mpd_client.unduck()
+
+            if not self._playback_interrupted:
+                logger.info(
+                    "Waiting for follow-up (%.1fs, Silero VAD)...",
+                    self.live_cfg.followup_timeout,
+                )
+                if self._sound_player:
+                    self._sound_player.play(SoundEvent.FOLLOW_UP)
+                if self._hybrid_vad:
+                    self._hybrid_vad.reset()
+                self._set_state(SpeakerState.FOLLOW_UP)
+            else:
+                await self._finish_turn()
+
+    async def _finish_turn(self, play_end_sound: bool = True) -> None:
+        """Common cleanup after conversation turn is finished."""
+        # If a barge-in happened while radio was playing, unduck the volume.
+        if self._playback_interrupted:
+            await self.mpd_client.unduck()
+
         while not self._api_input_queue.empty():
             try:
                 self._api_input_queue.get_nowait()
@@ -709,8 +803,7 @@ class AudioOrchestrator:
         if self._hybrid_vad:
             self._hybrid_vad.reset()
 
-        # Play end conversation sound
-        if self._sound_player:
+        if play_end_sound and self._sound_player:
             self._sound_player.play(SoundEvent.END_CONVERSATION)
 
         self._set_state(SpeakerState.IDLE)
@@ -724,6 +817,11 @@ class AudioOrchestrator:
             )
         else:
             logger.info("Listening for wake word...")
+
+    async def _duck_radio_if_playing(self) -> None:
+        """If radio is playing, duck the volume by calling the client."""
+        if self.mpd_client.is_playing():
+            await self.mpd_client.duck()
 
     async def _inactivity_monitor_task(self) -> None:
         """Monitor for session inactivity and close session after timeout."""

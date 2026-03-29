@@ -94,6 +94,12 @@ live:
     2.  If the user does not specify which light source (e.g., "turn on the light in the living room"), assume they mean the main light.
     3.  Items with `State`, `Temperature`, or `Humidity` in their name or description are read-only.
     4.  For controlling roller shutters, use percentage values (0-100).
+    5.  The playback volume for radio can be set using percentages (e.g., "set volume to 50%").
+    6.  For any radio-related requests (play, stop, status), always call `get_radio_status` first to understand the current state. Based on the result:
+        - If the user asks to "turn on radio" and a station is already on the playlist (`is_radio_on_playlist` is true), call `play_internet_radio` without parameters to resume.
+        - If no station is on the playlist, ask the user for a station name before calling a tool.
+        - If the user asks to "turn off radio" and something is playing (`playback_state` is 'play'), call `stop_radio`.
+        - If a specific station name is provided, use `play_internet_radio` with the `station_name`.
 
   temperature: 0.2
   response_modalities: ["AUDIO"]
@@ -112,10 +118,9 @@ live:
   
   enable_manual_vad: true
   api_vad_timeout: 2.0
-  vad_threshold: 0.5
   
   # Gemini-specific settings
-  model: "gemini-2.5-flash-native-audio-preview-12-2025"
+  model: "gemini-3.1-flash-live-preview"
   voice_name: "Zephyr" # Options: Aoede, Charon, Fenrir, Kore, Puck, Zephyr
   
   # OpenAI-specific settings
@@ -127,3 +132,20 @@ sound:
   volume: 1.0
   sounds_dir: null # Custom sounds directory (null = default)
   output_device: null # Audio device for sounds (null = default)
+
+radio:
+  # Country for radio station search
+  country: "Poland"
+  # To correctly identify stations that do not have "radio" in their name 
+  # (e.g., "BBC Radio 1" is fine, but "Classic FM" is not), add them to the 'popular_stations' list.
+  popular_stations:
+    - "RMF FM"
+    - "Radio ZET"
+    - "Classic FM"
+
+mpd:
+  host: "localhost"
+  port: 6600
+  volume_fade_in_seconds: 1.0  # Duration of volume fade-in (resuming)
+  volume_duck_percentage: 20 # Volume percentage during conversation
+  default_playback_volume: 70 # Default playback volume if no previous volume is known

@@ -166,3 +166,55 @@ For example, to run the tool in dry-run mode and save the recording to a custom 
 ```bash
 python -m tools.respeaker_delay_tune --dry-run --recording-dir /path/to/recordings
 ```
+
+## Internet Radio and MPD Integration
+
+The assistant can play internet radio stations using the **Music Player Daemon (MPD)**, a flexible and powerful server for music playback.
+
+### 1. MPD (Music Player Daemon) Setup
+
+MPD is used as a dedicated and stable service to handle the audio playback of internet radio streams. This separates the playback from the main application logic, improving reliability.
+
+**Installation (Debian/Raspberry Pi OS):**
+
+```bash
+sudo apt-get update
+sudo apt-get install mpd
+```
+
+For this project, the application communicates with MPD over a local network connection. The default MPD configuration (`/etc/mpd.conf`) is usually sufficient if the application is running on the same device (e.g., the Raspberry Pi).
+
+If you are running MPD on a different machine or need to customize its settings, you can specify the host and port in your `config.yml`:
+
+```yaml
+mpd:
+  host: "localhost"
+  port: 6600
+```
+
+### 2. Using the Radio Functionality
+
+Once MPD is running, you can ask the assistant to play radio stations.
+
+**How it Works:**
+
+1.  **User Command:** You ask the assistant to play a radio station (e.g., "Play BBC Radio 1").
+2.  **Function Calling:** The LLM identifies your intent and uses the `search_radio_station` tool to find a matching station. This search can be improved by setting your country in `config.yml`.
+3.  **Stream Playback:** If a station is found, the tool returns the stream URL to the orchestrator.
+4.  **MPD Control:** The orchestrator commands the MPD client to clear its current playlist, add the new stream URL, and start playing.
+
+**Configuration:**
+
+To improve the accuracy of the radio station search, set your country in the `radio` section of `config.yml`:
+
+```yaml
+radio:
+  country: "Poland"
+```
+
+**Audio Ducking:**
+
+The system features automatic audio ducking. If the radio is playing and you say the wake word:
+
+-   The radio volume will be immediately lowered to a configured level (`mpd.volume_duck_percentage`).
+-   Once your conversation with the assistant is finished, the radio volume will fade back in to its previous level.

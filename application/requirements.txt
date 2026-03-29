@@ -8,6 +8,8 @@ scipy>=1.11,<2
 scikit-learn>=1,<2
 requests
 pyyaml>=6.0
+radios
+python-mpd2
 
 # Real-time API providers (install at least one)
 google-genai          # For Gemini Live API

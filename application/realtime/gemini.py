@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 from typing import Optional
 from google import genai
@@ -389,19 +390,43 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         Handle a list of function calls from the API's tool_call.
 
         Executes each function call and sends the results back to the API
-        in a single tool response.
+        in a single tool response. Some tools are deferred for later execution.
         """
         function_responses = []
 
         for function_call in function_calls:
             function_name = function_call.name
-            logger.info(f"Tool call: {function_name} with args {function_call.args}")
+            args = function_call.args
+            logger.info(f"Tool call: {function_name} with args {args}")
             try:
-                # Get the function from the registry
-                func = get_function(function_name)
-                # Call the function with the provided arguments
-                result = func(**function_call.args)
+                # Defer playback volume changes for execution by the orchestrator after the response.
+                # This is handled separately because the function is not executed here, only queued.
+                if function_name == "set_playback_volume":
+                    logger.info(f"Deferring tool call '{function_name}' for post-response execution.")
+                    self.radio_info.append({"type": function_name, "payload": args})
+                    result = f"Action '{function_name}' has been queued for execution after the response."
+                else:
+                    # Execute all other tools immediately.
+                    func = get_function(function_name)
+                    result = await func(**args) if inspect.iscoroutinefunction(func) else func(**args)
 
+                    # For some tools, we also defer the action to the orchestrator based on the result.
+                    # This allows the AI to respond verbally before the action (e.g., playing music) starts.
+                    if function_name == "play_internet_radio" and isinstance(result, dict):
+                        if "url" in result or (
+                            "action" in result and result["action"] == "play"
+                        ):
+                            self.radio_info.append({"type": function_name, "payload": result})
+                            logger.info(
+                                "Radio info set for orchestrator: %s", self.radio_info
+                            )
+                    # Special handling for stop_radio which is also deferred.
+                    elif function_name == "stop_radio" and result == "Radio will be stopped.":
+                        self.radio_info.append({"type": function_name, "payload": {}})
+                        logger.info(
+                            "Radio info set for orchestrator: %s", self.radio_info
+                        )
+                
                 function_responses.append(
                     FunctionResponse(
                         id=function_call.id,
@@ -411,7 +436,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 )
                 logger.info(f"Tool call {function_name} successful, result: {result}")
             except Exception as e:
-                logger.error(f"Error executing tool call {function_name}: {e}")
+                logger.error(f"Error handling tool call {function_name}: {e}")
                 function_responses.append(
                     FunctionResponse(
                         id=function_call.id,
