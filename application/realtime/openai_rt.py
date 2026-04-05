@@ -423,9 +423,10 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 break
             except Exception as e:
                 logger.error("Receive from API error: %s", e)
-                if not self._running:
-                    break
-                await asyncio.sleep(0.5)
+                self._session_active = False
+                if self._on_turn_complete:
+                    self._on_turn_complete()
+                break
 
     # -------------------------------------------------------------------------
     # Event processing
@@ -615,9 +616,23 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             logger.debug("Unhandled event: %s", event_type)
 
     async def _handle_tool_call(self, tool_call: dict):
-        """Handle a tool call from the API based on the new documentation."""
+        """
+        Handle a tool call from the API using an optimistic execution strategy.
+
+        - **Immediate Functions** (`get_radio_status`, etc.): Executed instantly,
+          and their real results are sent back to the API.
+        - **Deferred Functions** (`play...`, `stop...`, `set_volume...`):
+          The action is added to a queue (`self.pending_actions`) for the Orchestrator
+          to execute AFTER the AI finishes speaking. A fake "success" message
+          is sent to the API immediately to prevent deadlocks and allow the AI
+          to generate its verbal response.
+        """
         call_id = tool_call.get("call_id")
         function_name = tool_call.get("name")
+        DEFERRED_FUNCTIONS = {
+            "play_internet_radio",
+            "set_playback_volume",
+        }
 
         try:
             # Arguments are a JSON string
@@ -625,59 +640,66 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         except json.JSONDecodeError:
             args = {}
 
-        logger.info(f"Tool call: {function_name} with args {args}")
+        logger.info(f"Handling tool call: {function_name} with args {args}")
 
-        result_payload = {}
+        output_str: str
         try:
-            # Defer playback volume changes for execution by the orchestrator after the response.
-            # This is handled separately because the function is not executed here, only queued.
-            if function_name == "set_playback_volume":
-                logger.info(
-                    f"Deferring tool call '{function_name}' for post-response execution."
+            func = get_function(function_name)
+            result: any
+
+            if function_name in DEFERRED_FUNCTIONS:
+                # Defer execution by getting metadata from the function call
+                payload = (
+                    await func(**args)
+                    if inspect.iscoroutinefunction(func)
+                    else func(**args)
                 )
-                # Use radio_info as a generic queue for a pending action.
-                self.radio_info.append({"type": function_name, "payload": args})
-                result = f"Action '{function_name}' has been queued for execution after the response."
+                # Add to the queue for the orchestrator to handle later
+                self.pending_actions.append({"type": function_name, "payload": payload})
+                logger.info(
+                    f"Deferring '{function_name}' for post-response execution. Payload: {payload}"
+                )
+                # Lie to the model, telling it the action was successful
+                result = {"status": "success"}
             else:
-                # Execute all other tools immediately.
-                func = get_function(function_name)
+                # Execute immediately for non-deferred functions
+                logger.info(f"Executing '{function_name}' immediately.")
                 result = (
                     await func(**args)
                     if inspect.iscoroutinefunction(func)
                     else func(**args)
                 )
 
-                # For some tools, we also defer the action to the orchestrator based on the result.
-                # This allows the AI to respond verbally before the action (e.g., playing music) starts.
-                if function_name == "play_internet_radio" and isinstance(result, dict):
-                    if "url" in result or ("action" in result and result["action"] == "play"):
-                        self.radio_info.append({"type": function_name, "payload": result})
-                        logger.info("Radio info set for orchestrator: %s", self.radio_info)
-                
-                # Special handling for stop_radio which is also deferred.
-                elif function_name == "stop_radio" and result == "Radio will be stopped.":
-                    self.radio_info.append({"type": function_name, "payload": {}})
-                    logger.info("Radio info set for orchestrator: %s", self.radio_info)
+            logger.info(
+                f"Tool call '{function_name}' handled. Result for API: {result}"
+            )
 
-            result_payload = {"result": result}
-            logger.info(f"Tool call {function_name} successful, result: {result}")
+            # Format the output for the OpenAI API, which expects a JSON string.
+            if isinstance(result, (dict, list)):
+                output_str = json.dumps(result)
+            else:
+                output_str = str(result)
+
         except Exception as e:
             logger.error(f"Error executing tool call {function_name}: {e}")
-            result_payload = {"error": f"Error executing function: {e}"}
+            output_str = json.dumps(
+                {"status": "error", "details": f"Error executing function: {e}"}
+            )
 
         try:
-            # Send the result back to the API
+            # Send the real or faked result back to the API
             await self._ws_send(
                 {
                     "type": "conversation.item.create",
                     "item": {
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": json.dumps(result_payload),
+                        "output": output_str,
                     },
                 }
             )
             # Ask the model to respond to the tool call result
             await self._ws_send({"type": "response.create"})
+            logger.debug(f"Sent tool result for '{function_name}' and requested new response.")
         except Exception as e:
             logger.error(f"Failed to send tool call result for {function_name}: {e}")

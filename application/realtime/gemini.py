@@ -276,9 +276,10 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 import traceback
 
                 traceback.print_exc()
-                if not self._running:
-                    break
-                await asyncio.sleep(0.5)
+                self._session_active = False
+                if self._on_turn_complete:
+                    self._on_turn_complete()
+                break
 
     async def _process_api_response(self, response: LiveServerMessage) -> None:
         """Process a single response from the Gemini API."""
@@ -387,54 +388,73 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
     async def _handle_tool_calls(self, function_calls: list[FunctionCall]):
         """
-        Handle a list of function calls from the API's tool_call.
+        Handle a list of function calls from the API using an optimistic execution strategy.
 
-        Executes each function call and sends the results back to the API
-        in a single tool response. Some tools are deferred for later execution.
+        - **Immediate Functions** (`get_radio_status`, etc.): Executed instantly,
+          and their real results are sent back to the API.
+        - **Deferred Functions** (`play...`, `stop...`, `set_volume...`):
+          The action is added to a queue (`self.pending_actions`) for the Orchestrator
+          to execute AFTER the AI finishes speaking. A fake "success" message
+          is sent to the API immediately to prevent deadlocks and allow the AI
+          to generate its verbal response.
         """
         function_responses = []
+        DEFERRED_FUNCTIONS = {
+            "play_internet_radio",
+            "set_playback_volume",
+        }
 
         for function_call in function_calls:
             function_name = function_call.name
             args = function_call.args
-            logger.info(f"Tool call: {function_name} with args {args}")
-            try:
-                # Defer playback volume changes for execution by the orchestrator after the response.
-                # This is handled separately because the function is not executed here, only queued.
-                if function_name == "set_playback_volume":
-                    logger.info(f"Deferring tool call '{function_name}' for post-response execution.")
-                    self.radio_info.append({"type": function_name, "payload": args})
-                    result = f"Action '{function_name}' has been queued for execution after the response."
-                else:
-                    # Execute all other tools immediately.
-                    func = get_function(function_name)
-                    result = await func(**args) if inspect.iscoroutinefunction(func) else func(**args)
+            logger.info(f"Handling tool call: {function_name} with args {args}")
 
-                    # For some tools, we also defer the action to the orchestrator based on the result.
-                    # This allows the AI to respond verbally before the action (e.g., playing music) starts.
-                    if function_name == "play_internet_radio" and isinstance(result, dict):
-                        if "url" in result or (
-                            "action" in result and result["action"] == "play"
-                        ):
-                            self.radio_info.append({"type": function_name, "payload": result})
-                            logger.info(
-                                "Radio info set for orchestrator: %s", self.radio_info
-                            )
-                    # Special handling for stop_radio which is also deferred.
-                    elif function_name == "stop_radio" and result == "Radio will be stopped.":
-                        self.radio_info.append({"type": function_name, "payload": {}})
-                        logger.info(
-                            "Radio info set for orchestrator: %s", self.radio_info
-                        )
-                
+            try:
+                func = get_function(function_name)
+                result: any
+
+                if function_name in DEFERRED_FUNCTIONS:
+                    # Defer execution by getting metadata from the function call
+                    payload = (
+                        await func(**args)
+                        if inspect.iscoroutinefunction(func)
+                        else func(**args)
+                    )
+                    # Add to the queue for the orchestrator to handle later
+                    self.pending_actions.append({"type": function_name, "payload": payload})
+                    logger.info(
+                        f"Deferring '{function_name}' for post-response execution. Payload: {payload}"
+                    )
+                    # Lie to the model, telling it the action was successful to not block conversation flow
+                    result = {"status": "success"}
+                else:
+                    # Execute immediately for non-deferred functions
+                    logger.info(f"Executing '{function_name}' immediately.")
+                    result = (
+                        await func(**args)
+                        if inspect.iscoroutinefunction(func)
+                        else func(**args)
+                    )
+
+                logger.info(
+                    f"Tool call '{function_name}' handled. Result for API: {result}"
+                )
+
+                # Format the response dictionary for the Gemini API.
+                response_dict: dict
+                if isinstance(result, dict):
+                    response_dict = result
+                else:
+                    response_dict = {"result": str(result)}
+
                 function_responses.append(
                     FunctionResponse(
                         id=function_call.id,
                         name=function_name,
-                        response={"result": result},
+                        response=response_dict,
                     )
                 )
-                logger.info(f"Tool call {function_name} successful, result: {result}")
+
             except Exception as e:
                 logger.error(f"Error handling tool call {function_name}: {e}")
                 function_responses.append(
@@ -445,5 +465,6 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     )
                 )
 
-        # Send all responses back to the API in one go
+        # Send all responses (real or fake) back to the API
+        logger.debug(f"Sending tool responses to API: {function_responses}")
         await self._session.send_tool_response(function_responses=function_responses)

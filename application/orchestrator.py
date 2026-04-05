@@ -145,7 +145,7 @@ class AudioOrchestrator:
         logger.info("Starting Voice Assistant...")
 
         # Initialize MPD state now that event loop is running
-        self.mpd_client.initialize_state()
+        await self.mpd_client.initialize_state()
 
         # Initialize audio I/O (SoundDevice)
         self._audio_input = AudioInput(self.audio_cfg, self._mic_queue)
@@ -174,6 +174,7 @@ class AudioOrchestrator:
         self._api_manager.initialize()
         self._api_manager.set_callbacks(
             on_turn_complete=self._on_turn_complete,
+            on_interrupted=self._on_interrupted,
         )
 
         # Thread pool for CPU-bound tasks (wake word, VAD)
@@ -213,6 +214,14 @@ class AudioOrchestrator:
         """Callback when API signals turn complete."""
         self._turn_complete_event.set()
 
+    def _on_interrupted(self) -> None:
+        """Callback when API signals interruption."""
+        if self._state == SpeakerState.RESPONDING:
+            logger.info("API signaled interruption, executing barge-in")
+            # Schedule the barge-in coroutine safely from synchronous callback
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._execute_barge_in())
+
     async def _cleanup(self) -> None:
         """Clean up all resources."""
         self._running = False
@@ -223,7 +232,7 @@ class AudioOrchestrator:
             await self._api_manager.close_session()
 
         # Disconnect from MPD
-        self.mpd_client.disconnect()
+        await self.mpd_client.disconnect()
 
         # Close session recording
         self._close_session_recording()
@@ -700,64 +709,52 @@ class AudioOrchestrator:
         Handles executing a queue of deferred actions (like radio/volume changes)
         and subsequent state transitions after the AI response.
         """
-        pending_actions = list(self._api_manager.radio_info) if self._api_manager else []
+        pending_actions = (
+            list(self._api_manager.pending_actions) if self._api_manager else []
+        )
         if self._api_manager:
-            self._api_manager.radio_info.clear()  # Consume the actions
+            self._api_manager.pending_actions.clear()  # Consume the actions
 
-        radio_action_handled = False
+        # Flag to determine if the turn should end immediately after actions.
+        # Play and Stop actions should end the turn.
+        # Volume changes alone should not.
+        turn_should_end = False
 
         # Execute deferred actions now that the AI has finished speaking
-        # The LLM should provide them in a sensible order (e.g., set volume before play)
         for action in pending_actions:
             action_type = action.get("type")
             payload = action.get("payload", {})
 
             if action_type == "play_internet_radio":
-                logger.info("AI response finished. Executing deferred action: play_internet_radio")
-                if "url" in payload:
+                logger.info(
+                    "AI response finished. Executing deferred action: play_internet_radio"
+                )
+                if payload.get("url"):
                     await self.mpd_client.play_station(payload["url"])
-                elif "action" in payload and payload["action"] == "play":
+                elif payload.get("action") == "play":
                     await self.mpd_client.play()
-                radio_action_handled = True
-            elif action_type == "stop_radio":
-                logger.info("AI response finished. Executing deferred action: stop_radio")
-                self.mpd_client.stop()
-                radio_action_handled = True
+                turn_should_end = True
             elif action_type == "set_playback_volume":
-                logger.info("AI response finished. Executing deferred action: set_playback_volume")
+                logger.info(
+                    "AI response finished. Executing deferred action: set_playback_volume"
+                )
                 if "volume_percentage" in payload:
-                    # Run volume change in the background. set_volume() updates the
-                    # internal _restore_volume synchronously, so a subsequent play
-                    # action in this loop will use the correct new volume.
-                    asyncio.create_task(self.mpd_client.set_volume(payload["volume_percentage"]))
-                radio_action_handled = True
+                    await self.mpd_client.set_volume(payload["volume_percentage"])
+                # Note: a volume change alone does not end the turn.
 
-        # If a radio action was taken, we don't need the default unduck logic
-        if radio_action_handled:
-            if self.mpd_client.is_playing():
-                logger.info("Radio is playing, ending turn.")
-                await self._finish_turn(play_end_sound=False)
-            else:
-                # This path is taken if the action was to stop the radio.
-                logger.info("Radio not playing, proceeding to follow-up.")
-                await self.mpd_client.unduck()
-
-                if not self._playback_interrupted:
-                    logger.info(
-                        "Waiting for follow-up (%.1fs, Silero VAD)...",
-                        self.live_cfg.followup_timeout,
-                    )
-                    if self._sound_player:
-                        self._sound_player.play(SoundEvent.FOLLOW_UP)
-                    if self._hybrid_vad:
-                        self._hybrid_vad.reset()
-                    self._set_state(SpeakerState.FOLLOW_UP)
-                else:
-                    await self._finish_turn()
+        # If a play or stop action was taken, end the turn.
+        if turn_should_end:
+            # The unduck is a safety measure in case a stop command left the
+            # player in a ducked state. It has no effect if not ducked.
+            await self.mpd_client.unduck()
+            logger.info("Radio action performed, ending turn.")
+            await self._finish_turn(play_end_sound=False)
             return
 
-        # Decide on next state based on radio status (if no radio action was taken)
-        if self.mpd_client.is_playing():
+        # --- Original logic for non-radio-related commands ---
+        # (or for volume changes that didn't accompany a play/stop)
+        # Decide on next state based on radio status.
+        if await self.mpd_client.is_playing():
             # If radio is playing, unduck volume and end turn without follow-up.
             logger.info("Radio is playing, restoring volume and ending turn.")
             await self.mpd_client.unduck()
@@ -820,7 +817,7 @@ class AudioOrchestrator:
 
     async def _duck_radio_if_playing(self) -> None:
         """If radio is playing, duck the volume by calling the client."""
-        if self.mpd_client.is_playing():
+        if await self.mpd_client.is_playing():
             await self.mpd_client.duck()
 
     async def _inactivity_monitor_task(self) -> None:

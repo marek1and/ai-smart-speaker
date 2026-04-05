@@ -123,7 +123,7 @@ class LiveConfig:
 
     # --- OpenAI-specific settings ---
     openai_model: str = "gpt-realtime"
-    openai_voice: str = "shimmer"  # OpenAI voice (alloy, ash, ballad, coral, echo, sage, marin, shimmer, verse)
+    openai_voice: str = "marin"  # OpenAI voice (marin, cedar, alloy, ash, ballad, coral, echo, sage, shimmer, verse)
 
 
 @dataclass
@@ -169,7 +169,7 @@ class MPDConfig:
     volume_fade_in_seconds: float = 2.0  # Duration of volume fade-in (resuming)
     volume_duck_percentage: int = 20  # Volume percentage during conversation
     default_playback_volume: int = (
-        70  # Default playback volume if no previous volume is known
+        50  # Default playback volume if no previous volume is known
     )
 
 

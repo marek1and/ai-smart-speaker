@@ -199,7 +199,7 @@ Once MPD is running, you can ask the assistant to play radio stations.
 **How it Works:**
 
 1.  **User Command:** You ask the assistant to play a radio station (e.g., "Play BBC Radio 1").
-2.  **Function Calling:** The LLM identifies your intent and uses the `search_radio_station` tool to find a matching station. This search can be improved by setting your country in `config.yml`.
+2.  **Function Calling:** The LLM identifies your intent and uses the `play_internet_radio` tool to find a matching station. This search can be improved by setting your country in `config.yml`.
 3.  **Stream Playback:** If a station is found, the tool returns the stream URL to the orchestrator.
 4.  **MPD Control:** The orchestrator commands the MPD client to clear its current playlist, add the new stream URL, and start playing.
 
