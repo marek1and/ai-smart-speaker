@@ -1,0 +1,20 @@
+[Unit]
+Description=AI Smart Speaker Service
+After=network.target pipewire.service wireplumber.service mpd.service
+Requires=pipewire.service wireplumber.service mpd.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ai-smart-speaker
+ExecStart=/opt/ai-smart-speaker/.venv/bin/python main.py
+
+# Automatyczny restart w przypadku błędu
+Restart=on-failure
+RestartSec=5
+
+# Logs landing in journalctl (np. journalctl --user-unit ai-smart-speaker -f)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

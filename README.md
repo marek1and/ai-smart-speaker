@@ -97,6 +97,32 @@ Photos of the assembly process are located in `hardware/pictures/`. The logical 
 
 The Raspberry Pi 5 runs a modern Linux audio stack optimized for low-latency voice processing. For details on the Python application, see the [Application README](./application/README.md).
 
+### Autostart Configuration (systemd)
+
+To configure the application to start automatically on boot as a user service, follow these steps on the Raspberry Pi:
+
+1. Copy the provided systemd service file to your user's systemd configuration directory:
+   ```bash
+   mkdir -p ~/.config/systemd/user
+   cp linux/home/user/.config/systemd/user/ai-smart-speaker.service ~/.config/systemd/user/
+   ```
+
+2. Enable "lingering" for your user account. This is crucial as it allows user services to start on boot without requiring you to log in:
+   ```bash
+   loginctl enable-linger $USER
+   ```
+
+3. Reload the systemd user daemon, then enable and start the service:
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user enable --now ai-smart-speaker.service
+   ```
+
+4. You can view the real-time application logs using `journalctl`:
+   ```bash
+   journalctl --user-unit ai-smart-speaker -f
+   ```
+
 ### Audio Stack: PipeWire & WirePlumber
 
 The system uses **PipeWire** to manage audio routing. This allows for seamless handling of the high-resolution DAC output and the reSpeaker microphone input.
