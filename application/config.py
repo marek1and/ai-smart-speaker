@@ -49,7 +49,7 @@ class WakeWordConfig:
     """Wake word detection configuration."""
 
     model_id: str = "alexa"  # Available: alexa, hey_mycroft, hey_jarvis
-    threshold: float = 0.65  # Increased to reduce false positives from TV/music
+    threshold: float = 0.8  # Increased to reduce false positives from TV/music
     window_seconds: float = 0.8
     cooldown_seconds: float = 2.5  # Prevent re-triggers after detection
 
@@ -62,7 +62,7 @@ class VADConfig:
     mode: str = "silero"
 
     # Silero VAD settings
-    silero_threshold: float = 0.6  # Probability threshold for speech (0.0-1.0)
+    silero_threshold: float = 0.7  # Probability threshold for speech (0.0-1.0)
     silero_frame_size: int = 512  # Frame size for Silero (512 samples @ 16kHz = 32ms)
 
     # RMS VAD settings (fallback)
