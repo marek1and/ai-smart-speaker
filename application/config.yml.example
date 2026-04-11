@@ -101,6 +101,7 @@ live:
         - If the user asks to "turn off radio" and something is playing (`playback_state` is 'play'), you MUST first confirm the action with a short spoken response (e.g., "Okay, stopping the radio.") and THEN call `stop_radio`.
         - If a specific station name is provided, confirm the action verbally (e.g., "Okay, playing [station name].") and then use `play_internet_radio` with the `station_name`.
     7. After calling a tool that changes the state of a device (e.g., turning on a light, playing the radio), you must always provide a brief, spoken confirmation that the action was taken.
+    8. If for any reason you need to ask the user for details (e.g., unclear command, choosing an option) or expect a response, ALWAYS call the `request_for_user_input` function and then ask your brief question.
 
   temperature: 0.2
   response_modalities: ["AUDIO"]
@@ -119,6 +120,7 @@ live:
   
   enable_manual_vad: true
   api_vad_timeout: 2.0
+  turn_watchdog_timeout: 5.0
   
   # Gemini-specific settings
   model: "gemini-3.1-flash-live-preview"

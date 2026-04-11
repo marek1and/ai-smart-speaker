@@ -110,6 +110,15 @@ async def set_playback_volume(volume_percentage: int) -> dict:
     return {"volume_percentage": volume_percentage}
 
 
+@register_function(name="request_for_user_input")
+def request_for_user_input() -> dict:
+    """
+    Requests user input. This function is a dummy implementation
+    as it is handled internally by the realtime managers.
+    """
+    return {"status": "success"}
+
+
 @register_function(name="get_current_time")
 def get_current_time() -> str:
     """Gets the current time."""

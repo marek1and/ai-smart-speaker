@@ -90,6 +90,16 @@ GET_RADIO_STATUS_FUNC = FunctionDeclaration(
     ),
 )
 
+REQUEST_FOR_USER_INPUT_FUNC = FunctionDeclaration(
+    name="request_for_user_input",
+    description="Requests user input. Use this function when you need to ask the user a question or wait for their response.",
+    parameters=Schema(
+        type=Type.OBJECT,
+        properties={},
+        required=[],
+    ),
+)
+
 GEMINI_TOOLS = [
     Tool(
         function_declarations=[
@@ -101,6 +111,7 @@ GEMINI_TOOLS = [
             STOP_RADIO_FUNC,
             SET_PLAYBACK_VOLUME_FUNC,
             GET_RADIO_STATUS_FUNC,
+            REQUEST_FOR_USER_INPUT_FUNC,
         ]
     )
 ]
@@ -204,6 +215,16 @@ OPENAI_TOOLS = [
         "type": "function",
         "name": "get_radio_status",
         "description": "Gets the current status of the radio, including playback state, volume, and whether a radio station is currently in the playlist. This should be the first step for any radio related query.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "request_for_user_input",
+        "description": "Requests user input. Use this function when you need to ask the user a question or wait for their response.",
         "parameters": {
             "type": "object",
             "properties": {},

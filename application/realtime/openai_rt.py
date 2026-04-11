@@ -295,6 +295,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                     logger.debug("Conversation task cancelled")
                     raise
                 finally:
+                    self.cancel_watchdog()
                     for task in self._session_tasks:
                         task.cancel()
                     await asyncio.gather(*self._session_tasks, return_exceptions=True)
@@ -442,6 +443,8 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         - conversation.item.input_audio_transcription.completed  (user transcript)
         - response.done                  (turn complete, status: completed|cancelled)
         """
+        self.reset_watchdog_if_running()
+
         event_type = event.get("type", "")
 
         # --- Audio data ---
@@ -472,7 +475,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
             self._chunks_received += 1
             self._audio_bytes_received += len(audio_data)
-            self._response_started = True
+            self.response_started = True
             await self._output_queue.put(audio_data)
 
             if self._chunks_received == 1:
@@ -497,12 +500,13 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             delta = event.get("delta", "")
             if delta:
                 logger.info("Text: %s", delta[:200])
-                self._response_started = True
+                self.response_started = True
                 if self._on_text_received:
                     self._on_text_received(delta)
 
         # --- Response complete (= turn complete) ---
         elif event_type == "response.done":
+            self.cancel_watchdog()
             self._is_response_item_in_progress = False
             response = event.get("response", {})
             status = response.get("status", "")
@@ -644,10 +648,15 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
         output_str: str
         try:
-            func = get_function(function_name)
-            result: any
+            # 1. Immediate override for compatibility with Gemini state machine fix
+            if function_name == "request_for_user_input":
+                logger.info("Received 'request_for_user_input' tool call. Bypassing execution.")
+                self._request_for_user_input = True
+                result = {"status": "success"}
 
-            if function_name in DEFERRED_FUNCTIONS:
+            # 2. Deferred execution handling
+            elif function_name in DEFERRED_FUNCTIONS:
+                func = get_function(function_name)
                 # Defer execution by getting metadata from the function call
                 payload = (
                     await func(**args)
@@ -661,7 +670,10 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 )
                 # Lie to the model, telling it the action was successful
                 result = {"status": "success"}
+
+            # 3. Standard execution for immediate functions
             else:
+                func = get_function(function_name)
                 # Execute immediately for non-deferred functions
                 logger.info(f"Executing '{function_name}' immediately.")
                 result = (
@@ -701,5 +713,8 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             # Ask the model to respond to the tool call result
             await self._ws_send({"type": "response.create"})
             logger.debug(f"Sent tool result for '{function_name}' and requested new response.")
+            
+            # Start watchdog in case API hangs after function call without sending turn_complete
+            self.start_watchdog(timeout=self.live_cfg.turn_watchdog_timeout)
         except Exception as e:
             logger.error(f"Failed to send tool call result for {function_name}: {e}")

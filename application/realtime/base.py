@@ -36,6 +36,7 @@ class BaseRealtimeManager(ABC):
         self._on_text_received: Optional[Callable[[str], None]] = None
         self._on_turn_complete: Optional[Callable[[], None]] = None
         self._on_interrupted: Optional[Callable[[], None]] = None
+        self._on_turn_timeout: Optional[Callable[[], None]] = None
 
         # State tracking
         self._running: bool = False
@@ -61,6 +62,11 @@ class BaseRealtimeManager(ABC):
 
         # Pending actions for deferred execution
         self.pending_actions: list = []
+
+        # Watchdog for tool calls
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._watchdog_timeout: float = 5.0
+        self._request_for_user_input: bool = False
 
     # -------------------------------------------------------------------------
     # Abstract methods (provider-specific)
@@ -126,6 +132,9 @@ class BaseRealtimeManager(ABC):
 
     @response_started.setter
     def response_started(self, value: bool) -> None:
+        if value and not self._response_started:
+            logger.debug("API response started, starting global watchdog (%.1fs)", self._watchdog_timeout)
+            self.start_watchdog(self._watchdog_timeout)
         self._response_started = value
 
     @property
@@ -155,22 +164,57 @@ class BaseRealtimeManager(ABC):
     # Common methods
     # -------------------------------------------------------------------------
 
+    @property
+    def request_for_user_input(self) -> bool:
+        """Returns True if the API requested user input via function call."""
+        return self._request_for_user_input
+
     def start_new_turn(self) -> None:
         """
         Start a new conversation turn.
 
         Increments the turn generation to ignore any stale data from previous turns.
         """
+        self.cancel_watchdog()
         self._turn_generation += 1
         self._active_turn_generation = self._turn_generation
         self._frames_sent = 0
         self._chunks_received = 0
         self._response_started = False
         self._activity_started = False
+        self._request_for_user_input = False
         self._user_transcript = ""
         self._ai_transcript = ""
         self.pending_actions.clear()
         logger.debug("Starting new turn (generation=%d)", self._turn_generation)
+
+    def start_watchdog(self, timeout: float = 5.0) -> None:
+        """Start a watchdog timer for the turn to complete."""
+        self.cancel_watchdog()
+        self._watchdog_timeout = timeout
+        self._watchdog_task = asyncio.create_task(self._watchdog_coro(timeout))
+
+    def reset_watchdog_if_running(self) -> None:
+        """Reset the watchdog timer if it is currently active."""
+        if self._watchdog_task and not self._watchdog_task.done():
+            self.start_watchdog(self._watchdog_timeout)
+
+    async def _watchdog_coro(self, timeout: float) -> None:
+        try:
+            await asyncio.sleep(timeout)
+            logger.warning(
+                "Watchdog timeout (%.1fs)! API did not send turn_complete.", timeout
+            )
+            if self._on_turn_timeout:
+                self._on_turn_timeout()
+        except asyncio.CancelledError:
+            logger.debug("Watchdog cancelled.")
+
+    def cancel_watchdog(self) -> None:
+        """Cancel the active watchdog timer."""
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+        self._watchdog_task = None
 
     def set_callbacks(
         self,
@@ -178,9 +222,11 @@ class BaseRealtimeManager(ABC):
         on_text_received: Optional[Callable[[str], None]] = None,
         on_turn_complete: Optional[Callable[[], None]] = None,
         on_interrupted: Optional[Callable[[], None]] = None,
+        on_turn_timeout: Optional[Callable[[], None]] = None,
     ) -> None:
         """Set callbacks for API events."""
         self._on_audio_received = on_audio_received
         self._on_text_received = on_text_received
         self._on_turn_complete = on_turn_complete
         self._on_interrupted = on_interrupted
+        self._on_turn_timeout = on_turn_timeout

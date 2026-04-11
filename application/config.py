@@ -103,7 +103,7 @@ class LiveConfig:
     barge_in: bool = True
 
     # Session management
-    session_inactivity_timeout: float = 30.0  # Close session after N seconds idle
+    session_inactivity_timeout: float = 10.0  # Close session after N seconds idle
     max_reconnect_attempts: int = 3
 
     # Follow-up conversation
@@ -114,6 +114,7 @@ class LiveConfig:
 
     # API VAD settings (failsafe with long timeout)
     api_vad_timeout: float = 2.0  # API-side silence timeout (failsafe)
+    turn_watchdog_timeout: float = 5.0  # Watchdog timeout for turn completion
 
     # --- Gemini-specific settings ---
     model: str = "gemini-3.1-flash-live-preview"

@@ -95,6 +95,16 @@ live:
     You are a helpful assistant.
 ```
 
+### Conversation Flow & User Input
+
+To make the conversation feel natural and avoid the assistant waiting for user input when it's not expected, the assistant uses a special tool called `request_for_user_input`.
+
+If you want the assistant to ask follow-up questions or wait for your response after it performs an action, you should explicitly instruct it in the system prompt to call the `request_for_user_input` function. For example:
+
+*   "If you need to ask the user for details or expect a response, ALWAYS call the `request_for_user_input` function."
+
+This allows the AI to control the conversation flow, deciding when to keep listening and when to end the turn.
+
 ### Smart Home Integration (OpenHAB)
 
 This application supports controlling smart home devices through an OpenHAB instance. This is achieved using the "function calling" or "tools" feature of the selected AI model (Gemini or OpenAI). The assistant can understand natural language commands (e.g., "turn on the living room light"), and the LLM will translate this into a call to the appropriate function to interact with the OpenHAB REST API.

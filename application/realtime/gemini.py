@@ -219,6 +219,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     raise
                 finally:
                     # Cancel session tasks
+                    self.cancel_watchdog()
                     for task in self._session_tasks:
                         task.cancel()
                     await asyncio.gather(*self._session_tasks, return_exceptions=True)
@@ -283,6 +284,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
     async def _process_api_response(self, response: LiveServerMessage) -> None:
         """Process a single response from the Gemini API."""
+        self.reset_watchdog_if_running()
+
         if hasattr(response, "server_content") and response.server_content:
             sc = response.server_content
 
@@ -314,7 +317,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                                     continue
 
                                 self._chunks_received += 1
-                                self._response_started = True
+                                self.response_started = True
                                 await self._output_queue.put(data.data)
                                 if self._chunks_received == 1:
                                     logger.info("Receiving audio response...")
@@ -323,7 +326,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
                         if hasattr(part, "text") and part.text:
                             logger.info("Text: %s", part.text[:200])
-                            self._response_started = True
+                            self.response_started = True
                             if self._on_text_received:
                                 self._on_text_received(part.text)
 
@@ -349,6 +352,9 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
             # Handle turn complete
             if hasattr(sc, "turn_complete") and sc.turn_complete:
+                # Cancel the watchdog timer if it was started
+                self.cancel_watchdog()
+
                 # Ignore turn_complete if we haven't sent enough audio yet
                 # This prevents stale turn_complete from previous turns after barge-in
                 if (
@@ -410,10 +416,16 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             logger.info(f"Handling tool call: {function_name} with args {args}")
 
             try:
-                func = get_function(function_name)
-                result: any
+                # 1. Immediate override for Gemini state machine bug
+                if function_name == "request_for_user_input":
+                    logger.info("Received 'request_for_user_input' tool call. Bypassing execution and starting watchdog.")
+                    self._request_for_user_input = True
+                    self.start_watchdog(timeout=5.0)
+                    result = {"status": "success"}
 
-                if function_name in DEFERRED_FUNCTIONS:
+                # 2. Deferred execution handling
+                elif function_name in DEFERRED_FUNCTIONS:
+                    func = get_function(function_name)
                     # Defer execution by getting metadata from the function call
                     payload = (
                         await func(**args)
@@ -427,8 +439,10 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     )
                     # Lie to the model, telling it the action was successful to not block conversation flow
                     result = {"status": "success"}
+
+                # 3. Standard execution for immediate functions
                 else:
-                    # Execute immediately for non-deferred functions
+                    func = get_function(function_name)
                     logger.info(f"Executing '{function_name}' immediately.")
                     result = (
                         await func(**args)
@@ -468,3 +482,6 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         # Send all responses (real or fake) back to the API
         logger.debug(f"Sending tool responses to API: {function_responses}")
         await self._session.send_tool_response(function_responses=function_responses)
+        
+        # Start watchdog in case API hangs after function call without sending turn_complete
+        self.start_watchdog(timeout=self.live_cfg.turn_watchdog_timeout)

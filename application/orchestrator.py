@@ -175,6 +175,7 @@ class AudioOrchestrator:
         self._api_manager.set_callbacks(
             on_turn_complete=self._on_turn_complete,
             on_interrupted=self._on_interrupted,
+            on_turn_timeout=self._on_turn_timeout,
         )
 
         # Thread pool for CPU-bound tasks (wake word, VAD)
@@ -221,6 +222,11 @@ class AudioOrchestrator:
             # Schedule the barge-in coroutine safely from synchronous callback
             loop = asyncio.get_running_loop()
             loop.create_task(self._execute_barge_in())
+
+    def _on_turn_timeout(self) -> None:
+        """Callback when API hangs (watchdog timeout)."""
+        logger.warning("API turn timeout detected, treating as turn_complete")
+        self._turn_complete_event.set()
 
     async def _cleanup(self) -> None:
         """Clean up all resources."""
@@ -761,19 +767,23 @@ class AudioOrchestrator:
             await self._finish_turn(play_end_sound=False)
         else:
             # If radio is NOT playing, do the normal follow-up logic.
-            logger.info("Radio not playing, proceeding to follow-up.")
+            logger.info("Radio not playing, proceeding to post-response logic.")
             await self.mpd_client.unduck()
 
             if not self._playback_interrupted:
-                logger.info(
-                    "Waiting for follow-up (%.1fs, Silero VAD)...",
-                    self.live_cfg.followup_timeout,
-                )
-                if self._sound_player:
-                    self._sound_player.play(SoundEvent.FOLLOW_UP)
-                if self._hybrid_vad:
-                    self._hybrid_vad.reset()
-                self._set_state(SpeakerState.FOLLOW_UP)
+                if self._api_manager.request_for_user_input:
+                    logger.info(
+                        "Waiting for follow-up (%.1fs, Silero VAD)...",
+                        self.live_cfg.followup_timeout,
+                    )
+                    if self._sound_player:
+                        self._sound_player.play(SoundEvent.FOLLOW_UP)
+                    if self._hybrid_vad:
+                        self._hybrid_vad.reset()
+                    self._set_state(SpeakerState.FOLLOW_UP)
+                else:
+                    logger.info("Follow-up not requested, ending turn.")
+                    await self._finish_turn()
             else:
                 await self._finish_turn()
 
