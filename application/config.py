@@ -52,6 +52,7 @@ class WakeWordConfig:
     threshold: float = 0.8  # Increased to reduce false positives from TV/music
     window_seconds: float = 0.8
     cooldown_seconds: float = 2.5  # Prevent re-triggers after detection
+    min_activation_frames: int = 2  # Consecutive frames above threshold required to trigger (reduces false positives)
 
 
 @dataclass
@@ -104,10 +105,15 @@ class LiveConfig:
 
     # Session management
     session_inactivity_timeout: float = 10.0  # Close session after N seconds idle
+    session_max_turns: int = 2  # Close session after N completed turns (fresh context on next wake)
     max_reconnect_attempts: int = 3
 
     # Follow-up conversation
-    followup_timeout: float = 3.0  # Seconds to wait for follow-up after AI response
+    followup_timeout: float = 5.0  # Seconds to wait for follow-up after AI response
+
+    # Initial silence timeout: close session if no speech detected after wake word
+    # Protects against false wake-word triggers (e.g., nearby TV or conversations)
+    initial_silence_timeout: float = 5.0
 
     # --- Manual VAD Control (Hybrid Strategy) ---
     enable_manual_vad: bool = True  # Use local Silero VAD for speech boundaries
@@ -115,6 +121,7 @@ class LiveConfig:
     # API VAD settings (failsafe with long timeout)
     api_vad_timeout: float = 2.0  # API-side silence timeout (failsafe)
     turn_watchdog_timeout: float = 5.0  # Watchdog timeout for turn completion
+    audio_done_watchdog_timeout: float = 3.0  # Tighter watchdog after audio stream ends (OpenAI response.output_audio.done)
 
     # --- Gemini-specific settings ---
     model: str = "gemini-3.1-flash-live-preview"

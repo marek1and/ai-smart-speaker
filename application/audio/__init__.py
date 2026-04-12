@@ -2,6 +2,7 @@
 
 from .input import AudioInput, extract_first_channel
 from .output import AudioOutput
+from .recorder import SessionRecorder
 from .sounds import SoundEvent, SoundPlayer
 from .vad import BaseVAD, HybridVAD, RMSVAD, SileroVAD, create_hybrid_vad, create_vad
 from .wake_word import WakeWordDetector
@@ -12,6 +13,7 @@ __all__ = [
     "BaseVAD",
     "HybridVAD",
     "RMSVAD",
+    "SessionRecorder",
     "SileroVAD",
     "SoundEvent",
     "SoundPlayer",

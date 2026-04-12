@@ -88,6 +88,16 @@ class MPDClientWrapper:
                 self.is_connected = False
                 self.client = MPDClient()
 
+    async def _reconnect_unsafe(self) -> bool:
+        """Disconnect and immediately reconnect. Must be called within a lock.
+
+        Used to recover from BrokenPipeError / ConnectionResetError without
+        waiting for the next caller to trigger a lazy reconnect.
+        """
+        logger.info("MPD reconnecting after connection reset...")
+        await self._disconnect_unsafe()
+        return await self._connect()
+
     async def play_station(self, url: str):
         """Clears the playlist, adds a new station, plays it, and fades the volume in."""
         async with self._mpd_lock:
@@ -100,10 +110,26 @@ class MPDClientWrapper:
                 await asyncio.to_thread(self.client.play)
                 logger.info("Started playing station: %s", url)
                 self._is_ducked = False
+            except (BrokenPipeError, ConnectionResetError) as e:
+                logger.warning("MPD connection reset during play_station (%s), reconnecting...", type(e).__name__)
+                if await self._reconnect_unsafe():
+                    try:
+                        await asyncio.to_thread(self.client.clear)
+                        await asyncio.to_thread(self.client.add, url)
+                        await self._set_internal_volume_unsafe(0)
+                        await asyncio.to_thread(self.client.play)
+                        logger.info("Started playing station after reconnect: %s", url)
+                        self._is_ducked = False
+                    except (MPDError, IOError) as retry_e:
+                        logger.error("Failed to play station after reconnect: %s", retry_e)
+                        await self._disconnect_unsafe()
+                        return
+                else:
+                    return
             except (MPDError, IOError) as e:
                 logger.error("Error playing station: %s", e)
                 await self._disconnect_unsafe()
-                return # Exit after error
+                return  # Exit after error
 
         # Run fade-in outside of the main lock to allow other operations
         await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
@@ -358,6 +384,15 @@ class MPDClientWrapper:
             return None
         try:
             return await asyncio.to_thread(self.client.status)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.warning("MPD connection reset during status check (%s), reconnecting...", type(e).__name__)
+            if await self._reconnect_unsafe():
+                try:
+                    return await asyncio.to_thread(self.client.status)
+                except Exception as retry_e:
+                    logger.error("MPD status failed after reconnect: %s", retry_e)
+                    await self._disconnect_unsafe()
+            return None
         except (MPDError, IOError, MPDConnectionError) as e:
             logger.error(f"Failed to get MPD status: {e}")
             await self._disconnect_unsafe()

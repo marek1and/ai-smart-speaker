@@ -155,6 +155,10 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             logger.debug("Activity already started, skipping")
             return
 
+        if self._waiting_for_turn_complete:
+            logger.debug("Turn in progress (waiting for turn_complete), dropping activity_start")
+            return
+
         try:
             await self._session.send_realtime_input(activity_start=ActivityStart())
             self._activity_started = True
@@ -178,6 +182,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         try:
             await self._session.send_realtime_input(activity_end=ActivityEnd())
             self._activity_started = False
+            self._waiting_for_turn_complete = True
             logger.info("Sent activity_end to API")
         except Exception as e:
             logger.error("Failed to send activity_end: %s", e)
@@ -283,9 +288,13 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 break
 
     async def _process_api_response(self, response: LiveServerMessage) -> None:
-        """Process a single response from the Gemini API."""
-        self.reset_watchdog_if_running()
+        """Process a single response from the Gemini API.
 
+        The watchdog is intentionally reset ONLY when audio chunks arrive, not on
+        every API message.  This prevents the watchdog from being kept alive
+        indefinitely by transcription updates or empty heartbeats when Gemini has
+        already finished speaking but hasn't sent turn_complete yet.
+        """
         if hasattr(response, "server_content") and response.server_content:
             sc = response.server_content
 
@@ -317,7 +326,15 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                                     continue
 
                                 self._chunks_received += 1
-                                self.response_started = True
+                                # Setting response_started=True on the first chunk
+                                # auto-starts the watchdog via the property setter.
+                                # On subsequent chunks, reset_watchdog_if_running()
+                                # extends it. This avoids a redundant double-start on
+                                # the very first chunk.
+                                if not self._response_started:
+                                    self.response_started = True  # starts watchdog
+                                else:
+                                    self.reset_watchdog_if_running()  # extends watchdog
                                 await self._output_queue.put(data.data)
                                 if self._chunks_received == 1:
                                     logger.info("Receiving audio response...")
@@ -352,6 +369,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
             # Handle turn complete
             if hasattr(sc, "turn_complete") and sc.turn_complete:
+                self._waiting_for_turn_complete = False
                 # Cancel the watchdog timer if it was started
                 self.cancel_watchdog()
 
@@ -418,10 +436,9 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             try:
                 # 1. Immediate override for Gemini state machine bug
                 if function_name == "request_for_user_input":
-                    logger.info("Received 'request_for_user_input' tool call. Bypassing execution and starting watchdog.")
+                    logger.info("Received 'request_for_user_input' tool call. Setting flag for follow-up.")
                     self._request_for_user_input = True
-                    self.start_watchdog(timeout=5.0)
-                    result = {"status": "success"}
+                    result = {"status": "success"}  # watchdog started by post-loop call below
 
                 # 2. Deferred execution handling
                 elif function_name in DEFERRED_FUNCTIONS:

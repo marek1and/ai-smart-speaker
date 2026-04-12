@@ -34,6 +34,8 @@ class WakeWordDetector:
         self.score_window: Deque[float] = deque(maxlen=self.window_size)
         self._model_id = wake_cfg.model_id.replace(" ", "_")
         self._last_trigger_time: float = 0.0  # For cooldown
+        # Counter for consecutive frames above threshold (false-positive suppression)
+        self._consecutive_above_threshold: int = 0
         self.model = self._load_model()
 
     def _load_model(self) -> Model:
@@ -83,11 +85,22 @@ class WakeWordDetector:
         self.score_window.append(score)
         max_score = max(self.score_window) if self.score_window else 0.0
 
+        # Track consecutive frames above threshold to suppress brief false-positive spikes
+        # (e.g., distant TV voices or conversations in another room)
+        if score >= self.cfg.threshold:
+            self._consecutive_above_threshold += 1
+        else:
+            self._consecutive_above_threshold = 0
+
         # Check cooldown - don't trigger if we triggered recently
         now = time.time()
         in_cooldown = (now - self._last_trigger_time) < self.cfg.cooldown_seconds
 
-        triggered = max_score >= self.cfg.threshold and not in_cooldown
+        # Require N consecutive frames above threshold before triggering
+        triggered = (
+            self._consecutive_above_threshold >= self.cfg.min_activation_frames
+            and not in_cooldown
+        )
 
         # Update last trigger time when triggered
         if triggered:
@@ -99,6 +112,7 @@ class WakeWordDetector:
         """Reset the model state and score window (cooldown timer preserved)."""
         self.model.reset()
         self.score_window.clear()
+        self._consecutive_above_threshold = 0
 
     def set_cooldown(self) -> None:
         """Manually trigger cooldown (e.g., after conversation ends)."""

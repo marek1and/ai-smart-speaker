@@ -7,10 +7,8 @@ Entry point for the voice assistant application.
 
 import asyncio
 import logging
-import os
 import sys
 
-import sys
 from orchestrator import AudioOrchestrator
 import functions.definitions
 from config import AppConfig

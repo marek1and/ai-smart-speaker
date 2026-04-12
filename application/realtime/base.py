@@ -55,6 +55,9 @@ class BaseRealtimeManager(ABC):
 
         # Manual VAD state
         self._activity_started: bool = False
+        # True between activity_end and turn_complete — sending activity_start
+        # during this window causes error 1007 "Request contains an invalid argument"
+        self._waiting_for_turn_complete: bool = False
 
         # Transcription buffers (collected during turn, logged at turn_complete)
         self._user_transcript: str = ""
@@ -182,6 +185,7 @@ class BaseRealtimeManager(ABC):
         self._chunks_received = 0
         self._response_started = False
         self._activity_started = False
+        self._waiting_for_turn_complete = False
         self._request_for_user_input = False
         self._user_transcript = ""
         self._ai_transcript = ""

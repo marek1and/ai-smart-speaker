@@ -1,6 +1,10 @@
 from google.genai.types import FunctionDeclaration, Schema, Tool, Type
 
 
+# ---------------------------------------------------------------------------
+# Tool declarations (single source of truth)
+# ---------------------------------------------------------------------------
+
 GET_CURRENT_TIME_FUNC = FunctionDeclaration(
     name="get_current_time",
     description="Gets the current time.",
@@ -100,135 +104,52 @@ REQUEST_FOR_USER_INPUT_FUNC = FunctionDeclaration(
     ),
 )
 
-GEMINI_TOOLS = [
-    Tool(
-        function_declarations=[
-            GET_CURRENT_TIME_FUNC,
-            GET_CURRENT_DATE_FUNC,
-            GET_OPENHAB_ITEM_STATE_FUNC,
-            SET_OPENHAB_ITEM_STATE_FUNC,
-            PLAY_INTERNET_RADIO_FUNC,
-            STOP_RADIO_FUNC,
-            SET_PLAYBACK_VOLUME_FUNC,
-            GET_RADIO_STATUS_FUNC,
-            REQUEST_FOR_USER_INPUT_FUNC,
-        ]
-    )
+_ALL_DECLARATIONS = [
+    GET_CURRENT_TIME_FUNC,
+    GET_CURRENT_DATE_FUNC,
+    GET_OPENHAB_ITEM_STATE_FUNC,
+    SET_OPENHAB_ITEM_STATE_FUNC,
+    PLAY_INTERNET_RADIO_FUNC,
+    STOP_RADIO_FUNC,
+    SET_PLAYBACK_VOLUME_FUNC,
+    GET_RADIO_STATUS_FUNC,
+    REQUEST_FOR_USER_INPUT_FUNC,
 ]
 
-OPENAI_TOOLS = [
-    {
-        "type": "function",
-        "name": "get_current_time",
-        "description": "Gets the current time.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "type": "function",
-        "name": "get_current_date",
-        "description": "Gets the current date.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "type": "function",
-        "name": "get_openhab_item_state",
-        "description": "Gets the state of an item in OpenHab.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "item_name": {
-                    "type": "string",
-                    "description": "The name of the item.",
-                }
-            },
-            "required": ["item_name"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "set_openhab_item_state",
-        "description": "Sets the state of an item in OpenHab.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "item_name": {
-                    "type": "string",
-                    "description": "The name of the item.",
-                },
-                "state": {
-                    "type": "string",
-                    "description": "The state to set.",
-                },
-            },
-            "required": ["item_name", "state"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "play_internet_radio",
-        "description": "Searches for an internet radio station and plays it.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "station_name": {
-                    "type": "string",
-                    "description": "The name of the radio station.",
-                }
-            },
-            "required": [],
-        },
-    },
-    {
-        "type": "function",
-        "name": "stop_radio",
-        "description": "Stops the radio playback.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "type": "function",
-        "name": "set_playback_volume",
-        "description": "Sets the playback volume of the MPD player.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "volume_percentage": {
-                    "type": "integer",
-                    "description": "The desired volume percentage (0-100).",
-                }
-            },
-            "required": ["volume_percentage"],
-        },
-    },
-    {
-        "type": "function",
-        "name": "get_radio_status",
-        "description": "Gets the current status of the radio, including playback state, volume, and whether a radio station is currently in the playlist. This should be the first step for any radio related query.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "type": "function",
-        "name": "request_for_user_input",
-        "description": "Requests user input. Use this function when you need to ask the user a question or wait for their response.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-]
+# ---------------------------------------------------------------------------
+# Provider-specific tool lists (generated from declarations above)
+# ---------------------------------------------------------------------------
+
+GEMINI_TOOLS = [Tool(function_declarations=_ALL_DECLARATIONS)]
+
+_GENAI_TYPE_MAP = {
+    Type.OBJECT: "object",
+    Type.STRING: "string",
+    Type.INTEGER: "integer",
+    Type.NUMBER: "number",
+    Type.BOOLEAN: "boolean",
+    Type.ARRAY: "array",
+}
+
+
+def _schema_to_json(schema: Schema) -> dict:
+    result: dict = {"type": _GENAI_TYPE_MAP.get(schema.type, "object")}
+    if getattr(schema, "description", None):
+        result["description"] = schema.description
+    props = getattr(schema, "properties", None)
+    if props is not None:
+        result["properties"] = {k: _schema_to_json(v) for k, v in props.items()}
+    req = getattr(schema, "required", None)
+    if req is not None:
+        result["required"] = list(req)
+    return result
+
+
+def _decl_to_openai_tool(decl: FunctionDeclaration) -> dict:
+    tool: dict = {"type": "function", "name": decl.name, "description": decl.description}
+    if decl.parameters is not None:
+        tool["parameters"] = _schema_to_json(decl.parameters)
+    return tool
+
+
+OPENAI_TOOLS = [_decl_to_openai_tool(d) for d in _ALL_DECLARATIONS]

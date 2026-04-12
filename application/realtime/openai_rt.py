@@ -119,6 +119,10 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             logger.debug("Activity already started, skipping")
             return
 
+        if self._waiting_for_turn_complete:
+            logger.debug("Turn in progress (waiting for turn_complete), dropping activity_start")
+            return
+
         self._activity_started = True
         logger.info("Activity started (OpenAI: audio streaming)")
 
@@ -151,6 +155,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             await self._ws_send({"type": "response.create"})
 
             self._activity_started = False
+            self._waiting_for_turn_complete = True
             logger.info("Sent activity_end to OpenAI (commit + response.create)")
         except Exception as e:
             logger.error("Failed to send activity_end: %s", e)
@@ -161,21 +166,24 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         Overrides base to also cancel any in-progress response, truncate
         assistant audio, and clear the input audio buffer on the OpenAI side.
         """
+        # Capture before super() resets base fields, then reset immediately so
+        # send_activity_end isn't blocked while waiting for response.done(cancelled).
+        was_response_in_progress = self._is_response_item_in_progress
         super().start_new_turn()
+        self._is_response_item_in_progress = False
 
         # Cancel current response, truncate, and clear buffer (for barge-in)
         if self._ws and self._session_active:
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._cancel_and_clear())
+                loop.create_task(self._cancel_and_clear(cancel_response=was_response_in_progress))
             except RuntimeError:
                 pass
 
-    async def _cancel_and_clear(self) -> None:
+    async def _cancel_and_clear(self, cancel_response: bool = True) -> None:
         """Cancel in-progress response, truncate assistant audio, and clear input buffer."""
         try:
-            # Only cancel if a response item is active
-            if self._is_response_item_in_progress:
+            if cancel_response:
                 await self._ws_send({"type": "response.cancel"})
 
             # Truncate assistant audio to what was actually played.
@@ -202,7 +210,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
             log_msg = (
                 "Cancelled response and cleared audio buffer"
-                if self._is_response_item_in_progress
+                if cancel_response
                 else "Cleared audio buffer"
             )
             logger.info(log_msg)
@@ -442,9 +450,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         - response.output_text.delta     (text response)
         - conversation.item.input_audio_transcription.completed  (user transcript)
         - response.done                  (turn complete, status: completed|cancelled)
-        """
-        self.reset_watchdog_if_running()
 
+        The watchdog is reset ONLY on audio chunks, not on every event.
+        Transcription deltas, bookkeeping events and other informational messages
+        must not keep the watchdog alive — otherwise a stuck turn can hang
+        indefinitely while non-audio events keep arriving.
+        """
         event_type = event.get("type", "")
 
         # --- Audio data ---
@@ -475,7 +486,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
             self._chunks_received += 1
             self._audio_bytes_received += len(audio_data)
-            self.response_started = True
+            # First chunk: response_started setter auto-starts the watchdog.
+            # Subsequent chunks: extend the running watchdog.
+            if not self._response_started:
+                self.response_started = True  # starts watchdog via setter
+            else:
+                self.reset_watchdog_if_running()  # extends watchdog
             await self._output_queue.put(audio_data)
 
             if self._chunks_received == 1:
@@ -508,6 +524,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         elif event_type == "response.done":
             self.cancel_watchdog()
             self._is_response_item_in_progress = False
+            self._waiting_for_turn_complete = False
             response = event.get("response", {})
             status = response.get("status", "")
 
@@ -590,12 +607,25 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 error.get("message", ""),
             )
 
+        # --- Audio output stream complete ---
+        # OpenAI explicitly signals that all audio chunks have been sent.
+        # At this point we know the model finished speaking; response.done should
+        # follow shortly. Switch to a tighter watchdog so a stuck turn is caught
+        # quickly without waiting for the full turn_watchdog_timeout.
+        elif event_type == "response.output_audio.done":
+            logger.debug("API: response.output_audio.done — audio stream complete")
+            if self._response_started and self._watchdog_task and not self._watchdog_task.done():
+                logger.debug(
+                    "Tightening watchdog to %.1fs after audio stream ended",
+                    self.live_cfg.audio_done_watchdog_timeout,
+                )
+                self.start_watchdog(timeout=self.live_cfg.audio_done_watchdog_timeout)
+
         # --- Informational events (debug level) ---
         elif event_type in (
             "response.output_item.done",
             "response.content_part.added",
             "response.content_part.done",
-            "response.output_audio.done",
             "response.output_audio_transcript.done",
             "response.output_text.done",
             "input_audio_buffer.committed",

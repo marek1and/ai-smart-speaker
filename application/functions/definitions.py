@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 from datetime import datetime
 from functions.registry import register_function
@@ -5,6 +6,8 @@ from openhab.client import OpenHabClient
 from config import AppConfig
 from mpd_client.client import MPDClientWrapper
 from radio.client import RadioClient
+
+logger = logging.getLogger(__name__)
 
 config = AppConfig.from_yaml()
 openhab_client = OpenHabClient(config.openhab)
@@ -138,6 +141,25 @@ def get_openhab_item_state(item_name: str) -> str | None:
 
 
 @register_function(name="set_openhab_item_state")
-def set_openhab_item_state(item_name: str, state: str) -> bool:
-    """Sets the state of an item in OpenHab."""
-    return openhab_client.set_openhab_item_state(item_name, state)
+def set_openhab_item_state(
+    item_name: Optional[str] = None,
+    state: Optional[str] = None,
+    item: Optional[str] = None,
+    **kwargs,
+) -> bool:
+    """Sets the state of an item in OpenHab.
+
+    Accepts both ``item_name`` and ``item`` as the first argument so that
+    hallucinated keyword names from OpenAI/Gemini do not cause a crash.
+    Any extra unexpected keyword arguments are silently absorbed via **kwargs.
+    """
+    resolved_name = item_name or item
+    if not resolved_name:
+        logger.warning(
+            "set_openhab_item_state called without item_name/item — ignoring. kwargs=%s",
+            kwargs,
+        )
+        return False
+    if kwargs:
+        logger.debug("set_openhab_item_state: ignoring unexpected kwargs=%s", kwargs)
+    return openhab_client.set_openhab_item_state(resolved_name, state)
