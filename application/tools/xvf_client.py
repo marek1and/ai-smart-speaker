@@ -6,17 +6,22 @@ are defined (same names as in xvf_host).
 
 from __future__ import annotations
 
+import logging
 import struct
 import sys
 import time
 from typing import List, Union
+
+logger = logging.getLogger(__name__)
 
 # Optional: on Windows, libusb_package is often needed for PyUSB to find the device
 try:
     import usb.core
     import usb.util
 except ImportError as e:
-    raise ImportError("PyUSB is required for ReSpeaker control. Install with: pip install pyusb") from e
+    raise ImportError(
+        "PyUSB is required for ReSpeaker control. Install with: pip install pyusb"
+    ) from e
 
 if sys.platform.startswith("win"):
     try:
@@ -37,6 +42,12 @@ PARAMETERS = {
     "AUDIO_MGR_OP_R": (35, 19, 2, "rw", "uint8"),
     "AUDIO_MGR_SYS_DELAY": (35, 26, 1, "rw", "int32"),
     "SAVE_CONFIGURATION": (48, 9, 1, "wo", "uint8"),
+    "LED_EFFECT": (20, 12, 1, "rw", "uint8"),
+    "LED_BRIGHTNESS": (20, 13, 1, "rw", "uint8"),
+    "LED_SPEED": (20, 15, 1, "rw", "uint8"),
+    "LED_COLOR": (20, 16, 1, "rw", "uint32"),
+    "LED_DOA_COLOR": (20, 17, 2, "rw", "uint32"),
+    "LED_RING_COLOR": (20, 19, 12, "rw", "uint32"),
 }
 
 
@@ -67,8 +78,14 @@ class ReSpeaker:
         payload = _build_payload(data_type, data_cnt, data_list)
 
         self._dev.ctrl_transfer(
-            usb.util.CTRL_OUT | usb.util.CTRL_TYPE_VENDOR | usb.util.CTRL_RECIPIENT_DEVICE,
-            0, wvalue, windex, payload, TIMEOUT_MS,
+            usb.util.CTRL_OUT
+            | usb.util.CTRL_TYPE_VENDOR
+            | usb.util.CTRL_RECIPIENT_DEVICE,
+            0,
+            wvalue,
+            windex,
+            payload,
+            TIMEOUT_MS,
         )
 
     def read_int32(self, name: str) -> int:
@@ -88,8 +105,14 @@ class ReSpeaker:
         read_attempts = 0
         while read_attempts <= 100:
             response = self._dev.ctrl_transfer(
-                usb.util.CTRL_IN | usb.util.CTRL_TYPE_VENDOR | usb.util.CTRL_RECIPIENT_DEVICE,
-                0, wvalue_read, windex, length, TIMEOUT_MS,
+                usb.util.CTRL_IN
+                | usb.util.CTRL_TYPE_VENDOR
+                | usb.util.CTRL_RECIPIENT_DEVICE,
+                0,
+                wvalue_read,
+                windex,
+                length,
+                TIMEOUT_MS,
             )
             if response[0] == CONTROL_SUCCESS:
                 break
@@ -107,7 +130,9 @@ class ReSpeaker:
         usb.util.dispose_resources(self._dev)
 
 
-def _build_payload(data_type: str, data_cnt: int, data_list: List[Union[int, float]]) -> bytes:
+def _build_payload(
+    data_type: str, data_cnt: int, data_list: List[Union[int, float]]
+) -> bytes:
     payload = []
     if data_type == "uint8":
         for i in range(data_cnt):
@@ -115,6 +140,9 @@ def _build_payload(data_type: str, data_cnt: int, data_list: List[Union[int, flo
     elif data_type == "int32":
         for i in range(data_cnt):
             payload.append(struct.pack("<i", int(data_list[i])))
+    elif data_type == "uint32":
+        for i in range(data_cnt):
+            payload.append(struct.pack("<I", int(data_list[i])))
     else:
         raise ValueError(f"Unsupported type for write: {data_type}")
     return b"".join(payload)
@@ -129,3 +157,34 @@ def open_respeaker(vid: int = 0x2886, pid: int = 0x001A) -> ReSpeaker:
             "On Windows you may need: pip install libusb_package"
         )
     return ReSpeaker(dev)
+
+
+class ReSpeakerLeds:
+    """Manages ReSpeaker LED effects."""
+
+    def __init__(self, respeaker: ReSpeaker) -> None:
+        self._respeaker = respeaker
+
+    def _set_color(
+        self, effect: int, color: int = 0, speed: int = 1, brightness: int = 255
+    ) -> None:
+        try:
+            self._respeaker.write("LED_EFFECT", [effect])
+            if effect in (1, 3):  # Breath or Single Color
+                self._respeaker.write("LED_COLOR", [color])
+            if effect in (1, 2):  # Breath or Rainbow
+                self._respeaker.write("LED_SPEED", [speed])
+                self._respeaker.write("LED_BRIGHTNESS", [brightness])
+        except Exception as e:
+            logger.error("Failed to set ReSpeaker LEDs: %s", e)
+
+    def set_idle(self) -> None:
+        self._set_color(effect=0)
+
+    def set_listening(self) -> None:
+        """Breath mode, green — waiting for user speech."""
+        self._set_color(effect=1, color=0x00FF00, speed=1, brightness=255)
+
+    def set_responding(self) -> None:
+        """Rainbow mode — AI is responding."""
+        self._set_color(effect=2, speed=1, brightness=255)

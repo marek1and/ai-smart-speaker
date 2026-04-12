@@ -37,6 +37,7 @@ from config import (
 from mpd_client.client import MPDClientWrapper
 from realtime import BaseRealtimeManager, create_realtime_manager
 from state import AudioFrame, SpeakerState, WakeWordResult
+from tools.xvf_client import ReSpeakerLeds, open_respeaker
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,10 @@ class AudioOrchestrator:
         # Current audio frame for status display
         self._current_audio_frame: Optional[np.ndarray] = None
 
+        # ReSpeaker LEDs
+        self._respeaker = None
+        self._leds = None
+
     @property
     def state(self) -> SpeakerState:
         """Current state of the assistant."""
@@ -139,6 +144,14 @@ class AudioOrchestrator:
         self._state = new_state
         logger.info("STATE: %s -> %s", old_state.value, new_state.value)
         self._last_activity_time = time.time()
+
+        if self._leds:
+            if new_state == SpeakerState.IDLE:
+                self._leds.set_idle()
+            elif new_state in (SpeakerState.LISTENING, SpeakerState.FOLLOW_UP):
+                self._leds.set_listening()
+            elif new_state == SpeakerState.RESPONDING:
+                self._leds.set_responding()
 
     async def start(self) -> None:
         """Initialize components and start the main loop."""
@@ -177,6 +190,15 @@ class AudioOrchestrator:
             on_interrupted=self._on_interrupted,
             on_turn_timeout=self._on_turn_timeout,
         )
+
+        # Initialize ReSpeaker LEDs
+        try:
+            self._respeaker = open_respeaker()
+            self._leds = ReSpeakerLeds(self._respeaker)
+            self._leds.set_idle()
+            logger.info("ReSpeaker LEDs initialized.")
+        except Exception as e:
+            logger.warning("ReSpeaker LEDs not available: %s", e)
 
         # Thread pool for CPU-bound tasks (wake word, VAD)
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="audio")
@@ -249,6 +271,12 @@ class AudioOrchestrator:
 
         if self._audio_input:
             self._audio_input.stop()
+
+        # Close ReSpeaker
+        if self._leds:
+            self._leds.set_idle()
+        if self._respeaker:
+            self._respeaker.close()
 
         # Close VAD
         if self._hybrid_vad:
