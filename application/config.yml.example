@@ -30,10 +30,21 @@ audio:
   output_queue_maxsize: 500
 
 wake_word:
-  model_id: "alexa" # Available: alexa, hey_mycroft, hey_jarvis
-  threshold: 0.65
+  model_id: "alexa"  # Built-in: alexa, hey_mycroft, hey_jarvis, hey_rhasspy
+  # model_path: "/path/to/custom_model.onnx"  # Custom model file (overrides model_id)
+  threshold: 0.8
+  # Silero VAD gate: scores zeroed on non-speech frames — prevents false triggers
+  # during silence, ambient noise, or distant TV. 0 = disabled, 0.5 = recommended.
+  vad_threshold: 0.5
   window_seconds: 0.8
   cooldown_seconds: 2.5
+  min_activation_frames: 2
+  # STT post-trigger verification via faster-whisper (reduces false positives).
+  # Runs in parallel with session open — no added latency for valid triggers.
+  # Requires: pip install faster-whisper
+  verify_with_stt: false
+  stt_model: "tiny.en"  # Options: tiny.en, base.en, small.en
+  stt_keywords: ["alexa", "alexia", "aleksa", "lexa"]
 
 vad:
   # VAD mode: "silero" (recommended) or "rms"
@@ -112,7 +123,7 @@ live:
   receive_sample_rate: 24000
   input_mime_type: "audio/pcm;rate=16000"
   
-  preroll_seconds: 0.8
+  preroll_seconds: 1.5
   barge_in: true
   session_inactivity_timeout: 30.0
   max_reconnect_attempts: 3
@@ -149,6 +160,7 @@ radio:
 mpd:
   host: "localhost"
   port: 6600
+  connection_timeout: 5
   volume_fade_in_seconds: 1.0  # Duration of volume fade-in (resuming)
   volume_duck_percentage: 20 # Volume percentage during conversation
   default_playback_volume: 70 # Default playback volume if no previous volume is known

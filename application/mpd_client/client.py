@@ -25,6 +25,7 @@ class MPDClientWrapper:
 
         self.config = config
         self.client = MPDClient()
+        self.client.timeout = config.connection_timeout
         self.is_connected = False
         self._fade_task: Optional[asyncio.Task] = None
         self._mpd_lock = asyncio.Lock()
@@ -87,6 +88,7 @@ class MPDClientWrapper:
             finally:
                 self.is_connected = False
                 self.client = MPDClient()
+                self.client.timeout = 5
 
     async def _reconnect_unsafe(self) -> bool:
         """Disconnect and immediately reconnect. Must be called within a lock.

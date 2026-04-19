@@ -56,3 +56,22 @@ class SessionRecorder:
             logger.info("Closed session recording: %s", self._wav_path)
             self._wav_file = None
             self._wav_path = None
+
+    def close_as_false_trigger(self) -> None:
+        """Close and rename the recording to mark it as a false wake word trigger.
+
+        Renames session_TIMESTAMP.wav -> false_wake_TIMESTAMP.wav so these files
+        can be collected separately for wake word model fine-tuning.
+        No-op if inactive.
+        """
+        if not self._wav_file:
+            return
+        self._wav_file.close()
+        self._wav_file = None
+        if self._wav_path and os.path.exists(self._wav_path):
+            basename = os.path.basename(self._wav_path)
+            new_basename = basename.replace("session_", "false_wake_", 1)
+            new_path = os.path.join(_RECORDINGS_DIR, new_basename)
+            os.rename(self._wav_path, new_path)
+            logger.info("False trigger recording saved: %s", new_path)
+        self._wav_path = None

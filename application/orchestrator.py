@@ -23,6 +23,7 @@ from audio.output import AudioOutput
 from audio.recorder import SessionRecorder
 from audio.sounds import SoundEvent, SoundPlayer
 from audio.vad import HybridVAD, create_hybrid_vad
+from audio.verifier import WakeWordVerifier
 from audio.wake_word import WakeWordDetector
 from config import (
     AppConfig,
@@ -134,6 +135,10 @@ class AudioOrchestrator:
         # Current audio frame for status display
         self._current_audio_frame: Optional[np.ndarray] = None
 
+        # STT wake word verifier (optional, loaded at startup if enabled)
+        self._verifier: Optional[WakeWordVerifier] = None
+        self._pending_verification: Optional[asyncio.Future] = None
+
         # ReSpeaker LEDs
         self._respeaker = None
         self._leds = None
@@ -210,6 +215,10 @@ class AudioOrchestrator:
 
         # Initialize wake word detector
         self._wake_detector = WakeWordDetector(self.wake_cfg, self.audio_cfg)
+
+        # Initialize STT verifier (loads faster-whisper model — takes a few seconds)
+        if self.wake_cfg.verify_with_stt:
+            self._verifier = WakeWordVerifier(self.wake_cfg)
 
         # Initialize sound player
         self._sound_player = SoundPlayer(self.sound_cfg)
@@ -452,10 +461,10 @@ class AudioOrchestrator:
             await loop.run_in_executor(self._executor, _inference)
             return WakeWordResult(triggered=False, score=0.0, max_score=0.0)
 
-        score, max_score, triggered = await loop.run_in_executor(
+        score, max_score, vad_score, triggered = await loop.run_in_executor(
             self._executor, _inference
         )
-        return WakeWordResult(triggered=triggered, score=score, max_score=max_score)
+        return WakeWordResult(triggered=triggered, score=score, max_score=max_score, vad_score=vad_score)
 
     async def _handle_wake_word_result(self, result: WakeWordResult) -> None:
         """Handle wake word detection result based on current state."""
@@ -472,6 +481,15 @@ class AudioOrchestrator:
         self._last_barge_in_time = now
 
         await self._duck_radio_if_playing()
+
+        if self._state == SpeakerState.IDLE and self._verifier is not None:
+            # Fire verification in background — don't block wake sound or session open.
+            # Result is checked each iteration of _handle_listening_state.
+            self._pending_verification = asyncio.get_running_loop().run_in_executor(
+                self._executor,
+                self._verifier.verify,
+                list(self._preroll_buffer),
+            )
 
         if self._sound_player:
             self._sound_player.play(SoundEvent.WAKE_WORD)
@@ -498,7 +516,7 @@ class AudioOrchestrator:
                 )
             else:
                 print(
-                    f"\r[IDLE] score={result.score:.3f} max={result.max_score:.3f}",
+                    f"\r[IDLE] score={result.score:.3f} max={result.max_score:.3f} vad={result.vad_score:.2f}",
                     end="",
                     flush=True,
                 )
@@ -688,6 +706,18 @@ class AudioOrchestrator:
 
     async def _handle_listening_state(self) -> None:
         """Handle LISTENING state: wait for first audio response from API."""
+        if self._pending_verification is not None and self._pending_verification.done():
+            try:
+                verified = self._pending_verification.result()
+            except Exception:
+                verified = True  # don't reject on verifier error
+            self._pending_verification = None
+            activity_started = self._api_manager and self._api_manager.activity_started
+            if not verified and not activity_started:
+                logger.info("STT verification failed — false trigger, aborting session")
+                await self._close_on_initial_silence()
+                return
+
         if self._api_manager.chunks_received > 0:
             logger.info("First audio received, transitioning to RESPONDING")
             self._listening_entry_time = None
@@ -766,43 +796,42 @@ class AudioOrchestrator:
                     await self.mpd_client.set_volume(payload["volume_percentage"])
 
         if turn_should_end:
-            await self.mpd_client.unduck()
             logger.info("Radio action performed, ending turn.")
             await self._finish_turn(play_end_sound=False)
             return
 
-        if await self.mpd_client.is_playing():
-            logger.info("Radio is playing, restoring volume and ending turn.")
-            await self.mpd_client.unduck()
+        radio_playing = await self.mpd_client.is_playing()
+
+        if not self._playback_interrupted:
+            requested = self._api_manager is not None and self._api_manager.request_for_user_input
+            if requested or self._ai_ended_with_question():
+                if not requested:
+                    logger.info("Follow-up triggered by question mark in AI transcript.")
+                logger.info(
+                    "Waiting for follow-up (%.1fs, Silero VAD)...",
+                    self.live_cfg.followup_timeout,
+                )
+                if self._sound_player:
+                    self._sound_player.play(SoundEvent.FOLLOW_UP)
+                if self._hybrid_vad:
+                    self._hybrid_vad.reset()
+                self._set_state(SpeakerState.FOLLOW_UP)
+                return
+
+        if radio_playing:
+            logger.info("Radio is playing, ending turn.")
             await self._finish_turn(play_end_sound=False)
         else:
-            logger.info("Radio not playing, proceeding to post-response logic.")
-            await self.mpd_client.unduck()
-
-            if not self._playback_interrupted:
-                requested = self._api_manager is not None and self._api_manager.request_for_user_input
-                if requested or self._ai_ended_with_question():
-                    if not requested:
-                        logger.info("Follow-up triggered by question mark in AI transcript.")
-                    logger.info(
-                        "Waiting for follow-up (%.1fs, Silero VAD)...",
-                        self.live_cfg.followup_timeout,
-                    )
-                    if self._sound_player:
-                        self._sound_player.play(SoundEvent.FOLLOW_UP)
-                    if self._hybrid_vad:
-                        self._hybrid_vad.reset()
-                    self._set_state(SpeakerState.FOLLOW_UP)
-                else:
-                    logger.info("Follow-up not requested, ending turn.")
-                    await self._finish_turn()
-            else:
-                await self._finish_turn()
+            logger.info("Radio not playing, ending turn.")
+            await self._finish_turn()
 
     async def _finish_turn(self, play_end_sound: bool = True) -> None:
         """Common cleanup after a conversation turn is finished."""
-        if self._playback_interrupted:
-            await self.mpd_client.unduck()
+        if self._pending_verification is not None:
+            self._pending_verification.cancel()
+            self._pending_verification = None
+
+        await self.mpd_client.unduck()
 
         self._drain_queue(self._api_input_queue)
         self._reset_wake_detector(cooldown=True)
@@ -845,13 +874,16 @@ class AudioOrchestrator:
         to IDLE without playing the end-conversation sound.
         """
         self._listening_entry_time = None
+        if self._pending_verification is not None:
+            self._pending_verification.cancel()
+            self._pending_verification = None
 
         await self.mpd_client.unduck()
         self._drain_queue(self._api_input_queue)
 
         if self._api_manager:
             await self._api_manager.close_session()
-        self._recorder.close()
+        self._recorder.close_as_false_trigger()
 
         self._reset_wake_detector(cooldown=True)
         if self._hybrid_vad:

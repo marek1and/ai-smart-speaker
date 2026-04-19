@@ -48,11 +48,24 @@ class AudioConfig:
 class WakeWordConfig:
     """Wake word detection configuration."""
 
-    model_id: str = "alexa"  # Available: alexa, hey_mycroft, hey_jarvis
-    threshold: float = 0.8  # Increased to reduce false positives from TV/music
+    model_id: str = "alexa"  # Built-in: alexa, hey_mycroft, hey_jarvis, hey_rhasspy
+    model_path: Optional[str] = (
+        None  # Path to custom .onnx model file (overrides model_id when set)
+    )
+    threshold: float = 0.8
+    vad_threshold: float = 0.5  # Silero VAD gate inside openWakeWord: scores zeroed on non-speech frames (0 = disabled)
     window_seconds: float = 0.8
     cooldown_seconds: float = 2.5  # Prevent re-triggers after detection
-    min_activation_frames: int = 2  # Consecutive frames above threshold required to trigger (reduces false positives)
+    min_activation_frames: int = (
+        2  # Consecutive frames above threshold required to trigger
+    )
+
+    # STT post-trigger verification (reduces false positives via faster-whisper)
+    verify_with_stt: bool = False
+    stt_model: str = "tiny.en"  # faster-whisper model: tiny.en, base.en, small.en
+    stt_keywords: list[str] = field(
+        default_factory=lambda: ["alexa", "alexia", "aleksa", "lexa"]
+    )
 
 
 @dataclass
@@ -97,15 +110,17 @@ class LiveConfig:
     receive_sample_rate: int = 24000
     input_mime_type: str = "audio/pcm;rate=16000"
 
-    # Preroll: capture audio before wake word (0.8s captures full "Alexa")
-    preroll_seconds: float = 0.8
+    # Preroll: capture audio before wake word (1.5s captures full "Alexa" + context)
+    preroll_seconds: float = 1.5
 
     # Barge-in (interruption) settings
     barge_in: bool = True
 
     # Session management
     session_inactivity_timeout: float = 10.0  # Close session after N seconds idle
-    session_max_turns: int = 2  # Close session after N completed turns (fresh context on next wake)
+    session_max_turns: int = (
+        2  # Close session after N completed turns (fresh context on next wake)
+    )
     max_reconnect_attempts: int = 3
 
     # Follow-up conversation
@@ -174,6 +189,7 @@ class MPDConfig:
 
     host: str = "localhost"
     port: int = 6600
+    connection_timeout: int = 5
     volume_fade_in_seconds: float = 2.0  # Duration of volume fade-in (resuming)
     volume_duck_percentage: int = 20  # Volume percentage during conversation
     default_playback_volume: int = (

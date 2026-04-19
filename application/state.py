@@ -27,4 +27,5 @@ class WakeWordResult:
     triggered: bool
     score: float
     max_score: float
+    vad_score: float = 0.0
     timestamp: float = field(default_factory=time.time)
