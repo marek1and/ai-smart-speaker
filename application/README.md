@@ -152,6 +152,40 @@ live:
 
 By providing this detailed context, the model will know to call `set_openhab_item_state(item_name='GF_LivingRoom_MainLight', state='ON')` when you say "turn on the main light in the living room."
 
+## TV Control
+
+The assistant can turn on the TV and switch channels using a single `watch_tv` tool backed by OpenHAB items.
+
+### TV Configuration
+
+Add a `tv` section to `config.yml`. The `channels` map defines the names the model will accept — they are automatically injected into the system prompt via `{tv_channels}`:
+
+```yaml
+tv:
+  power_item: "GF_LivingRoom_TV_Power"
+  channel_item: "GF_LivingRoom_TV_Channel"
+  boot_wait_timeout: 20.0   # max seconds to poll for TV ON after cold start
+  boot_poll_interval: 1.0
+  post_boot_delay: 10.0     # seconds to wait after TV reports ON before switching channel
+  channels:
+    "BBC One": 101
+    "BBC Two": 102
+    "ITV": 103
+```
+
+Reference the placeholder in your system instruction so the model knows exactly which names to pass:
+
+```yaml
+live:
+  system_instruction: |
+    ...
+    Available TV channels (pass the exact name to watch_tv): {tv_channels}
+```
+
+### Cold Boot Handling
+
+When the TV is off and a channel is requested, `watch_tv` sends the power-on command and returns immediately so the AI response is not delayed. A background task then polls the power state and sends the channel command once the TV confirms it is on (plus `post_boot_delay`). Tune `post_boot_delay` to match your TV's boot time — Samsung TVs typically need 8–12 seconds after reporting ON before they are ready to accept channel commands.
+
 ## Tools
 
 ### Delay Tuning

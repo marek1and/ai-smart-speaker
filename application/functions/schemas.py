@@ -94,6 +94,26 @@ GET_RADIO_STATUS_FUNC = FunctionDeclaration(
     ),
 )
 
+WATCH_TV_FUNC = FunctionDeclaration(
+    name="watch_tv",
+    description=(
+        "Turns on the TV and/or switches to a channel by name. "
+        "Use for: 'turn on TV', 'watch Polsat', 'switch to TVN', 'put on TVP 1'. "
+        "Pass channel_name exactly as listed in your instructions (e.g. 'Polsat', 'TVN', 'TVP 1'). "
+        "Do NOT use set_openhab_item_state for TV power or channel switching."
+    ),
+    parameters=Schema(
+        type=Type.OBJECT,
+        properties={
+            "channel_name": Schema(
+                type=Type.STRING,
+                description="Channel name from the available list (optional — omit to just turn TV on).",
+            )
+        },
+        required=[],
+    ),
+)
+
 REQUEST_FOR_USER_INPUT_FUNC = FunctionDeclaration(
     name="request_for_user_input",
     description="Requests user input. Use this function when you need to ask the user a question or wait for their response.",
@@ -109,6 +129,7 @@ _ALL_DECLARATIONS = [
     GET_CURRENT_DATE_FUNC,
     GET_OPENHAB_ITEM_STATE_FUNC,
     SET_OPENHAB_ITEM_STATE_FUNC,
+    WATCH_TV_FUNC,
     PLAY_INTERNET_RADIO_FUNC,
     STOP_RADIO_FUNC,
     SET_PLAYBACK_VOLUME_FUNC,

@@ -695,6 +695,11 @@ class AudioOrchestrator:
         if self._hybrid_vad:
             self._hybrid_vad.reset()
 
+        # Execute any deferred actions that arrived while in IDLE (Gemini can send
+        # tool_calls after the watchdog fired and state already transitioned here).
+        # Must run before start_new_turn() clears pending_actions.
+        await self._dispatch_deferred_actions()
+
         self._api_manager.start_new_turn()
         self._turn_complete_event.clear()
         self._last_activity_time = time.time()
@@ -728,7 +733,7 @@ class AudioOrchestrator:
             self._turn_complete_event.clear()
             logger.info("Turn complete without audio response")
             self._listening_entry_time = None
-            await self._finish_turn()
+            await self._execute_post_response_actions()
             return
 
         # Initial silence timeout: no speech detected since wake word —
@@ -755,11 +760,26 @@ class AudioOrchestrator:
 
         self._turn_complete_event.clear()
 
-        # Wait for speaker queue to drain
+        # Wait for speaker queue to drain (bounded — guards against AudioOutput hang)
+        drain_deadline = time.time() + self.live_cfg.speaker_drain_timeout
         while not self._speaker_queue.empty() and self._running:
             if self._playback_interrupted:
                 break
+            if time.time() > drain_deadline:
+                logger.warning("Speaker queue did not drain within %.1fs — clearing buffers", self.live_cfg.speaker_drain_timeout)
+                break
             await asyncio.sleep(0.1)
+
+        # Clear both queues so any remaining AI audio doesn't bleed into the END
+        # sound or the next turn. This matters when the drain loop hit the timeout
+        # (lots of buffered audio) or when the bridge task was still refilling
+        # _speaker_queue from _api_output_queue as we drained.
+        self._drain_queue(self._api_output_queue)
+        while not self._speaker_queue.empty():
+            try:
+                self._speaker_queue.get_nowait()
+            except queue.Empty:
+                break
 
         if self._state != SpeakerState.RESPONDING:
             return
@@ -767,18 +787,20 @@ class AudioOrchestrator:
         await asyncio.sleep(0.3)
         await self._execute_post_response_actions()
 
-    async def _execute_post_response_actions(self) -> None:
-        """Execute deferred actions and decide the next state after AI response."""
-        pending_actions = (
-            list(self._api_manager.pending_actions) if self._api_manager else []
-        )
-        if self._api_manager:
-            self._api_manager.pending_actions.clear()
+    async def _dispatch_deferred_actions(self) -> bool:
+        """Execute and clear all pending deferred tool actions.
 
-        # Play/Stop actions end the turn immediately; volume changes alone do not.
-        turn_should_end = False
+        Returns True if a radio play/stop action was executed (signals turn should end
+        without the end-conversation sound).
+        """
+        if not self._api_manager or not self._api_manager.pending_actions:
+            return False
 
-        for action in pending_actions:
+        actions = list(self._api_manager.pending_actions)
+        self._api_manager.pending_actions.clear()
+
+        ran_radio_action = False
+        for action in actions:
             action_type = action.get("type")
             payload = action.get("payload", {})
 
@@ -788,12 +810,18 @@ class AudioOrchestrator:
                     await self.mpd_client.play_station(payload["url"])
                 elif payload.get("action") == "play":
                     await self.mpd_client.play()
-                turn_should_end = True
+                ran_radio_action = True
 
             elif action_type == "set_playback_volume":
                 logger.info("Executing deferred action: set_playback_volume")
                 if "volume_percentage" in payload:
                     await self.mpd_client.set_volume(payload["volume_percentage"])
+
+        return ran_radio_action
+
+    async def _execute_post_response_actions(self) -> None:
+        """Execute deferred actions and decide the next state after AI response."""
+        turn_should_end = await self._dispatch_deferred_actions()
 
         if turn_should_end:
             logger.info("Radio action performed, ending turn.")
@@ -910,8 +938,18 @@ class AudioOrchestrator:
 
     async def _inactivity_monitor_task(self) -> None:
         """Close the API session after a period of IDLE inactivity."""
+        _mpd_keepalive_interval = 45.0
+        _last_mpd_ping = time.time()
+
         while self._running:
             await asyncio.sleep(5.0)
+
+            # Keepalive: ping MPD periodically so its connection doesn't idle-timeout
+            # (default MPD connection_timeout is 60s).
+            if time.time() - _last_mpd_ping >= _mpd_keepalive_interval:
+                if self.mpd_client.is_connected:
+                    await self.mpd_client.get_status()
+                _last_mpd_ping = time.time()
 
             if not self._api_manager.session_active:
                 continue

@@ -138,6 +138,16 @@ class LiveConfig:
     turn_watchdog_timeout: float = 5.0  # Watchdog timeout for turn completion
     audio_done_watchdog_timeout: float = 3.0  # Tighter watchdog after audio stream ends (OpenAI response.output_audio.done)
 
+    # Output silence detection: RMS threshold below which a received audio chunk is
+    # considered silence. Silent chunks are forwarded to the speaker but do NOT reset
+    # the turn watchdog — preventing Gemini from hanging the session by streaming
+    # silence indefinitely instead of sending turn_complete.
+    output_silence_rms_threshold: float = 0.002
+
+    # Max seconds to wait for the speaker queue to drain after turn_complete.
+    # Guards against AudioOutput hanging (sounddevice underrun / device error).
+    speaker_drain_timeout: float = 10.0
+
     # --- Gemini-specific settings ---
     model: str = "gemini-3.1-flash-live-preview"
     voice_name: str = (
@@ -184,6 +194,19 @@ class RadioConfig:
 
 
 @dataclass
+class TVConfig:
+    """Samsung TV control configuration."""
+
+    power_item: str = "GF_LivingRoom_TV_Power"
+    channel_item: str = "GF_LivingRoom_TV_Channel"
+    boot_wait_timeout: float = 5.0    # Max seconds to wait for TV to confirm ON
+    boot_poll_interval: float = 1.0   # How often to poll power state after cold start
+    post_boot_delay: float = 2.0      # Extra seconds to wait after TV confirms ON before sending channel
+    # channel name (as user says it) -> channel number
+    channels: dict = field(default_factory=dict)
+
+
+@dataclass
 class MPDConfig:
     """MPD server configuration."""
 
@@ -210,6 +233,7 @@ class AppConfig:
     openhab: OpenHabConfig = field(default_factory=OpenHabConfig)
     radio: RadioConfig = field(default_factory=RadioConfig)
     mpd: MPDConfig = field(default_factory=MPDConfig)
+    tv: TVConfig = field(default_factory=TVConfig)
 
     @classmethod
     def from_yaml(cls, path: str = "config.yml") -> "AppConfig":
@@ -219,15 +243,26 @@ class AppConfig:
             with open(path, "r") as f:
                 config_data = yaml.safe_load(f)
 
-        # Create nested dataclasses from the loaded YAML data
+        tv = TVConfig(**config_data.get("tv", {}))
+
+        # Inject channel names into system_instruction so the model knows what
+        # values to pass to watch_tv — single source of truth in tv.channels.
+        live_data = dict(config_data.get("live", {}))
+        if tv.channels and "system_instruction" in live_data:
+            channel_names = ", ".join(tv.channels.keys())
+            live_data["system_instruction"] = live_data["system_instruction"].replace(
+                "{tv_channels}", channel_names
+            )
+
         return cls(
             audio=AudioConfig(**config_data.get("audio", {})),
             vad=VADConfig(**config_data.get("vad", {})),
             wake_word=WakeWordConfig(**config_data.get("wake_word", {})),
-            live=LiveConfig(**config_data.get("live", {})),
+            live=LiveConfig(**live_data),
             sound=SoundConfig(**config_data.get("sound", {})),
             api_keys=ApiKeys(**config_data.get("api_keys", {})),
             openhab=OpenHabConfig(**config_data.get("openhab", {})),
             radio=RadioConfig(**config_data.get("radio", {})),
             mpd=MPDConfig(**config_data.get("mpd", {})),
+            tv=tv,
         )

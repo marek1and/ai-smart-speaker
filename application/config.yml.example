@@ -157,6 +157,15 @@ radio:
     - "Radio ZET"
     - "Classic FM"
 
+tv:
+  # TV channel mapping: name (as user says it) -> channel number.
+  # Names listed here are injected into the system_instruction via {tv_channels}
+  # so the model knows exactly which names to pass to watch_tv().
+  channels:
+    "BBC One": 101
+    "BBC Two": 102
+    "ITV": 103
+
 mpd:
   host: "localhost"
   port: 6600

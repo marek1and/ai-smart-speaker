@@ -34,6 +34,11 @@ class MPDClientWrapper:
         self._is_ducked = False
         self._restore_volume = self.config.default_playback_volume
 
+        # One-shot cache set by stop()/play_station()/play() so that the next
+        # is_playing() call returns immediately without a network round-trip.
+        # None means "unknown — ask MPD".
+        self._is_playing: Optional[bool] = None
+
     async def initialize_state(self):
         """Initializes and logs the MPD client state."""
         logger.info("Initializing MPD client state...")
@@ -88,7 +93,7 @@ class MPDClientWrapper:
             finally:
                 self.is_connected = False
                 self.client = MPDClient()
-                self.client.timeout = 5
+                self.client.timeout = self.config.connection_timeout or 5
 
     async def _reconnect_unsafe(self) -> bool:
         """Disconnect and immediately reconnect. Must be called within a lock.
@@ -111,6 +116,7 @@ class MPDClientWrapper:
                 await self._set_internal_volume_unsafe(0)
                 await asyncio.to_thread(self.client.play)
                 logger.info("Started playing station: %s", url)
+                self._is_playing = True
                 self._is_ducked = False
             except (BrokenPipeError, ConnectionResetError) as e:
                 logger.warning("MPD connection reset during play_station (%s), reconnecting...", type(e).__name__)
@@ -121,6 +127,7 @@ class MPDClientWrapper:
                         await self._set_internal_volume_unsafe(0)
                         await asyncio.to_thread(self.client.play)
                         logger.info("Started playing station after reconnect: %s", url)
+                        self._is_playing = True
                         self._is_ducked = False
                     except (MPDError, IOError) as retry_e:
                         logger.error("Failed to play station after reconnect: %s", retry_e)
@@ -278,6 +285,8 @@ class MPDClientWrapper:
             await self._fade_task
         except asyncio.CancelledError:
             logger.info("Fade task was cancelled.")
+            self._fade_task.cancel()
+            raise
 
     async def _fade_volume_async(self, target_volume: int, duration: float):
         """Asynchronous coroutine for volume fading."""
@@ -340,26 +349,27 @@ class MPDClientWrapper:
     async def get_volume(self) -> Optional[int]:
         """Gets the current playback volume as a linear percentage."""
         async with self._mpd_lock:
-            if not await self._connect():
+            status = await self._get_status_unsafe()
+            if status is None:
                 return None
-            try:
-                status = await asyncio.to_thread(self.client.status)
-                volume_str = status.get("volume")
-                if volume_str is not None:
-                    mapped_volume = int(volume_str)
-                    return self._map_volume_from_curve(mapped_volume)
-                return None
-            except (MPDError, IOError, MPDConnectionError) as e:
-                logger.error(f"Error getting volume: {e}")
-                await self._disconnect_unsafe()
-                return None
+            volume_str = status.get("volume")
+            if volume_str is not None:
+                return self._map_volume_from_curve(int(volume_str))
+            return None
 
     def get_restore_volume(self) -> int:
         """Returns the volume level that will be restored after unducking."""
         return self._restore_volume
 
     async def is_playing(self) -> bool:
-        """Checks if MPD is currently playing."""
+        """Checks if MPD is currently playing.
+
+        Uses a persistent local cache updated by stop/play operations and by
+        any successful status network query, so callers never block on a slow
+        or dead MPD socket after a known state change.
+        """
+        if self._is_playing is not None:
+            return self._is_playing
         status = await self.get_status()
         return status.get("state") == "play" if status else False
 
@@ -369,8 +379,15 @@ class MPDClientWrapper:
             if not await self._connect():
                 return
             try:
-                await asyncio.to_thread(self.client.stop)
+                await self._run_mpd_cmd(self.client.stop)
                 logger.info("Stopped MPD playback.")
+                self._is_playing = False
+                # Reconnect to flush any unsolicited MPD notifications (e.g. state-change
+                # events) that land in the socket buffer after stop and would corrupt the
+                # protocol state for the next command.
+                await self._reconnect_unsafe()
+            except asyncio.TimeoutError:
+                pass
             except (MPDError, IOError, MPDConnectionError) as e:
                 logger.error("Error stopping playback: %s", e)
                 await self._disconnect_unsafe()
@@ -380,17 +397,40 @@ class MPDClientWrapper:
         async with self._mpd_lock:
             return await self._get_status_unsafe()
     
+    async def _run_mpd_cmd(self, cmd, *args):
+        """Run a blocking python-mpd2 call in a thread with a hard timeout."""
+        timeout = (self.config.connection_timeout or 5) + 1
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(cmd, *args),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error("MPD command timed out after %.0fs, marking disconnected.", timeout)
+            self.is_connected = False
+            self.client = MPDClient()
+            self.client.timeout = self.config.connection_timeout or 5
+            raise
+
     async def _get_status_unsafe(self) -> Optional[Dict[str, Any]]:
         """Gets status without acquiring lock. Must be called from a locked context."""
         if not await self._connect():
             return None
         try:
-            return await asyncio.to_thread(self.client.status)
+            result = await self._run_mpd_cmd(self.client.status)
+            if result:
+                self._is_playing = result.get("state") == "play"
+            return result
+        except asyncio.TimeoutError:
+            return None
         except (BrokenPipeError, ConnectionResetError) as e:
             logger.warning("MPD connection reset during status check (%s), reconnecting...", type(e).__name__)
             if await self._reconnect_unsafe():
                 try:
-                    return await asyncio.to_thread(self.client.status)
+                    result = await self._run_mpd_cmd(self.client.status)
+                    if result:
+                        self._is_playing = result.get("state") == "play"
+                    return result
                 except Exception as retry_e:
                     logger.error("MPD status failed after reconnect: %s", retry_e)
                     await self._disconnect_unsafe()
@@ -434,6 +474,7 @@ class MPDClientWrapper:
                 await self._set_internal_volume_unsafe(0)
                 await asyncio.to_thread(self.client.play)
                 logger.info("Playback started.")
+                self._is_playing = True
                 self._is_ducked = False
             except (MPDError, IOError, MPDConnectionError) as e:
                 logger.error("Error starting playback: %s", e)

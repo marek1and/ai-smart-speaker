@@ -2,6 +2,8 @@ import asyncio
 import inspect
 import logging
 from typing import Optional
+
+import numpy as np
 from google import genai
 from google.genai.live import AsyncSession
 from google.genai.types import (
@@ -59,6 +61,15 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         self._session_tasks: list[asyncio.Task] = []
         self._conversation_task: Optional[asyncio.Task] = None
 
+        # Output silence tracking: reset each turn via start_new_turn override below
+        self._consecutive_silent_chunks: int = 0
+
+    @staticmethod
+    def _pcm16_rms(data: bytes) -> float:
+        """Return normalised RMS [0.0, 1.0] for a 16-bit little-endian PCM buffer."""
+        arr = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+        return float(np.sqrt(np.mean(np.square(arr)))) / 32768.0
+
     def initialize(self) -> None:
         """Initialize the Gemini client."""
         api_key = self.config.api_keys.google_api_key
@@ -71,6 +82,10 @@ class GeminiRealtimeManager(BaseRealtimeManager):
     def shutdown(self) -> None:
         """Shutdown the manager."""
         self._running = False
+
+    def start_new_turn(self) -> None:
+        super().start_new_turn()
+        self._consecutive_silent_chunks = 0
 
     def _get_session_config(self) -> LiveConnectConfig:
         """Build the LiveConnectConfig for API sessions.
@@ -142,6 +157,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             except asyncio.CancelledError:
                 pass
         self._conversation_task = None
+        if self._client is not None:
+            try:
+                await self._client.aio.aclose()
+            except Exception:
+                pass
 
     async def send_activity_start(self) -> None:
         """Send activity_start signal to API (manual VAD: speech started).
@@ -326,18 +346,41 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                                     continue
 
                                 self._chunks_received += 1
+
+                                rms = self._pcm16_rms(data.data)
+                                is_silent = rms < self.live_cfg.output_silence_rms_threshold
+
+                                if is_silent:
+                                    self._consecutive_silent_chunks += 1
+                                    if self._consecutive_silent_chunks in (1, 5, 20, 50) or self._consecutive_silent_chunks % 100 == 0:
+                                        logger.warning(
+                                            "Receiving SILENT audio from Gemini (chunk #%d, rms=%.5f, consecutive_silent=%d) — watchdog NOT reset",
+                                            self._chunks_received,
+                                            rms,
+                                            self._consecutive_silent_chunks,
+                                        )
+                                else:
+                                    if self._consecutive_silent_chunks > 0:
+                                        logger.info(
+                                            "Audio resumed after %d silent chunks (rms=%.5f)",
+                                            self._consecutive_silent_chunks,
+                                            rms,
+                                        )
+                                    self._consecutive_silent_chunks = 0
+
                                 # Setting response_started=True on the first chunk
                                 # auto-starts the watchdog via the property setter.
-                                # On subsequent chunks, reset_watchdog_if_running()
-                                # extends it. This avoids a redundant double-start on
-                                # the very first chunk.
+                                # On subsequent NON-SILENT chunks, reset_watchdog_if_running()
+                                # extends it. Silent chunks do NOT reset the watchdog so that
+                                # Gemini streaming silence indefinitely will eventually time out.
                                 if not self._response_started:
                                     self.response_started = True  # starts watchdog
-                                else:
+                                elif not is_silent:
                                     self.reset_watchdog_if_running()  # extends watchdog
+
                                 await self._output_queue.put(data.data)
                                 if self._chunks_received == 1:
-                                    logger.info("Receiving audio response...")
+                                    logger.info("Receiving audio response (chunk_bytes=%d, rms=%.5f)...", len(data.data), rms)
                                 if self._on_audio_received:
                                     self._on_audio_received()
 
@@ -370,11 +413,10 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             # Handle turn complete
             if hasattr(sc, "turn_complete") and sc.turn_complete:
                 self._waiting_for_turn_complete = False
-                # Cancel the watchdog timer if it was started
-                self.cancel_watchdog()
 
-                # Ignore turn_complete if we haven't sent enough audio yet
-                # This prevents stale turn_complete from previous turns after barge-in
+                # Ignore turn_complete if we haven't sent enough audio yet — likely a
+                # stale signal from the previous turn after barge-in. Do NOT cancel the
+                # watchdog here: it must keep running so the session doesn't hang.
                 if (
                     self._frames_sent < self._min_frames_for_turn_complete
                     and not self._response_started
@@ -385,6 +427,9 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                         self._min_frames_for_turn_complete,
                     )
                     return
+
+                # Cancel watchdog only for a real (non-stale) turn_complete
+                self.cancel_watchdog()
 
                 # Log full transcripts at end of turn
                 if self._user_transcript.strip():

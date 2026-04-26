@@ -201,6 +201,7 @@ class BaseRealtimeManager(ABC):
     def reset_watchdog_if_running(self) -> None:
         """Reset the watchdog timer if it is currently active."""
         if self._watchdog_task and not self._watchdog_task.done():
+            logger.debug("Watchdog reset (chunk #%d)", self._chunks_received)
             self.start_watchdog(self._watchdog_timeout)
 
     async def _watchdog_coro(self, timeout: float) -> None:

@@ -522,7 +522,6 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
         # --- Response complete (= turn complete) ---
         elif event_type == "response.done":
-            self.cancel_watchdog()
             self._is_response_item_in_progress = False
             self._waiting_for_turn_complete = False
             response = event.get("response", {})
@@ -545,7 +544,9 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                     self._on_interrupted()
                 return
 
-            # Ignore if we haven't sent enough audio (prevents stale signals)
+            # Ignore if we haven't sent enough audio — likely a stale signal after
+            # barge-in. Do NOT cancel the watchdog: it must keep running so the
+            # session doesn't hang.
             if (
                 self._frames_sent < self._min_frames_for_turn_complete
                 and not self._response_started
@@ -556,6 +557,9 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                     self._min_frames_for_turn_complete,
                 )
                 return
+
+            # Cancel watchdog only for a real (non-stale) response.done
+            self.cancel_watchdog()
 
             # Log full transcripts at end of turn
             if self._user_transcript.strip():

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional
 from datetime import datetime
@@ -138,6 +139,70 @@ def get_current_date() -> str:
 def get_openhab_item_state(item_name: str) -> str | None:
     """Gets the state of an item in OpenHab."""
     return openhab_client.get_openhab_item_state(item_name)
+
+
+def _resolve_tv_channel(name: str) -> Optional[int]:
+    """Case-insensitive lookup of channel name in config.tv.channels."""
+    key = name.lower().strip()
+    for ch_name, ch_num in config.tv.channels.items():
+        if ch_name.lower() == key:
+            return ch_num
+    return None
+
+
+def _send_tv_channel(channel_name: str, channel_num: int) -> None:
+    openhab_client.set_openhab_item_state(config.tv.channel_item, str(channel_num))
+    logger.info("TV channel set to %s (%d)", channel_name, channel_num)
+
+
+async def _switch_channel_after_boot(channel_name: str, channel_num: int) -> None:
+    """Wait for TV to boot then send channel command (runs as background task)."""
+    power_item = config.tv.power_item
+    timeout = config.tv.boot_wait_timeout
+    interval = config.tv.boot_poll_interval
+    elapsed = 0.0
+    logger.info("Waiting for TV to boot (max %.1fs)...", timeout)
+    while elapsed < timeout:
+        await asyncio.sleep(interval)
+        elapsed += interval
+        state = openhab_client.get_openhab_item_state(power_item)
+        if str(state).upper() == "ON":
+            logger.info("TV confirmed ON after %.1fs, waiting %.1fs before channel switch", elapsed, config.tv.post_boot_delay)
+            await asyncio.sleep(config.tv.post_boot_delay)
+            break
+    else:
+        logger.warning("TV did not confirm ON within %.1fs — sending channel anyway", timeout)
+    _send_tv_channel(channel_name, channel_num)
+
+
+@register_function(name="watch_tv")
+async def watch_tv(channel_name: Optional[str] = None) -> dict:
+    """Turn on the TV and/or switch to a channel by name."""
+    power_item = config.tv.power_item
+
+    current_state = openhab_client.get_openhab_item_state(power_item)
+    already_on = str(current_state).upper() == "ON"
+
+    if not already_on:
+        openhab_client.set_openhab_item_state(power_item, "ON")
+        logger.info("TV power ON sent (was off)")
+
+    if not channel_name:
+        return {"status": "success", "message": "TV turned on." if not already_on else "TV is already on."}
+
+    channel_num = _resolve_tv_channel(channel_name)
+    if channel_num is None:
+        return {
+            "status": "partial_success",
+            "message": f"TV {'turned on' if not already_on else 'is on'} but channel '{channel_name}' not recognised.",
+        }
+
+    if already_on:
+        _send_tv_channel(channel_name, channel_num)
+    else:
+        asyncio.create_task(_switch_channel_after_boot(channel_name, channel_num))
+
+    return {"status": "success", "message": f"TV on, switching to {channel_name}."}
 
 
 @register_function(name="set_openhab_item_state")
