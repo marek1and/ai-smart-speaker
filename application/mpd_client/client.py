@@ -117,7 +117,6 @@ class MPDClientWrapper:
                 await asyncio.to_thread(self.client.play)
                 logger.info("Started playing station: %s", url)
                 self._is_playing = True
-                self._is_ducked = False
             except (BrokenPipeError, ConnectionResetError) as e:
                 logger.warning("MPD connection reset during play_station (%s), reconnecting...", type(e).__name__)
                 if await self._reconnect_unsafe():
@@ -128,7 +127,6 @@ class MPDClientWrapper:
                         await asyncio.to_thread(self.client.play)
                         logger.info("Started playing station after reconnect: %s", url)
                         self._is_playing = True
-                        self._is_ducked = False
                     except (MPDError, IOError) as retry_e:
                         logger.error("Failed to play station after reconnect: %s", retry_e)
                         await self._disconnect_unsafe()
@@ -480,6 +478,9 @@ class MPDClientWrapper:
     async def play(self):
         """Plays the current playlist and fades the volume in."""
         logger.info("Executing play command.")
+        if await self.is_playing():
+            logger.info("Already playing, skipping play command.")
+            return
         async with self._mpd_lock:
             if not await self._connect():
                 return
@@ -488,10 +489,9 @@ class MPDClientWrapper:
                 await asyncio.to_thread(self.client.play)
                 logger.info("Playback started.")
                 self._is_playing = True
-                self._is_ducked = False
             except (MPDError, IOError, MPDConnectionError) as e:
                 logger.error("Error starting playback: %s", e)
                 await self._disconnect_unsafe()
                 return
-        
+
         await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
