@@ -35,18 +35,18 @@ class SessionRecorder:
 
     def start(
         self,
-        model_threshold: Optional[float] = None,
-        verifier_threshold: Optional[float] = None,
+        model_score: Optional[float] = None,
+        verifier_score: Optional[float] = None,
     ) -> None:
         """Open a new timestamped WAV file and begin recording."""
         os.makedirs(_RECORDINGS_DIR, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        thresh_tag = ""
-        if model_threshold is not None:
-            thresh_tag += f"_s{model_threshold:.2f}"
-        if verifier_threshold is not None:
-            thresh_tag += f"_v{verifier_threshold:.2f}"
-        self._wav_path = os.path.join(_RECORDINGS_DIR, f"session_{timestamp}{thresh_tag}.wav")
+        score_tag = ""
+        if model_score is not None:
+            score_tag += f"_s{model_score:.3f}"
+        if verifier_score is not None:
+            score_tag += f"_v{verifier_score:.3f}"
+        self._wav_path = os.path.join(_RECORDINGS_DIR, f"session_{timestamp}{score_tag}.wav")
         self._wav_file = wave.open(self._wav_path, "wb")
         self._wav_file.setnchannels(1)
         self._wav_file.setsampwidth(2)

@@ -38,6 +38,7 @@ class WakeWordDetector:
         self._last_trigger_time: float = 0.0  # For cooldown
         # Counter for consecutive frames above threshold (false-positive suppression)
         self._consecutive_above_threshold: int = 0
+        self._last_verifier_score: Optional[float] = None
         self.model = self._load_model()
         self._verifier: Optional[Any] = self._load_verifier()
 
@@ -126,9 +127,10 @@ class WakeWordDetector:
         if model_above and self._verifier is not None:
             n_features = self.model.model_inputs.get(self._prediction_key, 16)
             features = self.model.preprocessor.get_features(n_features)
-            verifier_score = float(self._verifier.predict_proba(features)[0][-1])
-            approved = verifier_score >= self.cfg.verifier_threshold
+            self._last_verifier_score = float(self._verifier.predict_proba(features)[0][-1])
+            approved = self._last_verifier_score >= self.cfg.verifier_threshold
         else:
+            self._last_verifier_score = None
             approved = model_above
 
         if approved:

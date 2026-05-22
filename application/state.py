@@ -29,6 +29,5 @@ class WakeWordResult:
     score: float
     max_score: float
     vad_score: float = 0.0
-    model_threshold: float = 0.0
-    verifier_threshold: Optional[float] = None
+    verifier_score: Optional[float] = None
     timestamp: float = field(default_factory=time.time)

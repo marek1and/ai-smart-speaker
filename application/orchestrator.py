@@ -105,6 +105,7 @@ class AudioOrchestrator:
         self._wake_event = asyncio.Event()
         self._turn_complete_event = asyncio.Event()
         self._stop_playback_event = asyncio.Event()
+        self._last_wake_result: Optional[WakeWordResult] = None
 
         # Components (initialized in start())
         self._audio_input: Optional[AudioInput] = None
@@ -470,17 +471,13 @@ class AudioOrchestrator:
         score, max_score, vad_score, triggered = await loop.run_in_executor(
             self._executor, _inference
         )
+        assert self._wake_detector is not None
         return WakeWordResult(
             triggered=triggered,
             score=score,
             max_score=max_score,
             vad_score=vad_score,
-            model_threshold=self._wake_detector.cfg.threshold,
-            verifier_threshold=(
-                self._wake_detector.cfg.verifier_threshold
-                if self._wake_detector._verifier is not None
-                else None
-            ),
+            verifier_score=self._wake_detector._last_verifier_score,
         )
 
     async def _handle_wake_word_result(self, result: WakeWordResult) -> None:
@@ -512,6 +509,7 @@ class AudioOrchestrator:
             self._sound_player.play(SoundEvent.WAKE_WORD)
 
         if self._state == SpeakerState.IDLE:
+            self._last_wake_result = result
             self._wake_event.set()
 
         elif self._state == SpeakerState.RESPONDING:
@@ -711,8 +709,8 @@ class AudioOrchestrator:
         if not self._api_manager.session_active:
             await self._api_manager.open_session()
             self._recorder.start(
-                model_threshold=result.model_threshold,
-                verifier_threshold=result.verifier_threshold,
+                model_score=self._last_wake_result.score if self._last_wake_result else None,
+                verifier_score=self._last_wake_result.verifier_score if self._last_wake_result else None,
             )
             self._session_turn_count = 0
         else:
