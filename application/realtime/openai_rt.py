@@ -11,6 +11,7 @@ import inspect
 import json
 import logging
 import os
+import traceback
 from typing import Optional
 
 import numpy as np
@@ -66,6 +67,10 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         self._audio_bytes_received: int = 0
         self._is_response_item_in_progress: bool = False
 
+        # Pending cancel/clear to execute before sending the first frame of a new turn.
+        # None = no pending operation; True/False = value to pass as cancel_response.
+        self._pending_cancel: Optional[bool] = None
+
     def initialize(self) -> None:
         """Initialize the OpenAI client."""
         api_key = self.config.api_keys.openai_api_key or os.environ.get(
@@ -93,8 +98,13 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             self._run_conversation(), name="openai_conversation"
         )
 
-        # Wait a moment for session to establish
-        await asyncio.sleep(0.3)
+        # Poll until the session is established (or give up after 10 s).
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while not self._session_active:
+            if asyncio.get_running_loop().time() > deadline:
+                logger.warning("open_session: timed out waiting for OpenAI session")
+                break
+            await asyncio.sleep(0.05)
 
     async def close_session(self) -> None:
         """Close the active session by cancelling the conversation task."""
@@ -165,20 +175,19 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
         Overrides base to also cancel any in-progress response, truncate
         assistant audio, and clear the input audio buffer on the OpenAI side.
+
+        The cancel/clear is NOT fired as a background task here — that caused a
+        race where new audio frames arrived at OpenAI before the buffer.clear
+        message, so those frames were silently discarded (losing initial user
+        speech after barge-in).  Instead we set a flag; _send_to_api_task checks
+        it and awaits _cancel_and_clear() before forwarding the first new frame.
         """
-        # Capture before super() resets base fields, then reset immediately so
-        # send_activity_end isn't blocked while waiting for response.done(cancelled).
         was_response_in_progress = self._is_response_item_in_progress
         super().start_new_turn()
         self._is_response_item_in_progress = False
 
-        # Cancel current response, truncate, and clear buffer (for barge-in)
         if self._ws and self._session_active:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._cancel_and_clear(cancel_response=was_response_in_progress))
-            except RuntimeError:
-                pass
+            self._pending_cancel = was_response_in_progress
 
     async def _cancel_and_clear(self, cancel_response: bool = True) -> None:
         """Cancel in-progress response, truncate assistant audio, and clear input buffer."""
@@ -244,78 +253,84 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
     # -------------------------------------------------------------------------
 
     async def _run_conversation(self) -> None:
-        """Run a conversation session with the OpenAI Realtime API."""
+        """Run a conversation session with the OpenAI Realtime API.
+
+        Retries the connection up to max_reconnect_attempts times on network
+        errors.  A CancelledError (from close_session) stops retries immediately.
+        """
         import websockets
 
         model = self.live_cfg.openai_model
         url = f"{OPENAI_REALTIME_URL}?model={model}"
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-        }
-
-        logger.info("Opening OpenAI Realtime API session (model=%s)...", model)
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        max_attempts = self.live_cfg.max_reconnect_attempts
 
         try:
-            async with websockets.connect(
-                url,
-                additional_headers=headers,
-                max_size=2**24,  # 16MB max message size for audio
-            ) as ws:
-                self._ws = ws
-                self._session_active = True
-
-                # Wait for session.created event
-                initial_msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                initial_event = json.loads(initial_msg)
-
-                if initial_event.get("type") == "session.created":
-                    session_info = initial_event.get("session", {})
-                    logger.info(
-                        "Session created (id=%s)", session_info.get("id", "unknown")
-                    )
-                elif initial_event.get("type") == "error":
-                    error = initial_event.get("error", {})
-                    logger.error(
-                        "Session creation error: %s - %s",
-                        error.get("type", "unknown"),
-                        error.get("message", ""),
-                    )
-                    return
-
-                # Configure session
-                await self._configure_session()
-                logger.info("Session opened successfully.")
-
-                # Run send and receive concurrently
-                send_task = asyncio.create_task(
-                    self._send_to_api_task(), name="openai_send"
-                )
-                receive_task = asyncio.create_task(
-                    self._receive_from_api_task(), name="openai_receive"
-                )
-                self._session_tasks = [send_task, receive_task]
-
-                # Keep session alive until cancelled
+            for attempt in range(1, max_attempts + 1):
+                logger.info("Opening OpenAI Realtime API session (model=%s, attempt %d/%d)...", model, attempt, max_attempts)
                 try:
-                    while self._running and self._session_active:
-                        await asyncio.sleep(0.1)
+                    async with websockets.connect(
+                        url,
+                        additional_headers=headers,
+                        max_size=2**24,
+                    ) as ws:
+                        self._ws = ws
+                        self._session_active = True
+
+                        initial_msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                        initial_event = json.loads(initial_msg)
+
+                        if initial_event.get("type") == "session.created":
+                            session_info = initial_event.get("session", {})
+                            logger.info("Session created (id=%s)", session_info.get("id", "unknown"))
+                        elif initial_event.get("type") == "error":
+                            error = initial_event.get("error", {})
+                            logger.error(
+                                "Session creation error: %s - %s",
+                                error.get("type", "unknown"),
+                                error.get("message", ""),
+                            )
+                            break
+
+                        await self._configure_session()
+                        logger.info("Session opened successfully.")
+
+                        send_task = asyncio.create_task(self._send_to_api_task(), name="openai_send")
+                        receive_task = asyncio.create_task(self._receive_from_api_task(), name="openai_receive")
+                        self._session_tasks = [send_task, receive_task]
+
+                        try:
+                            while self._running and self._session_active:
+                                await asyncio.sleep(0.1)
+                        except asyncio.CancelledError:
+                            logger.debug("Conversation task cancelled")
+                            raise
+                        finally:
+                            self.cancel_watchdog()
+                            for task in self._session_tasks:
+                                task.cancel()
+                            await asyncio.gather(*self._session_tasks, return_exceptions=True)
+                            self._session_tasks.clear()
+
+                    # Clean exit from async-with — don't retry.
+                    break
+
                 except asyncio.CancelledError:
-                    logger.debug("Conversation task cancelled")
                     raise
-                finally:
-                    self.cancel_watchdog()
-                    for task in self._session_tasks:
-                        task.cancel()
-                    await asyncio.gather(*self._session_tasks, return_exceptions=True)
-                    self._session_tasks.clear()
-
-        except (OSError, ConnectionError, TimeoutError) as e:
-            logger.error("Session error: %s", e)
-        except Exception as e:
-            logger.error("Unexpected session error: %s", e)
-            import traceback
-
-            traceback.print_exc()
+                except (OSError, ConnectionError, TimeoutError) as e:
+                    if attempt >= max_attempts or not self._running:
+                        logger.error("OpenAI session failed after %d attempt(s): %s", attempt, e)
+                        break
+                    delay = min(2.0 ** (attempt - 1), 30.0)
+                    logger.warning(
+                        "Session connection error (attempt %d/%d), retrying in %.0fs: %s",
+                        attempt, max_attempts, delay, e,
+                    )
+                    await asyncio.sleep(delay)
+                except Exception as e:
+                    logger.error("Unexpected session error: %s", e)
+                    traceback.print_exc()
+                    break
         finally:
             self._ws = None
             self._session_active = False
@@ -385,6 +400,13 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
     async def _send_to_api_task(self) -> None:
         """Send audio frames from input queue to OpenAI API."""
         while self._running and self._session_active:
+            # Execute pending cancel/clear before forwarding any new frames.
+            # This guarantees buffer.clear arrives at OpenAI before new audio,
+            # preventing the barge-in race where initial user speech was dropped.
+            if self._pending_cancel is not None:
+                await self._cancel_and_clear(cancel_response=self._pending_cancel)
+                self._pending_cancel = None
+
             try:
                 try:
                     frame = await asyncio.wait_for(self._input_queue.get(), timeout=0.5)

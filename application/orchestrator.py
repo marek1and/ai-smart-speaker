@@ -33,6 +33,7 @@ from config import (
     VADConfig,
     WakeWordConfig,
 )
+from functions.definitions import close_radio_client, inject_mpd_client
 from mpd_client.client import MPDClientWrapper
 from realtime import BaseRealtimeManager, create_realtime_manager
 from state import AudioFrame, SpeakerState, WakeWordResult
@@ -209,6 +210,10 @@ class AudioOrchestrator:
         # Initialize MPD state now that event loop is running
         await self.mpd_client.initialize_state()
 
+        # Share this MPD client with all tool functions so they operate on the same
+        # connection and see the same duck/unduck state as the orchestrator.
+        inject_mpd_client(self.mpd_client)
+
         # Initialize audio I/O (SoundDevice)
         self._audio_input = AudioInput(self.audio_cfg, self._mic_queue)
         self._audio_output = AudioOutput(self.audio_cfg, self._speaker_queue)
@@ -307,6 +312,7 @@ class AudioOrchestrator:
             await self._api_manager.close_session()
 
         await self.mpd_client.disconnect()
+        await close_radio_client()
         self._recorder.close()
 
         if self._audio_output:
@@ -358,7 +364,7 @@ class AudioOrchestrator:
 
     async def _audio_capture_task(self) -> None:
         """Continuous audio capture from microphone with VAD processing."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         while self._running:
             try:
@@ -539,6 +545,12 @@ class AudioOrchestrator:
 
     async def _execute_barge_in(self) -> None:
         """Execute hard barge-in with instant audio cutoff."""
+        if self._state != SpeakerState.RESPONDING:
+            # Barge-in is only valid during RESPONDING (AI is speaking).
+            # In FOLLOW_UP the user is already talking, so there's nothing to interrupt.
+            # In other states a duplicate callback from _on_interrupted may arrive
+            # after _handle_wake_word_result already handled it — both cases: no-op.
+            return
         self._stop_playback_event.set()
         self._playback_interrupted = True
         self._api_manager.playback_interrupted = True
@@ -687,7 +699,10 @@ class AudioOrchestrator:
 
         if not self._api_manager.session_active:
             await self._api_manager.open_session()
-            self._recorder.start()
+            self._recorder.start(
+                model_threshold=self.wake_cfg.threshold,
+                verifier_threshold=self.wake_cfg.verifier_threshold if self.wake_cfg.verifier_path else None,
+            )
             self._session_turn_count = 0
         else:
             logger.info("Reusing existing session (recording continues)")
@@ -785,6 +800,11 @@ class AudioOrchestrator:
             return
 
         await asyncio.sleep(0.3)
+
+        # Re-check after sleep: barge-in may have transitioned state to LISTENING.
+        if self._state != SpeakerState.RESPONDING:
+            return
+
         await self._execute_post_response_actions()
 
     async def _dispatch_deferred_actions(self) -> bool:
@@ -805,12 +825,16 @@ class AudioOrchestrator:
             payload = action.get("payload", {})
 
             if action_type == "play_internet_radio":
-                logger.info("Executing deferred action: play_internet_radio")
-                if payload.get("url"):
+                if payload.get("status") == "error":
+                    logger.warning("play_internet_radio deferred error: %s", payload.get("details"))
+                elif payload.get("url"):
+                    logger.info("Executing deferred action: play_internet_radio (url)")
                     await self.mpd_client.play_station(payload["url"])
+                    ran_radio_action = True
                 elif payload.get("action") == "play":
+                    logger.info("Executing deferred action: play_internet_radio (resume)")
                     await self.mpd_client.play()
-                ran_radio_action = True
+                    ran_radio_action = True
 
             elif action_type == "set_playback_volume":
                 logger.info("Executing deferred action: set_playback_volume")
@@ -921,15 +945,16 @@ class AudioOrchestrator:
         logger.info("Listening for wake word... (session closed after false trigger)")
 
     def _ai_ended_with_question(self) -> bool:
-        """Fallback follow-up trigger: AI transcript contains '?'.
+        """Fallback follow-up trigger: AI transcript ends with '?'.
 
         Catches cases where the model asked a question but forgot to call
-        request_for_user_input.
+        request_for_user_input. Checks the final character only — a '?' inside
+        a sentence (e.g., a parenthetical) must not trigger a follow-up.
         """
         if self._api_manager is None:
             return False
         transcript = self._api_manager.ai_transcript.strip()
-        return bool(transcript) and "?" in transcript
+        return bool(transcript) and transcript.endswith("?")
 
     async def _duck_radio_if_playing(self) -> None:
         """Duck radio volume if playback is active."""

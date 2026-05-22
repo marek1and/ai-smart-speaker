@@ -12,8 +12,28 @@ logger = logging.getLogger(__name__)
 
 config = AppConfig.from_yaml()
 openhab_client = OpenHabClient(config.openhab)
-mpd_client = MPDClientWrapper(config.mpd)
 radio_client = RadioClient(config.radio)
+
+# MPD client is injected by the orchestrator at startup so all tool functions
+# share the same connection and see the same duck/unduck state.
+_mpd_client: Optional[MPDClientWrapper] = None
+
+
+def inject_mpd_client(client: MPDClientWrapper) -> None:
+    """Called once by AudioOrchestrator.start() to share its MPD client."""
+    global _mpd_client
+    _mpd_client = client
+
+
+async def close_radio_client() -> None:
+    """Close the RadioBrowser HTTP session. Called from orchestrator cleanup."""
+    await radio_client.close()
+
+
+def _mpd() -> MPDClientWrapper:
+    if _mpd_client is None:
+        raise RuntimeError("MPD client not injected — inject_mpd_client() must be called first")
+    return _mpd_client
 
 
 @register_function(name="play_internet_radio")
@@ -25,10 +45,8 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
     if not station_name:
         radio_status = await get_radio_status()
         if radio_status.get("is_radio_on_playlist"):
-            # A station is on the playlist, signal to resume.
             return {"action": "play"}
         else:
-            # No station to resume, ask user for a name.
             return {
                 "status": "error",
                 "details": "No radio station is on the playlist. What station would you like to play?",
@@ -36,7 +54,6 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
 
     url = await radio_client.search_station(station_name)
     if url:
-        # Found the station, return its URL for deferred playback.
         return {"url": url, "name": station_name}
     else:
         return {
@@ -47,10 +64,8 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
 
 @register_function(name="stop_radio")
 async def stop_radio() -> dict:
-    """
-    Stops the radio playback immediately.
-    """
-    await mpd_client.stop()
+    """Stops the radio playback immediately."""
+    await _mpd().stop()
     return {"status": "success", "message": "Radio playback stopped."}
 
 
@@ -61,9 +76,10 @@ async def get_radio_status() -> dict:
     and whether a radio station is currently in the playlist.
     This function is executed immediately.
     """
-    status = await mpd_client.get_status() or {}
-    playlist = await mpd_client.get_playlist_info()
-    volume = mpd_client.get_restore_volume()
+    client = _mpd()
+    status = await client.get_status() or {}
+    playlist = await client.get_playlist_info()
+    volume = client.get_restore_volume()
 
     is_radio_on_playlist = False
     station_name_on_playlist = None
@@ -72,12 +88,10 @@ async def get_radio_status() -> dict:
         station_name = first_item.get("name") or first_item.get("title")
         url = first_item.get("file", "")
 
-        # Check for "radio" keyword in name or URL
         is_radio_keyword = (station_name and "radio" in station_name.lower()) or (
             "radio" in url.lower()
         ) or ("live" in url.lower())
 
-        # Check if the station name is in the popular stations list
         is_popular_station = False
         if station_name:
             popular_stations = config.radio.popular_stations
@@ -89,12 +103,10 @@ async def get_radio_status() -> dict:
             is_radio_on_playlist = True
             station_name_on_playlist = station_name or "Unknown Radio"
 
-    current_song = await mpd_client.get_current_song_info()
+    current_song = await client.get_current_song_info()
     currently_playing_station = None
     if current_song:
-        currently_playing_station = current_song.get("title") or current_song.get(
-            "name"
-        )
+        currently_playing_station = current_song.get("title") or current_song.get("name")
 
     return {
         "playback_state": status.get("state"),  # play, stop, pause

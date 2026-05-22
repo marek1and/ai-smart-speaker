@@ -6,3 +6,4 @@ recordings/
 .env
 config.yml
 typings
+models/

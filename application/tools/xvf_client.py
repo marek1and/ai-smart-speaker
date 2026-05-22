@@ -175,11 +175,14 @@ class ReSpeakerLeds:
             if effect in (1, 2):  # Breath or Rainbow
                 self._respeaker.write("LED_SPEED", [speed])
                 self._respeaker.write("LED_BRIGHTNESS", [brightness])
+            if effect == 4:  # DOA
+                self._respeaker.write("LED_BRIGHTNESS", [brightness])
         except Exception as e:
             logger.error("Failed to set ReSpeaker LEDs: %s", e)
 
     def set_idle(self) -> None:
-        self._set_color(effect=0)
+        """DOA mode — shows direction of arriving sound."""
+        self._set_color(effect=4, brightness=255)
 
     def set_listening(self) -> None:
         """Breath mode, green — waiting for user speech."""

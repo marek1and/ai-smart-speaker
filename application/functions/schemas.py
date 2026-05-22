@@ -86,7 +86,7 @@ SET_PLAYBACK_VOLUME_FUNC = FunctionDeclaration(
 
 GET_RADIO_STATUS_FUNC = FunctionDeclaration(
     name="get_radio_status",
-    description="Gets the current status of the radio, including playback state, volume, and whether a radio station is currently in the playlist. This should be the first step for any radio related query.",
+    description="Gets the current status of the radio: playback state, volume, and whether a station is in the playlist. Use ONLY when the user explicitly asks what is currently playing or for the radio status — do NOT call before play/stop commands.",
     parameters=Schema(
         type=Type.OBJECT,
         properties={},

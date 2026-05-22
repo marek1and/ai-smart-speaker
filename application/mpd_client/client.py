@@ -251,20 +251,30 @@ class MPDClientWrapper:
 
 
     async def unduck(self):
-        """Restores the volume to the user-defined restore_volume if music is playing."""
+        """Restores the volume to restore_volume after ducking.
+
+        Always restores the MPD hardware volume, even when stopped, so the next
+        play() call and any external MPD clients see the correct level.
+        When something is playing, uses a smooth fade-in; when stopped, sets
+        the volume directly (no point fading silence).
+        """
         logger.debug("unduck() called.")
         if not self._is_ducked:
             logger.debug("unduck() finished early: not ducked.")
             return
 
-        self._is_ducked = False  # Set state immediately
+        self._is_ducked = False
 
-        if not await self.is_playing():
-            logger.debug("Ignoring unduck command as nothing is playing.")
-            return
+        if await self.is_playing():
+            logger.info("Restoring volume to %d%% (fade, playing)", self._restore_volume)
+            await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
+        else:
+            # Not playing — restore volume directly so hardware level is correct.
+            logger.info("Restoring volume to %d%% (direct, stopped)", self._restore_volume)
+            async with self._mpd_lock:
+                if await self._connect():
+                    await self._set_internal_volume_unsafe(self._restore_volume)
 
-        logger.info(f"Restoring volume to {self._restore_volume}%%")
-        await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
         logger.debug("unduck() finished.")
 
     async def _fade_to(self, target_volume: int, duration: float):
@@ -387,9 +397,12 @@ class MPDClientWrapper:
                 # protocol state for the next command.
                 await self._reconnect_unsafe()
             except asyncio.TimeoutError:
-                pass
+                # Command timed out — assume stopped to avoid a stale True cache
+                # causing duck/unduck to behave as if music is still playing.
+                self._is_playing = None
             except (MPDError, IOError, MPDConnectionError) as e:
                 logger.error("Error stopping playback: %s", e)
+                self._is_playing = None
                 await self._disconnect_unsafe()
 
     async def get_status(self) -> Optional[Dict[str, Any]]:

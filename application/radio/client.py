@@ -10,6 +10,13 @@ class RadioClient:
         self.config = config
         self.rb = RadioBrowser(user_agent="AI Smart Speaker")
 
+    async def close(self) -> None:
+        """Close the underlying HTTP session."""
+        try:
+            await self.rb.close()
+        except Exception:
+            pass
+
     async def search_station(self, station_name: str) -> str | None:
         logger.info(
             "Searching for radio station '%s' in country '%s'",

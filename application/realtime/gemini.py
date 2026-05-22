@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import logging
+import traceback
 from typing import Optional
 
 import numpy as np
@@ -140,16 +141,26 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             logger.warning("Session already active, skipping open")
             return
 
-        # Spawn conversation as a task
         self._conversation_task = asyncio.create_task(
             self._run_conversation(), name="conversation"
         )
 
-        # Wait a moment for session to establish
-        await asyncio.sleep(0.1)
+        # Poll until the session is established (or give up after 10 s).
+        # A fixed sleep races against slow networks; polling is reliable.
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while not self._session_active:
+            if asyncio.get_running_loop().time() > deadline:
+                logger.warning("open_session: timed out waiting for Gemini session")
+                break
+            await asyncio.sleep(0.05)
 
     async def close_session(self) -> None:
-        """Close the active session by cancelling the conversation task."""
+        """Close the active session by cancelling the conversation task.
+
+        The genai client is kept alive across sessions so its connection pool
+        can be reused — calling aio.aclose() would permanently close httpx and
+        break every subsequent open_session() call.
+        """
         if self._conversation_task and not self._conversation_task.done():
             self._conversation_task.cancel()
             try:
@@ -157,11 +168,6 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             except asyncio.CancelledError:
                 pass
         self._conversation_task = None
-        if self._client is not None:
-            try:
-                await self._client.aio.aclose()
-            except Exception:
-                pass
 
     async def send_activity_start(self) -> None:
         """Send activity_start signal to API (manual VAD: speech started).
@@ -211,47 +217,64 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         """
         Run a conversation session with the Gemini API.
 
-        Keeps the session open until explicitly cancelled.
+        Retries the connection up to max_reconnect_attempts times on network
+        errors.  A CancelledError (from close_session) stops retries immediately.
         """
         config = self._get_session_config()
-
-        logger.info("Opening Gemini Live API session...")
+        max_attempts = self.live_cfg.max_reconnect_attempts
 
         try:
-            async with self._client.aio.live.connect(
-                model=self.live_cfg.model,
-                config=config,
-            ) as session:
-                self._session = session
-                self._session_active = True
-                logger.info("Session opened successfully.")
-
-                # Run send and receive concurrently
-                send_task = asyncio.create_task(
-                    self._send_to_api_task(), name="send_to_api"
-                )
-                receive_task = asyncio.create_task(
-                    self._receive_from_api_task(), name="receive_from_api"
-                )
-                self._session_tasks = [send_task, receive_task]
-
-                # Keep session alive until cancelled by state machine
+            for attempt in range(1, max_attempts + 1):
+                logger.info("Opening Gemini Live API session (attempt %d/%d)...", attempt, max_attempts)
                 try:
-                    while self._running and self._session_active:
-                        await asyncio.sleep(0.1)
-                except asyncio.CancelledError:
-                    logger.debug("Conversation task cancelled")
-                    raise
-                finally:
-                    # Cancel session tasks
-                    self.cancel_watchdog()
-                    for task in self._session_tasks:
-                        task.cancel()
-                    await asyncio.gather(*self._session_tasks, return_exceptions=True)
-                    self._session_tasks.clear()
+                    async with self._client.aio.live.connect(
+                        model=self.live_cfg.model,
+                        config=config,
+                    ) as session:
+                        self._session = session
+                        self._session_active = True
+                        logger.info("Session opened successfully.")
 
-        except (OSError, ConnectionError, TimeoutError) as e:
-            logger.error("Session error: %s", e)
+                        send_task = asyncio.create_task(
+                            self._send_to_api_task(), name="send_to_api"
+                        )
+                        receive_task = asyncio.create_task(
+                            self._receive_from_api_task(), name="receive_from_api"
+                        )
+                        self._session_tasks = [send_task, receive_task]
+
+                        try:
+                            while self._running and self._session_active:
+                                await asyncio.sleep(0.1)
+                        except asyncio.CancelledError:
+                            logger.debug("Conversation task cancelled")
+                            raise
+                        finally:
+                            self.cancel_watchdog()
+                            for task in self._session_tasks:
+                                task.cancel()
+                            await asyncio.gather(*self._session_tasks, return_exceptions=True)
+                            self._session_tasks.clear()
+
+                    # Clean exit from async-with — don't retry.
+                    break
+
+                except asyncio.CancelledError:
+                    raise
+                except (OSError, ConnectionError, TimeoutError) as e:
+                    if attempt >= max_attempts or not self._running:
+                        logger.error("Gemini session failed after %d attempt(s): %s", attempt, e)
+                        break
+                    delay = min(2.0 ** (attempt - 1), 30.0)
+                    logger.warning(
+                        "Session connection error (attempt %d/%d), retrying in %.0fs: %s",
+                        attempt, max_attempts, delay, e,
+                    )
+                    await asyncio.sleep(delay)
+                except Exception as e:
+                    logger.error("Unexpected Gemini session error: %s", e)
+                    traceback.print_exc()
+                    break
         finally:
             self._session = None
             self._session_active = False
@@ -299,8 +322,6 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 break
             except Exception as e:
                 logger.error("Receive from API error: %s", e)
-                import traceback
-
                 traceback.print_exc()
                 self._session_active = False
                 if self._on_turn_complete:

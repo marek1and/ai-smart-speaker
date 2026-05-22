@@ -60,6 +60,11 @@ class WakeWordConfig:
         2  # Consecutive frames above threshold required to trigger
     )
 
+    # Custom verifier model (sklearn .pkl loaded independently from openwakeword)
+    verifier_path: Optional[str] = None  # Path to .pkl verifier
+    # Wake word passes only when: model_score >= threshold AND verifier_score >= verifier_threshold
+    verifier_threshold: float = 0.7
+
     # STT post-trigger verification (reduces false positives via faster-whisper)
     verify_with_stt: bool = False
     stt_model: str = "tiny.en"  # faster-whisper model: tiny.en, base.en, small.en

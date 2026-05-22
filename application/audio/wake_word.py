@@ -1,8 +1,10 @@
 """Wake word detection using openwakeword (ONNX only)."""
 
+import os
+import pickle
 import time
 from collections import deque
-from typing import Deque, Tuple
+from typing import Any, Deque, Optional, Tuple
 
 import numpy as np
 from openwakeword.model import Model
@@ -37,6 +39,7 @@ class WakeWordDetector:
         # Counter for consecutive frames above threshold (false-positive suppression)
         self._consecutive_above_threshold: int = 0
         self.model = self._load_model()
+        self._verifier: Optional[Any] = self._load_verifier()
 
     def _load_model(self) -> Model:
         """
@@ -74,8 +77,29 @@ class WakeWordDetector:
         self._prediction_key = list(model.models.keys())[0]
 
         vad_info = f", VAD gate={self.cfg.vad_threshold}" if self.cfg.vad_threshold > 0 else ""
-        print(f"[INFO] Loaded wake word model (ONNX): {self._prediction_key}{vad_info}")
+        print(f"[INFO] Loaded wake word model (ONNX): {self._prediction_key}"
+              f", threshold={self.cfg.threshold}{vad_info}")
         return model
+
+    def _load_verifier(self) -> Optional[Any]:
+        """Load sklearn verifier .pkl from disk."""
+        if not self.cfg.verifier_path:
+            return None
+        try:
+            with open(self.cfg.verifier_path, "rb") as f:
+                verifier = pickle.load(f)
+            classes = list(getattr(verifier, "classes_", []))
+            if not classes or classes[-1] != 1:
+                raise ValueError(
+                    f"Verifier classes_ must end with 1 (positive class), got {classes}. "
+                    "predict_proba(...)[0][-1] would index the wrong class."
+                )
+            print(f"[INFO] Loaded verifier: {os.path.basename(self.cfg.verifier_path)}"
+                  f", threshold={self.cfg.verifier_threshold}")
+            return verifier
+        except Exception as e:
+            print(f"[ERROR] Failed to load verifier '{self.cfg.verifier_path}': {e}")
+            return None
 
     def process(self, mono: np.ndarray) -> Tuple[float, float, float, bool]:
         """
@@ -97,9 +121,17 @@ class WakeWordDetector:
         self.score_window.append(score)
         max_score = max(self.score_window) if self.score_window else 0.0
 
-        # Track consecutive frames above threshold to suppress brief false-positive spikes
-        # (e.g., distant TV voices or conversations in another room)
-        if score >= self.cfg.threshold:
+        # Track consecutive frames where BOTH model and verifier (if loaded) approve.
+        model_above = score >= self.cfg.threshold
+        if model_above and self._verifier is not None:
+            n_features = self.model.model_inputs.get(self._prediction_key, 16)
+            features = self.model.preprocessor.get_features(n_features)
+            verifier_score = float(self._verifier.predict_proba(features)[0][-1])
+            approved = verifier_score >= self.cfg.verifier_threshold
+        else:
+            approved = model_above
+
+        if approved:
             self._consecutive_above_threshold += 1
         else:
             self._consecutive_above_threshold = 0
