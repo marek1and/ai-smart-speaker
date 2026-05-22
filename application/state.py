@@ -3,6 +3,7 @@
 import enum
 import time
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 class SpeakerState(enum.Enum):
@@ -28,4 +29,6 @@ class WakeWordResult:
     score: float
     max_score: float
     vad_score: float = 0.0
+    model_threshold: float = 0.0
+    verifier_threshold: Optional[float] = None
     timestamp: float = field(default_factory=time.time)

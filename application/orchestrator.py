@@ -470,7 +470,18 @@ class AudioOrchestrator:
         score, max_score, vad_score, triggered = await loop.run_in_executor(
             self._executor, _inference
         )
-        return WakeWordResult(triggered=triggered, score=score, max_score=max_score, vad_score=vad_score)
+        return WakeWordResult(
+            triggered=triggered,
+            score=score,
+            max_score=max_score,
+            vad_score=vad_score,
+            model_threshold=self._wake_detector.cfg.threshold,
+            verifier_threshold=(
+                self._wake_detector.cfg.verifier_threshold
+                if self._wake_detector._verifier is not None
+                else None
+            ),
+        )
 
     async def _handle_wake_word_result(self, result: WakeWordResult) -> None:
         """Handle wake word detection result based on current state."""
@@ -700,8 +711,8 @@ class AudioOrchestrator:
         if not self._api_manager.session_active:
             await self._api_manager.open_session()
             self._recorder.start(
-                model_threshold=self.wake_cfg.threshold,
-                verifier_threshold=self.wake_cfg.verifier_threshold if self.wake_cfg.verifier_path else None,
+                model_threshold=result.model_threshold,
+                verifier_threshold=result.verifier_threshold,
             )
             self._session_turn_count = 0
         else:
