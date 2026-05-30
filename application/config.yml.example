@@ -171,5 +171,23 @@ mpd:
   port: 6600
   connection_timeout: 5
   volume_fade_in_seconds: 1.0  # Duration of volume fade-in (resuming)
-  volume_duck_percentage: 20 # Volume percentage during conversation
-  default_playback_volume: 70 # Default playback volume if no previous volume is known
+  volume_duck_percentage: 20   # Volume percentage during conversation
+  default_playback_volume: 70  # Default playback volume if no previous volume is known
+  state_file: "radio_state.json"  # Persists station name across restarts
+
+mqtt:
+  enabled: false
+  broker: "192.168.1.x"
+  port: 1883
+  topic_prefix: "home/living-room/speaker"
+  # username: ~
+  # password: ~
+  reconnect_interval: 5.0
+  # Topics published (retain=true):
+  #   {topic_prefix}/radio/state    → ON / OFF
+  #   {topic_prefix}/radio/station  → station name
+  #   {topic_prefix}/radio/volume   → 0-100
+  # Topics subscribed (commands from OpenHAB):
+  #   {topic_prefix}/radio/command/power    → ON / OFF
+  #   {topic_prefix}/radio/command/station  → station name (loads without playing if radio is off)
+  #   {topic_prefix}/radio/command/volume   → 0-100

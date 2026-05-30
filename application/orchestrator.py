@@ -33,7 +33,7 @@ from config import (
     VADConfig,
     WakeWordConfig,
 )
-from functions.definitions import close_radio_client, inject_mpd_client
+from functions.definitions import close_radio_client, get_radio_client, inject_mpd_client
 from mpd_client.client import MPDClientWrapper
 from realtime import BaseRealtimeManager, create_realtime_manager
 from state import AudioFrame, SpeakerState, WakeWordResult
@@ -214,6 +214,13 @@ class AudioOrchestrator:
         # Share this MPD client with all tool functions so they operate on the same
         # connection and see the same duck/unduck state as the orchestrator.
         inject_mpd_client(self.mpd_client)
+
+        if self.config.mqtt.enabled:
+            from mqtt.bridge import MQTTBridge
+            self._mqtt_bridge = MQTTBridge(self.config.mqtt, self.mpd_client, get_radio_client())
+            self.mpd_client.add_state_listener(self._mqtt_bridge.on_state_change)
+            asyncio.create_task(self._mqtt_bridge.run())
+            logger.info("MQTT bridge started (broker=%s:%d)", self.config.mqtt.broker, self.config.mqtt.port)
 
         # Initialize audio I/O (SoundDevice)
         self._audio_input = AudioInput(self.audio_cfg, self._mic_queue)
@@ -838,7 +845,7 @@ class AudioOrchestrator:
                     logger.warning("play_internet_radio deferred error: %s", payload.get("details"))
                 elif payload.get("url"):
                     logger.info("Executing deferred action: play_internet_radio (url)")
-                    await self.mpd_client.play_station(payload["url"])
+                    await self.mpd_client.play_station(payload["url"], payload.get("name"))
                     ran_radio_action = True
                 elif payload.get("action") == "play":
                     logger.info("Executing deferred action: play_internet_radio (resume)")

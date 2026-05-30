@@ -1,7 +1,9 @@
+import json
 import logging
 import asyncio
 import numpy as np
-from typing import Optional, Dict, Any, List
+from pathlib import Path
+from typing import Callable, Optional, Dict, Any, List
 from mpd import MPDClient, MPDError, ConnectionError as MPDConnectionError
 from config import MPDConfig
 
@@ -39,8 +41,50 @@ class MPDClientWrapper:
         # None means "unknown — ask MPD".
         self._is_playing: Optional[bool] = None
 
+        # Station state
+        self._current_station_name: Optional[str] = None
+        self._current_station_url: Optional[str] = None
+        self._state_file = Path(config.state_file)
+
+        # State change listeners: each is called with a dict of changed fields.
+        # Keys: "state" ("ON"/"OFF"), "station" (str|None), "volume" (int)
+        self._state_listeners: list[Callable[[dict], None]] = []
+
+    def add_state_listener(self, cb: Callable[[dict], None]) -> None:
+        self._state_listeners.append(cb)
+
+    def _notify(self, **kwargs) -> None:
+        if not self._state_listeners:
+            return
+        for cb in self._state_listeners:
+            try:
+                cb(kwargs)
+            except Exception as e:
+                logger.error("State listener error: %s", e)
+
+    def _load_radio_state(self) -> None:
+        if not self._state_file.exists():
+            return
+        try:
+            data = json.loads(self._state_file.read_text())
+            self._current_station_name = data.get("name")
+            self._current_station_url = data.get("url")
+            logger.info("Restored radio state: station=%s", self._current_station_name)
+        except Exception as e:
+            logger.warning("Could not load radio state file: %s", e)
+
+    def _save_radio_state(self, url: Optional[str], name: Optional[str]) -> None:
+        try:
+            self._state_file.write_text(json.dumps({"name": name, "url": url}))
+        except Exception as e:
+            logger.warning("Could not save radio state file: %s", e)
+
+    def get_current_station_name(self) -> Optional[str]:
+        return self._current_station_name
+
     async def initialize_state(self):
         """Initializes and logs the MPD client state."""
+        self._load_radio_state()
         logger.info("Initializing MPD client state...")
         async with self._mpd_lock:
             await self._connect()
@@ -105,7 +149,38 @@ class MPDClientWrapper:
         await self._disconnect_unsafe()
         return await self._connect()
 
-    async def play_station(self, url: str):
+    async def load_station(self, url: str, station_name: Optional[str] = None) -> None:
+        """Loads a station into the MPD playlist without starting playback."""
+        async with self._mpd_lock:
+            if not await self._connect():
+                return
+            try:
+                await asyncio.to_thread(self.client.clear)
+                await asyncio.to_thread(self.client.add, url)
+                logger.info("Loaded station %s into playlist (not playing)", station_name or url)
+            except (BrokenPipeError, ConnectionResetError) as e:
+                logger.warning("MPD connection reset during load_station (%s), reconnecting...", type(e).__name__)
+                if await self._reconnect_unsafe():
+                    try:
+                        await asyncio.to_thread(self.client.clear)
+                        await asyncio.to_thread(self.client.add, url)
+                    except (MPDError, IOError) as retry_e:
+                        logger.error("Failed to load station after reconnect: %s", retry_e)
+                        await self._disconnect_unsafe()
+                        return
+                else:
+                    return
+            except (MPDError, IOError) as e:
+                logger.error("Error loading station: %s", e)
+                await self._disconnect_unsafe()
+                return
+
+        self._current_station_name = station_name
+        self._current_station_url = url
+        self._save_radio_state(url, station_name)
+        self._notify(station=station_name)
+
+    async def play_station(self, url: str, station_name: Optional[str] = None) -> None:
         """Clears the playlist, adds a new station, plays it, and fades the volume in."""
         async with self._mpd_lock:
             if not await self._connect():
@@ -115,7 +190,7 @@ class MPDClientWrapper:
                 await asyncio.to_thread(self.client.add, url)
                 await self._set_internal_volume_unsafe(0)
                 await asyncio.to_thread(self.client.play)
-                logger.info("Started playing station: %s", url)
+                logger.info("Started playing station: %s", station_name or url)
                 self._is_playing = True
             except (BrokenPipeError, ConnectionResetError) as e:
                 logger.warning("MPD connection reset during play_station (%s), reconnecting...", type(e).__name__)
@@ -125,7 +200,7 @@ class MPDClientWrapper:
                         await asyncio.to_thread(self.client.add, url)
                         await self._set_internal_volume_unsafe(0)
                         await asyncio.to_thread(self.client.play)
-                        logger.info("Started playing station after reconnect: %s", url)
+                        logger.info("Started playing station after reconnect: %s", station_name or url)
                         self._is_playing = True
                     except (MPDError, IOError) as retry_e:
                         logger.error("Failed to play station after reconnect: %s", retry_e)
@@ -136,10 +211,15 @@ class MPDClientWrapper:
             except (MPDError, IOError) as e:
                 logger.error("Error playing station: %s", e)
                 await self._disconnect_unsafe()
-                return  # Exit after error
+                return
+
+        self._current_station_name = station_name
+        self._current_station_url = url
+        self._save_radio_state(url, station_name)
 
         # Run fade-in outside of the main lock to allow other operations
         await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
+        self._notify(state="ON", station=station_name, volume=self._restore_volume)
 
 
     @staticmethod
@@ -201,11 +281,13 @@ class MPDClientWrapper:
 
         if not await self.is_playing():
             logger.debug("Ignoring volume fade because nothing is playing.")
+            self._notify(volume=linear_volume)
             return
 
         # Fade to the new volume. Fade duration is halved for responsiveness.
         await self._fade_to(linear_volume, self.config.volume_fade_in_seconds / 2)
         self._is_ducked = False
+        self._notify(volume=linear_volume)
         logger.debug("set_volume() finished.")
 
     async def duck(self):
@@ -245,6 +327,7 @@ class MPDClientWrapper:
             if await self._connect():
                 await self._set_internal_volume_unsafe(duck_percentage)
         self._is_ducked = True
+        self._notify(volume=duck_percentage)
         logger.debug("duck() finished.")
 
 
@@ -273,6 +356,7 @@ class MPDClientWrapper:
                 if await self._connect():
                     await self._set_internal_volume_unsafe(self._restore_volume)
 
+        self._notify(volume=self._restore_volume)
         logger.debug("unduck() finished.")
 
     async def _fade_to(self, target_volume: int, duration: float):
@@ -307,7 +391,7 @@ class MPDClientWrapper:
             await asyncio.sleep(0.05)
             start_volume = await self.get_volume()
             retry_count += 1
-        
+
         if start_volume is None:
             logger.warning(f"Could not get start volume for fade. Aborting fade.")
             async with self._mpd_lock:
@@ -402,12 +486,15 @@ class MPDClientWrapper:
                 logger.error("Error stopping playback: %s", e)
                 self._is_playing = None
                 await self._disconnect_unsafe()
+                return
+
+        self._notify(state="OFF")
 
     async def get_status(self) -> Optional[Dict[str, Any]]:
         """Gets the current MPD status."""
         async with self._mpd_lock:
             return await self._get_status_unsafe()
-    
+
     async def _run_mpd_cmd(self, cmd, *args):
         """Run a blocking python-mpd2 call in a thread with a hard timeout."""
         timeout = (self.config.connection_timeout or 5) + 1
@@ -495,3 +582,4 @@ class MPDClientWrapper:
                 return
 
         await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
+        self._notify(state="ON", station=self._current_station_name, volume=self._restore_volume)

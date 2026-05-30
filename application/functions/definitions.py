@@ -30,6 +30,10 @@ async def close_radio_client() -> None:
     await radio_client.close()
 
 
+def get_radio_client() -> RadioClient:
+    return radio_client
+
+
 def _mpd() -> MPDClientWrapper:
     if _mpd_client is None:
         raise RuntimeError("MPD client not injected — inject_mpd_client() must be called first")

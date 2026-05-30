@@ -223,6 +223,20 @@ class MPDConfig:
     default_playback_volume: int = (
         50  # Default playback volume if no previous volume is known
     )
+    state_file: str = "radio_state.json"
+
+
+@dataclass
+class MQTTConfig:
+    """MQTT broker configuration for OpenHAB integration."""
+
+    enabled: bool = False
+    broker: str = "localhost"
+    port: int = 1883
+    topic_prefix: str = "home/living-room/speaker"
+    username: Optional[str] = None
+    password: Optional[str] = None
+    reconnect_interval: float = 5.0
 
 
 @dataclass
@@ -239,6 +253,7 @@ class AppConfig:
     radio: RadioConfig = field(default_factory=RadioConfig)
     mpd: MPDConfig = field(default_factory=MPDConfig)
     tv: TVConfig = field(default_factory=TVConfig)
+    mqtt: MQTTConfig = field(default_factory=MQTTConfig)
 
     @classmethod
     def from_yaml(cls, path: str = "config.yml") -> "AppConfig":
@@ -270,4 +285,5 @@ class AppConfig:
             radio=RadioConfig(**config_data.get("radio", {})),
             mpd=MPDConfig(**config_data.get("mpd", {})),
             tv=tv,
+            mqtt=MQTTConfig(**config_data.get("mqtt", {})),
         )

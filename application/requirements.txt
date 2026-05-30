@@ -8,6 +8,7 @@ scipy>=1.11,<2
 scikit-learn>=1,<2
 requests
 pyyaml>=6.0
+aiomqtt>=2.0
 radios
 python-mpd2
 
