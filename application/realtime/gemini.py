@@ -109,15 +109,19 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             ),
             realtime_input_config=RealtimeInputConfig(
                 automatic_activity_detection=AutomaticActivityDetection(
-                    # When manual VAD is enabled, we MUST disable server-side VAD
-                    # to avoid error 1007: "Explicit activity control is not supported
-                    # when automatic activity detection is enabled"
+                    # When manual VAD is enabled, we MUST disable server-side VAD.
+                    # Sensitivity fields must be absent when disabled=True (API error 1007).
                     disabled=self.live_cfg.enable_manual_vad,
-                    # These are used only when disabled=False (server-side VAD)
-                    start_of_speech_sensitivity=StartSensitivity.START_SENSITIVITY_HIGH,
-                    end_of_speech_sensitivity=EndSensitivity.END_SENSITIVITY_HIGH,
-                    prefix_padding_ms=100,
-                    silence_duration_ms=1000,
+                    **(
+                        {}
+                        if self.live_cfg.enable_manual_vad
+                        else dict(
+                            start_of_speech_sensitivity=StartSensitivity.START_SENSITIVITY_HIGH,
+                            end_of_speech_sensitivity=EndSensitivity.END_SENSITIVITY_HIGH,
+                            prefix_padding_ms=100,
+                            silence_duration_ms=1000,
+                        )
+                    ),
                 )
             ),
             speech_config=SpeechConfig(
