@@ -27,12 +27,13 @@ SOUNDS_DIR = Path(__file__).parent.parent / "sounds"
 
 class SoundEvent(Enum):
     """Events that trigger sound playback."""
-    
+
     STARTUP = "startup"
     WAKE_WORD = "wake_word"
     FOLLOW_UP = "follow_up"
     END_CONVERSATION = "end_conversation"
     ERROR = "error"
+    CONFIRM_ACTION = "confirm_action"
 
 
 # Mapping from events to sound files
@@ -42,6 +43,7 @@ DEFAULT_SOUND_MAP: dict[SoundEvent, str] = {
     SoundEvent.FOLLOW_UP: "follow_up.wav",
     SoundEvent.END_CONVERSATION: "end_conversation.wav",
     SoundEvent.ERROR: "error.wav",
+    SoundEvent.CONFIRM_ACTION: "confirm_action.wav",
 }
 
 

@@ -268,6 +268,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 except (OSError, ConnectionError, TimeoutError) as e:
                     if attempt >= max_attempts or not self._running:
                         logger.error("Gemini session failed after %d attempt(s): %s", attempt, e)
+                        if self._on_error:
+                            self._on_error()
                         break
                     delay = min(2.0 ** (attempt - 1), 30.0)
                     logger.warning(
@@ -278,6 +280,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 except Exception as e:
                     logger.error("Unexpected Gemini session error: %s", e)
                     traceback.print_exc()
+                    if self._on_error:
+                        self._on_error()
                     break
         finally:
             self._session = None
@@ -328,7 +332,9 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 logger.error("Receive from API error: %s", e)
                 traceback.print_exc()
                 self._session_active = False
-                if self._on_turn_complete:
+                if self._on_error:
+                    self._on_error()
+                elif self._on_turn_complete:
                     self._on_turn_complete()
                 break
 

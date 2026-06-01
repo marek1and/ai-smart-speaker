@@ -13,6 +13,7 @@ The interface sound effects (UI SFX) used in this project were created by **CogF
 | `wake_up.wav` | Trigger / Listening started | [Freesound #636650](https://freesound.org/people/CogFireStudios/sounds/636650/) |
 | `follow_up.wav` | Active listening / Acknowledge | [Freesound #636677](https://freesound.org/people/CogFireStudios/sounds/636677/) |
 | `end_conversation.wav` | Session closed / Idle | [Freesound #636647](https://freesound.org/people/CogFireStudios/sounds/636647/) |
+| `confirm_action.wav` | Action confirmation | [Freesound #531508](https://freesound.org/people/CogFireStudios/sounds/531508/) |
 | `error.wav` | System error / Network issue | [Freesound #636643](https://freesound.org/people/CogFireStudios/sounds/636643/) |
 | `startup.wav` | System boot sequence (Remix) | Composite of [#619840](https://freesound.org/people/CogFireStudios/sounds/619840/) & [#619838](https://freesound.org/people/CogFireStudios/sounds/619838/) |
 

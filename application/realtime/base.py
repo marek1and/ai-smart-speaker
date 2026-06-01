@@ -37,6 +37,7 @@ class BaseRealtimeManager(ABC):
         self._on_turn_complete: Optional[Callable[[], None]] = None
         self._on_interrupted: Optional[Callable[[], None]] = None
         self._on_turn_timeout: Optional[Callable[[], None]] = None
+        self._on_error: Optional[Callable[[], None]] = None
 
         # State tracking
         self._running: bool = False
@@ -228,6 +229,7 @@ class BaseRealtimeManager(ABC):
         on_turn_complete: Optional[Callable[[], None]] = None,
         on_interrupted: Optional[Callable[[], None]] = None,
         on_turn_timeout: Optional[Callable[[], None]] = None,
+        on_error: Optional[Callable[[], None]] = None,
     ) -> None:
         """Set callbacks for API events."""
         self._on_audio_received = on_audio_received
@@ -235,3 +237,4 @@ class BaseRealtimeManager(ABC):
         self._on_turn_complete = on_turn_complete
         self._on_interrupted = on_interrupted
         self._on_turn_timeout = on_turn_timeout
+        self._on_error = on_error

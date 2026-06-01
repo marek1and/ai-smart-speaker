@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import aiomqtt
 
@@ -8,14 +8,24 @@ from config import MQTTConfig
 from mpd_client.client import MPDClientWrapper
 from radio.client import RadioClient
 
+if TYPE_CHECKING:
+    from audio.sounds import SoundPlayer
+
 logger = logging.getLogger(__name__)
 
 
 class MQTTBridge:
-    def __init__(self, config: MQTTConfig, mpd_client: MPDClientWrapper, radio_client: RadioClient):
+    def __init__(
+        self,
+        config: MQTTConfig,
+        mpd_client: MPDClientWrapper,
+        radio_client: RadioClient,
+        sound_player: Optional["SoundPlayer"] = None,
+    ):
         self._config = config
         self._mpd = mpd_client
         self._radio = radio_client
+        self._sound_player = sound_player
         self._publish_queue: asyncio.Queue[dict] = asyncio.Queue()
 
     def on_state_change(self, event: dict) -> None:
@@ -87,9 +97,15 @@ class MQTTBridge:
             elif topic == f"{radio}/command/volume":
                 await self._handle_volume(payload)
 
+    def _confirm(self) -> None:
+        if self._sound_player:
+            from audio.sounds import SoundEvent
+            self._sound_player.play(SoundEvent.CONFIRM_ACTION)
+
     async def _handle_power(self, payload: str) -> None:
         if payload.upper() == "ON":
             await self._mpd.play()
+            self._confirm()
         elif payload.upper() == "OFF":
             await self._mpd.stop()
 

@@ -320,6 +320,8 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 except (OSError, ConnectionError, TimeoutError) as e:
                     if attempt >= max_attempts or not self._running:
                         logger.error("OpenAI session failed after %d attempt(s): %s", attempt, e)
+                        if self._on_error:
+                            self._on_error()
                         break
                     delay = min(2.0 ** (attempt - 1), 30.0)
                     logger.warning(
@@ -330,6 +332,8 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 except Exception as e:
                     logger.error("Unexpected session error: %s", e)
                     traceback.print_exc()
+                    if self._on_error:
+                        self._on_error()
                     break
         finally:
             self._ws = None
@@ -455,7 +459,9 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             except Exception as e:
                 logger.error("Receive from API error: %s", e)
                 self._session_active = False
-                if self._on_turn_complete:
+                if self._on_error:
+                    self._on_error()
+                elif self._on_turn_complete:
                     self._on_turn_complete()
                 break
 

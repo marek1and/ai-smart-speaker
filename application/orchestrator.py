@@ -215,9 +215,12 @@ class AudioOrchestrator:
         # connection and see the same duck/unduck state as the orchestrator.
         inject_mpd_client(self.mpd_client)
 
+        # Initialize sound player (before MQTT bridge so confirm sounds work)
+        self._sound_player = SoundPlayer(self.sound_cfg)
+
         if self.config.mqtt.enabled:
             from mqtt.bridge import MQTTBridge
-            self._mqtt_bridge = MQTTBridge(self.config.mqtt, self.mpd_client, get_radio_client())
+            self._mqtt_bridge = MQTTBridge(self.config.mqtt, self.mpd_client, get_radio_client(), self._sound_player)
             self.mpd_client.add_state_listener(self._mqtt_bridge.on_state_change)
             asyncio.create_task(self._mqtt_bridge.run())
             logger.info("MQTT bridge started (broker=%s:%d)", self.config.mqtt.broker, self.config.mqtt.port)
@@ -232,9 +235,6 @@ class AudioOrchestrator:
         # Initialize STT verifier (loads faster-whisper model — takes a few seconds)
         if self.wake_cfg.verify_with_stt:
             self._verifier = WakeWordVerifier(self.wake_cfg)
-
-        # Initialize sound player
-        self._sound_player = SoundPlayer(self.sound_cfg)
 
         # Initialize Hybrid VAD (Silero)
         if self.live_cfg.enable_manual_vad:
@@ -255,6 +255,7 @@ class AudioOrchestrator:
             on_turn_complete=self._on_turn_complete,
             on_interrupted=self._on_interrupted,
             on_turn_timeout=self._on_turn_timeout,
+            on_error=self._on_api_error,
         )
 
         # Initialize ReSpeaker LEDs
@@ -309,6 +310,13 @@ class AudioOrchestrator:
     def _on_turn_timeout(self) -> None:
         """Callback when API hangs (watchdog timeout)."""
         logger.warning("API turn timeout detected, treating as turn_complete")
+        self._turn_complete_event.set()
+
+    def _on_api_error(self) -> None:
+        """Callback when API session fails unexpectedly."""
+        logger.error("API session error — playing error sound and resetting state")
+        if self._sound_player:
+            self._sound_player.play(SoundEvent.ERROR)
         self._turn_complete_event.set()
 
     async def _cleanup(self) -> None:
@@ -715,6 +723,13 @@ class AudioOrchestrator:
 
         if not self._api_manager.session_active:
             await self._api_manager.open_session()
+            if not self._api_manager.session_active:
+                logger.error("Failed to open API session — playing error sound and returning to IDLE")
+                if self._sound_player:
+                    self._sound_player.play(SoundEvent.ERROR)
+                await self.mpd_client.unduck()
+                self._set_state(SpeakerState.IDLE)
+                return
             self._recorder.start(
                 model_score=self._last_wake_result.score if self._last_wake_result else None,
                 verifier_score=self._last_wake_result.verifier_score if self._last_wake_result else None,
