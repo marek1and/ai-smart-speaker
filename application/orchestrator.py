@@ -34,6 +34,7 @@ from config import (
     WakeWordConfig,
 )
 from functions.definitions import close_radio_client, get_radio_client, inject_mpd_client
+import metrics
 from mpd_client.client import MPDClientWrapper
 from realtime import BaseRealtimeManager, create_realtime_manager
 from state import AudioFrame, SpeakerState, WakeWordResult
@@ -160,6 +161,10 @@ class AudioOrchestrator:
         self._state = new_state
         logger.info("STATE: %s -> %s", old_state.value, new_state.value)
         self._last_activity_time = time.time()
+
+        metrics.STATE_TRANSITIONS.labels(from_state=old_state.value, to_state=new_state.value).inc()
+        metrics.STATE_ACTIVE.labels(state=old_state.value).set(0)
+        metrics.STATE_ACTIVE.labels(state=new_state.value).set(1)
 
         if self._leds:
             if new_state == SpeakerState.IDLE:
@@ -315,6 +320,7 @@ class AudioOrchestrator:
     def _on_api_error(self) -> None:
         """Callback when API session fails unexpectedly."""
         logger.error("API session error — playing error sound and resetting state")
+        metrics.API_ERRORS.inc()
         if self._sound_player:
             self._sound_player.play(SoundEvent.ERROR)
         self._turn_complete_event.set()
@@ -458,6 +464,7 @@ class AudioOrchestrator:
 
     async def _start_followup_conversation(self) -> None:
         """Start a new conversation turn from follow-up state."""
+        metrics.FOLLOWUPS_STARTED.inc()
         if self._hybrid_vad:
             self._hybrid_vad.reset()
 
@@ -508,6 +515,13 @@ class AudioOrchestrator:
         print()  # New line after status
         logger.info("Wake word detected! (score=%.3f)", result.score)
         self._last_barge_in_time = now
+
+        _wake_context = (
+            'barge_in' if self._state == SpeakerState.RESPONDING
+            else 're_listen' if self._state == SpeakerState.LISTENING
+            else 'idle'
+        )
+        metrics.WAKE_DETECTIONS.labels(context=_wake_context).inc()
 
         await self._duck_radio_if_playing()
 
@@ -570,11 +584,11 @@ class AudioOrchestrator:
     async def _execute_barge_in(self) -> None:
         """Execute hard barge-in with instant audio cutoff."""
         if self._state != SpeakerState.RESPONDING:
-            # Barge-in is only valid during RESPONDING (AI is speaking).
             # In FOLLOW_UP the user is already talking, so there's nothing to interrupt.
             # In other states a duplicate callback from _on_interrupted may arrive
             # after _handle_wake_word_result already handled it — both cases: no-op.
             return
+        metrics.BARGE_INS.inc()
         self._stop_playback_event.set()
         self._playback_interrupted = True
         self._api_manager.playback_interrupted = True
@@ -701,6 +715,7 @@ class AudioOrchestrator:
                         logger.info(
                             "Follow-up timeout (%.1fs), ending conversation", elapsed
                         )
+                        metrics.FOLLOWUP_TIMEOUTS.inc()
                         follow_up_start = None
                         await self._finish_turn()
                     else:
@@ -725,11 +740,13 @@ class AudioOrchestrator:
             await self._api_manager.open_session()
             if not self._api_manager.session_active:
                 logger.error("Failed to open API session — playing error sound and returning to IDLE")
+                metrics.API_ERRORS.inc()
                 if self._sound_player:
                     self._sound_player.play(SoundEvent.ERROR)
                 await self.mpd_client.unduck()
                 self._set_state(SpeakerState.IDLE)
                 return
+            metrics.SESSIONS_OPENED.inc()
             self._recorder.start(
                 model_score=self._last_wake_result.score if self._last_wake_result else None,
                 verifier_score=self._last_wake_result.verifier_score if self._last_wake_result else None,
@@ -766,6 +783,7 @@ class AudioOrchestrator:
             activity_started = self._api_manager and self._api_manager.activity_started
             if not verified and not activity_started:
                 logger.info("STT verification failed — false trigger, aborting session")
+                metrics.FALSE_TRIGGERS.labels(reason='stt_rejection').inc()
                 await self._close_on_initial_silence()
                 return
 
@@ -860,11 +878,17 @@ class AudioOrchestrator:
                     logger.warning("play_internet_radio deferred error: %s", payload.get("details"))
                 elif payload.get("url"):
                     logger.info("Executing deferred action: play_internet_radio (url)")
-                    await self.mpd_client.play_station(payload["url"], payload.get("name"))
+                    station = payload.get("name") or ""
+                    await self.mpd_client.play_station(payload["url"], station)
+                    metrics.RADIO_PLAYS.labels(source='ai_new', station=station).inc()
                     ran_radio_action = True
                 elif payload.get("action") == "play":
                     logger.info("Executing deferred action: play_internet_radio (resume)")
                     await self.mpd_client.play()
+                    metrics.RADIO_PLAYS.labels(
+                        source='ai_resume',
+                        station=self.mpd_client.get_current_station_name() or '',
+                    ).inc()
                     ran_radio_action = True
 
             elif action_type == "set_playback_volume":
@@ -929,6 +953,7 @@ class AudioOrchestrator:
         self._last_activity_time = time.time()
 
         self._session_turn_count += 1
+        metrics.SESSION_TURNS.inc()
         if (
             self._api_manager is not None
             and self._api_manager.session_active
@@ -938,6 +963,7 @@ class AudioOrchestrator:
                 "Session turn limit reached (%d), closing session.",
                 self._session_turn_count,
             )
+            metrics.SESSIONS_CLOSED.labels(reason='max_turns').inc()
             await self._api_manager.close_session()
             self._recorder.close()
 
@@ -967,6 +993,8 @@ class AudioOrchestrator:
         if self._api_manager:
             await self._api_manager.close_session()
         self._recorder.close_as_false_trigger()
+        metrics.FALSE_TRIGGERS.labels(reason='initial_silence').inc()
+        metrics.SESSIONS_CLOSED.labels(reason='false_trigger').inc()
 
         self._reset_wake_detector(cooldown=True)
         if self._hybrid_vad:
@@ -1000,6 +1028,8 @@ class AudioOrchestrator:
         while self._running:
             await asyncio.sleep(5.0)
 
+            metrics.update_system_metrics()
+
             # Keepalive: ping MPD periodically so its connection doesn't idle-timeout
             # (default MPD connection_timeout is 60s).
             if time.time() - _last_mpd_ping >= _mpd_keepalive_interval:
@@ -1015,6 +1045,7 @@ class AudioOrchestrator:
             elapsed = time.time() - self._last_activity_time
             if elapsed > self.live_cfg.session_inactivity_timeout:
                 logger.info("Session inactive for %.0fs, closing...", elapsed)
+                metrics.SESSIONS_CLOSED.labels(reason='inactivity').inc()
                 await self._api_manager.close_session()
                 self._recorder.close()
 

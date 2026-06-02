@@ -240,6 +240,14 @@ class MQTTConfig:
 
 
 @dataclass
+class MetricsConfig:
+    """Prometheus metrics HTTP server configuration."""
+
+    enabled: bool = True
+    port: int = 9090
+
+
+@dataclass
 class AppConfig:
     """Root application configuration."""
 
@@ -254,6 +262,7 @@ class AppConfig:
     mpd: MPDConfig = field(default_factory=MPDConfig)
     tv: TVConfig = field(default_factory=TVConfig)
     mqtt: MQTTConfig = field(default_factory=MQTTConfig)
+    metrics: MetricsConfig = field(default_factory=MetricsConfig)
 
     @classmethod
     def from_yaml(cls, path: str = "config.yml") -> "AppConfig":
@@ -286,4 +295,5 @@ class AppConfig:
             mpd=MPDConfig(**config_data.get("mpd", {})),
             tv=tv,
             mqtt=MQTTConfig(**config_data.get("mqtt", {})),
+            metrics=MetricsConfig(**config_data.get("metrics", {})),
         )

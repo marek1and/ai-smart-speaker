@@ -186,6 +186,63 @@ live:
 
 When the TV is off and a channel is requested, `watch_tv` sends the power-on command and returns immediately so the AI response is not delayed. A background task then polls the power state and sends the channel command once the TV confirms it is on (plus `post_boot_delay`). Tune `post_boot_delay` to match your TV's boot time — Samsung TVs typically need 8–12 seconds after reporting ON before they are ready to accept channel commands.
 
+## Monitoring
+
+The application exposes a Prometheus metrics endpoint for real-time operational monitoring. A Grafana dashboard is included for visualization.
+
+### Metrics Endpoint
+
+When enabled (default), the application starts an HTTP server on port `9090` that serves metrics in Prometheus format:
+
+```
+http://<speaker-ip>:9090/metrics
+```
+
+Configure the port (or disable) in `config.yml`:
+
+```yaml
+metrics:
+  enabled: true
+  port: 9090
+```
+
+### What is Tracked
+
+| Category | Metrics |
+|---|---|
+| **System** | App and system uptime, process CPU %, RAM usage |
+| **Wake Word** | Detection count by context (idle / barge-in / re-listen), false trigger count by reason (initial silence / STT rejection) |
+| **Sessions** | Sessions opened/closed (with close reason: max_turns / inactivity / false_trigger), turns completed, API errors |
+| **Conversation** | Barge-ins, follow-ups started, follow-up timeouts, state machine transitions |
+| **Radio** | Play events by source (AI new station / AI resume / MQTT power / MQTT station), stops, volume changes, duck/unduck events, current volume, MPD reconnections |
+| **MQTT** | Connection state, command counts by type (power_on / power_off / station / volume) |
+| **OpenHAB** | HTTP requests by method and status, per-item state change counts |
+| **TV** | Power-on and channel-switch command counts |
+| **AI Tools** | Per-function call counts (play_internet_radio, stop_radio, watch_tv, set_openhab_item_state, set_playback_volume) |
+
+### Setting Up Grafana
+
+A complete monitoring stack (Prometheus + Grafana) is provided in the `monitoring/` directory at the project root. The Grafana dashboard is pre-configured and loads automatically.
+
+**Quick start:**
+
+1. Edit `monitoring/prometheus.yml` and replace `SPEAKER_IP` with your speaker's IP address.
+2. Start the stack:
+   ```bash
+   cd monitoring
+   docker compose up -d
+   ```
+3. Open Grafana at `http://localhost:3000` (default login: `admin` / `admin`).
+
+The dashboard loads automatically under **AI Smart Speaker → AI Smart Speaker**.
+
+To change the Grafana admin password, set the `GRAFANA_PASSWORD` environment variable before starting:
+```bash
+GRAFANA_PASSWORD=mysecret docker compose up -d
+```
+
+Prometheus retains 90 days of data by default.
+
 ## Tools
 
 ### Delay Tuning

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Optional, Dict, Any, List
 from mpd import MPDClient, MPDError, ConnectionError as MPDConnectionError
 from config import MPDConfig
+import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class MPDClientWrapper:
         # Volume state
         self._is_ducked = False
         self._restore_volume = self.config.default_playback_volume
+        metrics.RADIO_VOLUME.set(self._restore_volume)
 
         # One-shot cache set by stop()/play_station()/play() so that the next
         # is_playing() call returns immediately without a network round-trip.
@@ -139,13 +141,15 @@ class MPDClientWrapper:
                 self.client = MPDClient()
                 self.client.timeout = self.config.connection_timeout or 5
 
-    async def _reconnect_unsafe(self) -> bool:
+    async def _reconnect_unsafe(self, error: bool = False) -> bool:
         """Disconnect and immediately reconnect. Must be called within a lock.
 
         Used to recover from BrokenPipeError / ConnectionResetError without
         waiting for the next caller to trigger a lazy reconnect.
         """
         logger.info("MPD reconnecting after connection reset...")
+        if error:
+            metrics.MPD_RECONNECTIONS.inc()
         await self._disconnect_unsafe()
         return await self._connect()
 
@@ -160,7 +164,7 @@ class MPDClientWrapper:
                 logger.info("Loaded station %s into playlist (not playing)", station_name or url)
             except (BrokenPipeError, ConnectionResetError) as e:
                 logger.warning("MPD connection reset during load_station (%s), reconnecting...", type(e).__name__)
-                if await self._reconnect_unsafe():
+                if await self._reconnect_unsafe(error=True):
                     try:
                         await asyncio.to_thread(self.client.clear)
                         await asyncio.to_thread(self.client.add, url)
@@ -194,7 +198,7 @@ class MPDClientWrapper:
                 self._is_playing = True
             except (BrokenPipeError, ConnectionResetError) as e:
                 logger.warning("MPD connection reset during play_station (%s), reconnecting...", type(e).__name__)
-                if await self._reconnect_unsafe():
+                if await self._reconnect_unsafe(error=True):
                     try:
                         await asyncio.to_thread(self.client.clear)
                         await asyncio.to_thread(self.client.add, url)
@@ -219,6 +223,8 @@ class MPDClientWrapper:
 
         # Run fade-in outside of the main lock to allow other operations
         await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
+        metrics.RADIO_PLAYING.set(1)
+        metrics.RADIO_VOLUME.set(self._restore_volume)
         self._notify(state="ON", station=station_name, volume=self._restore_volume)
 
 
@@ -287,6 +293,7 @@ class MPDClientWrapper:
         # Fade to the new volume. Fade duration is halved for responsiveness.
         await self._fade_to(linear_volume, self.config.volume_fade_in_seconds / 2)
         self._is_ducked = False
+        metrics.RADIO_VOLUME.set(linear_volume)
         self._notify(volume=linear_volume)
         logger.debug("set_volume() finished.")
 
@@ -327,6 +334,7 @@ class MPDClientWrapper:
             if await self._connect():
                 await self._set_internal_volume_unsafe(duck_percentage)
         self._is_ducked = True
+        metrics.RADIO_DUCKS.inc()
         self._notify(volume=duck_percentage)
         logger.debug("duck() finished.")
 
@@ -356,6 +364,7 @@ class MPDClientWrapper:
                 if await self._connect():
                     await self._set_internal_volume_unsafe(self._restore_volume)
 
+        metrics.RADIO_UNDUCKS.inc()
         self._notify(volume=self._restore_volume)
         logger.debug("unduck() finished.")
 
@@ -488,6 +497,7 @@ class MPDClientWrapper:
                 await self._disconnect_unsafe()
                 return
 
+        metrics.RADIO_PLAYING.set(0)
         self._notify(state="OFF")
 
     async def get_status(self) -> Optional[Dict[str, Any]]:
@@ -523,7 +533,7 @@ class MPDClientWrapper:
             return None
         except (BrokenPipeError, ConnectionResetError) as e:
             logger.warning("MPD connection reset during status check (%s), reconnecting...", type(e).__name__)
-            if await self._reconnect_unsafe():
+            if await self._reconnect_unsafe(error=True):
                 try:
                     result = await self._run_mpd_cmd(self.client.status)
                     if result:
@@ -582,4 +592,6 @@ class MPDClientWrapper:
                 return
 
         await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
+        metrics.RADIO_PLAYING.set(1)
+        metrics.RADIO_VOLUME.set(self._restore_volume)
         self._notify(state="ON", station=self._current_station_name, volume=self._restore_volume)

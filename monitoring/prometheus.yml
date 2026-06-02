@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "ai-smart-speaker"
+    # Replace with your speaker's IP address or hostname
+    static_configs:
+      - targets: ["SPEAKER_IP:9090"]
+    scrape_timeout: 10s

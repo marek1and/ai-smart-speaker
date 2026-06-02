@@ -22,3 +22,7 @@ openwakeword>=0.6.0; python_version < "3.12"
 
 # STT post-trigger verification (optional, requires verify_with_stt: true in config)
 faster-whisper>=1.0.0
+
+# Monitoring
+prometheus_client>=0.20
+psutil>=5.9

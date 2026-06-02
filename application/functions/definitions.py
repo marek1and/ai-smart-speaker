@@ -7,6 +7,7 @@ from openhab.client import OpenHabClient
 from config import AppConfig
 from mpd_client.client import MPDClientWrapper
 from radio.client import RadioClient
+import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ def _mpd() -> MPDClientWrapper:
 
 @register_function(name="play_internet_radio")
 async def play_internet_radio(station_name: Optional[str] = None) -> dict:
+    metrics.AI_TOOL_CALLS.labels(function='play_internet_radio').inc()
     """
     Finds a radio station URL or determines if playback should be resumed.
     The action is deferred and handled by the orchestrator after the AI response.
@@ -69,6 +71,8 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
 @register_function(name="stop_radio")
 async def stop_radio() -> dict:
     """Stops the radio playback immediately."""
+    metrics.AI_TOOL_CALLS.labels(function='stop_radio').inc()
+    metrics.RADIO_STOPS.labels(source='ai').inc()
     await _mpd().stop()
     return {"status": "success", "message": "Radio playback stopped."}
 
@@ -127,6 +131,8 @@ async def set_playback_volume(volume_percentage: int) -> dict:
     Signals the intent to change the playback volume.
     The action is deferred until after the AI's verbal response.
     """
+    metrics.AI_TOOL_CALLS.labels(function='set_playback_volume').inc()
+    metrics.RADIO_VOLUME_CHANGES.labels(source='ai').inc()
     return {"volume_percentage": volume_percentage}
 
 
@@ -194,6 +200,7 @@ async def _switch_channel_after_boot(channel_name: str, channel_num: int) -> Non
 @register_function(name="watch_tv")
 async def watch_tv(channel_name: Optional[str] = None) -> dict:
     """Turn on the TV and/or switch to a channel by name."""
+    metrics.AI_TOOL_CALLS.labels(function='watch_tv').inc()
     power_item = config.tv.power_item
 
     current_state = openhab_client.get_openhab_item_state(power_item)
@@ -201,6 +208,7 @@ async def watch_tv(channel_name: Optional[str] = None) -> dict:
 
     if not already_on:
         openhab_client.set_openhab_item_state(power_item, "ON")
+        metrics.TV_COMMANDS.labels(action='power_on').inc()
         logger.info("TV power ON sent (was off)")
 
     if not channel_name:
@@ -218,6 +226,7 @@ async def watch_tv(channel_name: Optional[str] = None) -> dict:
     else:
         asyncio.create_task(_switch_channel_after_boot(channel_name, channel_num))
 
+    metrics.TV_COMMANDS.labels(action='channel_switch').inc()
     return {"status": "success", "message": f"TV on, switching to {channel_name}."}
 
 
@@ -228,6 +237,7 @@ def set_openhab_item_state(
     item: Optional[str] = None,
     **kwargs,
 ) -> bool:
+    metrics.AI_TOOL_CALLS.labels(function='set_openhab_item_state').inc()
     """Sets the state of an item in OpenHab.
 
     Accepts both ``item_name`` and ``item`` as the first argument so that

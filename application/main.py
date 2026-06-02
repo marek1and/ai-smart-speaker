@@ -11,6 +11,7 @@ import sys
 
 from orchestrator import AudioOrchestrator
 import functions.definitions
+import metrics
 from config import AppConfig
 
 # Configure logging
@@ -32,6 +33,10 @@ async def run() -> None:
     config = AppConfig.from_yaml()
 
     logger.info("Realtime provider: %s", config.live.provider)
+
+    if config.metrics.enabled:
+        metrics.start(config.metrics.port, provider=config.live.provider)
+        logger.info("Prometheus metrics on port %d", config.metrics.port)
 
     orchestrator = AudioOrchestrator(config)
 

@@ -7,6 +7,7 @@ import aiomqtt
 from config import MQTTConfig
 from mpd_client.client import MPDClientWrapper
 from radio.client import RadioClient
+import metrics
 
 if TYPE_CHECKING:
     from audio.sounds import SoundPlayer
@@ -56,10 +57,12 @@ class MQTTBridge:
                         self._config.broker, self._config.port, radio,
                     )
                     await self._publish_initial_state(client, radio)
-                    async with asyncio.TaskGroup() as tg:
+                    metrics.MQTT_CONNECTED.set(1)
+                async with asyncio.TaskGroup() as tg:
                         tg.create_task(self._publish_loop(client, radio))
                         tg.create_task(self._command_loop(client, radio))
             except Exception as e:
+                metrics.MQTT_CONNECTED.set(0)
                 logger.warning(
                     "MQTT error: %s (%s) — reconnecting in %.0fs",
                     type(e).__name__, e, self._config.reconnect_interval,
@@ -104,9 +107,16 @@ class MQTTBridge:
 
     async def _handle_power(self, payload: str) -> None:
         if payload.upper() == "ON":
+            metrics.MQTT_COMMANDS.labels(command='power_on').inc()
+            metrics.RADIO_PLAYS.labels(
+                source='mqtt_power',
+                station=self._mpd.get_current_station_name() or '',
+            ).inc()
             await self._mpd.play()
             self._confirm()
         elif payload.upper() == "OFF":
+            metrics.MQTT_COMMANDS.labels(command='power_off').inc()
+            metrics.RADIO_STOPS.labels(source='mqtt').inc()
             await self._mpd.stop()
 
     async def _handle_station(self, payload: str) -> None:
@@ -116,6 +126,8 @@ class MQTTBridge:
         if not url:
             logger.warning("MQTT: station '%s' not found", payload)
             return
+        metrics.MQTT_COMMANDS.labels(command='station').inc()
+        metrics.RADIO_PLAYS.labels(source='mqtt_station', station=payload).inc()
         if await self._mpd.is_playing():
             await self._mpd.play_station(url, payload)
         else:
@@ -123,6 +135,8 @@ class MQTTBridge:
 
     async def _handle_volume(self, payload: str) -> None:
         try:
+            metrics.MQTT_COMMANDS.labels(command='volume').inc()
+            metrics.RADIO_VOLUME_CHANGES.labels(source='mqtt').inc()
             await self._mpd.set_volume(int(payload))
         except ValueError:
             logger.warning("MQTT: invalid volume payload '%s'", payload)

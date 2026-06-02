@@ -2,6 +2,7 @@ import requests
 from logging import getLogger
 
 from config import OpenHabConfig
+import metrics
 
 logger = getLogger(__name__)
 
@@ -21,9 +22,11 @@ class OpenHabClient:
                 f"{self.base_url}/items/{item_name}/state", headers=self.headers
             )
             response.raise_for_status()
+            metrics.OPENHAB_REQUESTS.labels(method='get', status='ok').inc()
             return response.text
         except requests.exceptions.RequestException as e:
             logger.error(f"Error getting item state for {item_name}: {e}")
+            metrics.OPENHAB_REQUESTS.labels(method='get', status='error').inc()
             return None
 
     def set_openhab_item_state(self, item_name: str, state: str):
@@ -35,7 +38,10 @@ class OpenHabClient:
                 headers=self.headers,
             )
             response.raise_for_status()
+            metrics.OPENHAB_REQUESTS.labels(method='set', status='ok').inc()
+            metrics.OPENHAB_ITEM_SETS.labels(item=item_name).inc()
             return True
         except requests.exceptions.RequestException as e:
             logger.error(f"Error setting item state for {item_name}: {e}")
+            metrics.OPENHAB_REQUESTS.labels(method='set', status='error').inc()
             return False

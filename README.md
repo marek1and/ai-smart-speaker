@@ -38,6 +38,7 @@ The project prioritizes audio quality, low latency, and a modular software desig
 - **Robust Voice Capture:** Employs the reSpeaker XVF3800 microphone array for hardware-accelerated wake word detection, beamforming, and acoustic echo cancellation (AEC).
 - **Smart Home Control via Function Calling:** Integrates seamlessly with **OpenHAB** to control smart devices like lights, switches, and sensors. The LLM uses function calling to interact with the OpenHAB REST API based on natural language commands.
 - **Multi-lingual:** While designed for Polish, the system can be configured for any language supported by the chosen AI provider.
+- **Operational Monitoring:** Built-in Prometheus metrics endpoint with a pre-configured Grafana dashboard. Tracks wake word activity, session lifecycle, radio control, smart home commands, AI tool calls, and system health — all in real time.
 
 ## ⚖️ Architectural Choice: Real-time API vs. Traditional STT/TTS
 
@@ -145,5 +146,6 @@ Even with a fixed system clock configured in PipeWire, this delay can drift slig
 This project is an ongoing effort. Planned future enhancements include:
 
 - **Music Streaming:** Integrating music streaming services like Spotify or YouTube Music.
+- **ReSpeaker AEC Monitoring:** Expose AEC convergence state and per-channel signal levels via the metrics endpoint, requiring 6-channel firmware and I2C/USB DSP register access.
 - **Automatic Delay Calibration:** Implementing a background process to monitor the audio delay between the DAC and the reSpeaker in real-time and automatically adjust the `AUDIO_MGR_SYS_DELAY` to prevent drift.
 - **Custom Linux Distribution:** Building a dedicated, minimal Linux distribution for the speaker using the [Yocto Project](https://www.yoctoproject.org/) to optimize boot time and performance.
