@@ -123,16 +123,17 @@ class MQTTBridge:
     async def _handle_station(self, payload: str) -> None:
         if not payload:
             return
-        url = await self._radio.search_station(payload)
-        if not url:
+        metrics.MQTT_COMMANDS.labels(command='station').inc()
+        result = await self._radio.search_station(payload)
+        if not result:
             logger.warning("MQTT: station '%s' not found", payload)
             return
-        metrics.MQTT_COMMANDS.labels(command='station').inc()
-        metrics.RADIO_PLAYS.labels(source='mqtt_station', station=payload).inc()
+        url, official_name = result
+        metrics.RADIO_PLAYS.labels(source='mqtt_station', station=official_name).inc()
         if await self._mpd.is_playing():
-            await self._mpd.play_station(url, payload)
+            await self._mpd.play_station(url, official_name)
         else:
-            await self._mpd.load_station(url, payload)
+            await self._mpd.load_station(url, official_name)
 
     async def _handle_volume(self, payload: str) -> None:
         try:

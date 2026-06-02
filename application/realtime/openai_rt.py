@@ -17,6 +17,7 @@ from typing import Optional
 import numpy as np
 from scipy.signal import resample_poly
 
+import metrics
 from config import AppConfig
 from realtime.base import BaseRealtimeManager
 from functions.registry import get_function
@@ -554,6 +555,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             self._waiting_for_turn_complete = False
             response = event.get("response", {})
             status = response.get("status", "")
+            usage = response.get("usage", {})
+            if usage:
+                if usage.get("input_tokens"):
+                    metrics.TOKENS_INPUT.labels(provider='openai').inc(usage["input_tokens"])
+                if usage.get("output_tokens"):
+                    metrics.TOKENS_OUTPUT.labels(provider='openai').inc(usage["output_tokens"])
 
             # Handle tool calls if present in the output
             if "output" in response and response["output"]:

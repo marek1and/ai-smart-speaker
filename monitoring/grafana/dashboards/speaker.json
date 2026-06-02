@@ -257,7 +257,7 @@
         "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "value_and_name"
       },
-      "title": "FSM State",
+      "title": "Conversation State",
       "type": "stat",
       "targets": [
         {
@@ -269,8 +269,112 @@
       ]
     },
     {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 85 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "id": 28,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "title": "CPU Usage Over Time",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "speaker_process_cpu_percent",
+          "legendFormat": "CPU %",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "max": 512,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 256 },
+              { "color": "red", "value": 400 }
+            ]
+          },
+          "unit": "decmbytes"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "id": 29,
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "title": "Memory Usage Over Time",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "speaker_process_memory_bytes / 1024 / 1024",
+          "legendFormat": "RSS MB",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
       "id": 101,
       "title": "Wake Word & Sessions",
       "type": "row"
@@ -306,7 +410,7 @@
           { "matcher": { "id": "byName", "options": "re_listen" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] }
         ]
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "id": 7,
       "options": {
         "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -341,7 +445,7 @@
           { "matcher": { "id": "byName", "options": "stt_rejection" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }] }
         ]
       },
-      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 6 },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 14 },
       "id": 8,
       "options": {
         "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -378,7 +482,7 @@
           { "matcher": { "id": "byName", "options": "false_trigger" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
         ]
       },
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 6 },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 14 },
       "id": 9,
       "options": {
         "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -404,7 +508,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
       "id": 102,
       "title": "Conversation",
       "type": "row"
@@ -423,7 +527,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
       "id": 10,
       "options": {
         "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -472,14 +576,14 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 15 },
+      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 23 },
       "id": 11,
       "options": {
         "colorMode": "background",
         "graphMode": "area",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "auto"
       },
       "title": "Total Barge-ins",
@@ -487,7 +591,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "increase(speaker_barge_ins_total[$__interval])",
+          "expr": "speaker_barge_ins_total",
           "legendFormat": "",
           "refId": "A"
         }
@@ -506,14 +610,14 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 15 },
+      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 23 },
       "id": 12,
       "options": {
         "colorMode": "background",
         "graphMode": "area",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "auto"
       },
       "title": "Follow-ups Started",
@@ -521,7 +625,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "increase(speaker_followups_started_total[$__interval])",
+          "expr": "speaker_followups_started_total",
           "legendFormat": "",
           "refId": "A"
         }
@@ -544,14 +648,14 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 15 },
+      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 23 },
       "id": 13,
       "options": {
         "colorMode": "background",
         "graphMode": "area",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "auto"
       },
       "title": "Follow-up Timeouts",
@@ -559,7 +663,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "increase(speaker_followup_timeouts_total[$__interval])",
+          "expr": "speaker_followup_timeouts_total",
           "legendFormat": "",
           "refId": "A"
         }
@@ -581,14 +685,14 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 15 },
+      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 23 },
       "id": 14,
       "options": {
         "colorMode": "background",
         "graphMode": "area",
         "justifyMode": "center",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
         "textMode": "auto"
       },
       "title": "API Errors",
@@ -596,7 +700,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "increase(speaker_api_errors_total[$__interval])",
+          "expr": "speaker_api_errors_total",
           "legendFormat": "",
           "refId": "A"
         }
@@ -619,7 +723,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 19 },
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 27 },
       "id": 15,
       "options": {
         "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -639,7 +743,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
       "id": 103,
       "title": "Radio",
       "type": "row"
@@ -662,7 +766,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 24 },
+      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 32 },
       "id": 16,
       "options": {
         "minVizHeight": 75,
@@ -702,7 +806,7 @@
           { "matcher": { "id": "byName", "options": "mqtt_station" }, "properties": [{ "id": "color", "value": { "fixedColor": "light-blue", "mode": "fixed" } }] }
         ]
       },
-      "gridPos": { "h": 8, "w": 10, "x": 4, "y": 24 },
+      "gridPos": { "h": 8, "w": 10, "x": 4, "y": 32 },
       "id": 17,
       "options": {
         "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -734,7 +838,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 24 },
+      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 32 },
       "id": 18,
       "options": {
         "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
@@ -772,7 +876,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
       "id": 104,
       "title": "Popular Stations",
       "type": "row"
@@ -796,7 +900,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 41 },
       "id": 19,
       "options": {
         "cellHeight": "sm",
@@ -819,7 +923,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (station) (increase(speaker_radio_plays_total[$__interval]))",
+          "expr": "sum by (station) (speaker_radio_plays_total)",
           "legendFormat": "{{station}}",
           "instant": true,
           "refId": "A"
@@ -838,7 +942,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 41 },
       "id": 20,
       "options": {
         "displayLabels": ["percent"],
@@ -852,7 +956,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum by (station) (increase(speaker_radio_plays_total[$__interval]))",
+          "expr": "sum by (station) (speaker_radio_plays_total)",
           "legendFormat": "{{station}}",
           "instant": true,
           "refId": "A"
@@ -861,7 +965,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 49 },
       "id": 105,
       "title": "Integrations & AI Tools",
       "type": "row"
@@ -880,20 +984,23 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 42 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 50 },
       "id": 21,
       "options": {
-        "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "none" }
+        "displayMode": "basic",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showUnfilled": true
       },
       "title": "AI Tool Calls",
-      "description": "Functions called by the AI model per time period",
-      "type": "timeseries",
+      "description": "Total AI function calls in selected time range",
+      "type": "bargauge",
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "increase(speaker_ai_tool_calls_total[$__rate_interval])",
+          "expr": "sum by (function) (speaker_ai_tool_calls_total)",
           "legendFormat": "{{function}}",
+          "instant": true,
           "refId": "A"
         }
       ]
@@ -917,20 +1024,23 @@
           { "matcher": { "id": "byName", "options": "volume" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] }
         ]
       },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 42 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 50 },
       "id": 22,
       "options": {
-        "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "none" }
+        "displayMode": "basic",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showUnfilled": true
       },
       "title": "MQTT Commands",
-      "description": "Commands received via MQTT broker (power_on/off, station change, volume)",
-      "type": "timeseries",
+      "description": "Total MQTT commands received in selected time range",
+      "type": "bargauge",
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "increase(speaker_mqtt_commands_total[$__rate_interval])",
+          "expr": "sum by (command) (speaker_mqtt_commands_total)",
           "legendFormat": "{{command}}",
+          "instant": true,
           "refId": "A"
         }
       ]
@@ -954,20 +1064,26 @@
           { "matcher": { "id": "byName", "options": "get / error" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
         ]
       },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 42 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 58 },
       "id": 23,
       "options": {
-        "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "none" }
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Count" }]
       },
       "title": "OpenHAB Requests",
-      "description": "REST API calls to OpenHAB for smart home control (get = read state, set = change state)",
-      "type": "timeseries",
+      "description": "REST API calls to OpenHAB by method and status in selected time range",
+      "type": "table",
+      "transformations": [
+        { "id": "reduce", "options": { "reducers": ["sum"], "labelsToFields": false } }
+      ],
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "increase(speaker_openhab_requests_total[$__rate_interval])",
+          "expr": "sum by (method, status) (speaker_openhab_requests_total)",
           "legendFormat": "{{method}} / {{status}}",
+          "instant": true,
           "refId": "A"
         }
       ]
@@ -986,20 +1102,26 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 50 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 58 },
       "id": 24,
       "options": {
-        "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "none" }
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Count" }]
       },
       "title": "OpenHAB Item Changes",
-      "description": "Individual smart home item state changes (one bar per item that was controlled)",
-      "type": "timeseries",
+      "description": "Smart home item state changes in selected time range",
+      "type": "table",
+      "transformations": [
+        { "id": "reduce", "options": { "reducers": ["sum"], "labelsToFields": false } }
+      ],
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "increase(speaker_openhab_item_sets_total[$__rate_interval])",
+          "expr": "sum by (item) (speaker_openhab_item_sets_total)",
           "legendFormat": "{{item}}",
+          "instant": true,
           "refId": "A"
         }
       ]
@@ -1021,20 +1143,23 @@
           { "matcher": { "id": "byName", "options": "channel_switch" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] }
         ]
       },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 50 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 50 },
       "id": 25,
       "options": {
-        "legend": { "calcs": ["sum"], "displayMode": "list", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "none" }
+        "displayMode": "basic",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showUnfilled": true
       },
       "title": "TV Commands",
-      "description": "TV control actions triggered by voice commands",
-      "type": "timeseries",
+      "description": "Total TV commands in selected time range",
+      "type": "bargauge",
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "increase(speaker_tv_commands_total[$__rate_interval])",
+          "expr": "sum by (action) (speaker_tv_commands_total)",
           "legendFormat": "{{action}}",
+          "instant": true,
           "refId": "A"
         }
       ]
@@ -1057,7 +1182,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 50 },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 58 },
       "id": 26,
       "options": {
         "colorMode": "background",
@@ -1095,7 +1220,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 54 },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 62 },
       "id": 27,
       "options": {
         "colorMode": "background",
@@ -1111,8 +1236,130 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "increase(speaker_mpd_reconnections_total[$__interval])",
+          "expr": "speaker_mpd_reconnections_total",
           "legendFormat": "",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 66 },
+      "id": 106,
+      "title": "Token Usage",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "blue", "value": null }]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 67 },
+      "id": 30,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "title": "Input Tokens",
+      "description": "Total input (prompt) tokens consumed in selected time range",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(speaker_tokens_input_total)",
+          "legendFormat": "",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 67 },
+      "id": 31,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "title": "Output Tokens",
+      "description": "Total output (response) tokens consumed in selected time range",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(speaker_tokens_output_total)",
+          "legendFormat": "",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5000 },
+              { "color": "red", "value": 20000 }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 67 },
+      "id": 32,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "title": "Avg Tokens / Session",
+      "description": "Average total tokens (input + output) per closed session in selected time range",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "(sum(speaker_tokens_input_total) + sum(speaker_tokens_output_total)) / (sum(speaker_sessions_closed_total) > 0)",
+          "legendFormat": "",
+          "instant": true,
           "refId": "A"
         }
       ]
@@ -1136,7 +1383,7 @@
       }
     ]
   },
-  "time": { "from": "now-3h", "to": "now" },
+  "time": { "from": "now-24h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
   "title": "AI Smart Speaker",

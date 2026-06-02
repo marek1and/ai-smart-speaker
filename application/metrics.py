@@ -43,6 +43,14 @@ SESSIONS_CLOSED = Counter(
 )
 SESSION_TURNS = Counter('speaker_session_turns_total', 'Conversation turns completed')
 API_ERRORS = Counter('speaker_api_errors_total', 'API session errors')
+TOKENS_INPUT = Counter(
+    'speaker_tokens_input_total', 'Input tokens consumed',
+    ['provider'],
+)
+TOKENS_OUTPUT = Counter(
+    'speaker_tokens_output_total', 'Output tokens consumed',
+    ['provider'],
+)
 
 # Conversation events
 BARGE_INS = Counter('speaker_barge_ins_total', 'Barge-in interruptions executed')

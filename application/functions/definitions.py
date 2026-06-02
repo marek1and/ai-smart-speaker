@@ -58,9 +58,10 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
                 "details": "No radio station is on the playlist. What station would you like to play?",
             }
 
-    url = await radio_client.search_station(station_name)
-    if url:
-        return {"url": url, "name": station_name}
+    result = await radio_client.search_station(station_name)
+    if result:
+        url, official_name = result
+        return {"url": url, "name": official_name}
     else:
         return {
             "status": "error",

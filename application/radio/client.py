@@ -17,7 +17,8 @@ class RadioClient:
         except Exception:
             pass
 
-    async def search_station(self, station_name: str) -> str | None:
+    async def search_station(self, station_name: str) -> tuple[str, str] | None:
+        """Returns (url, official_name) or None if not found."""
         logger.info(
             "Searching for radio station '%s' in country '%s'",
             station_name,
@@ -38,8 +39,6 @@ class RadioClient:
             logger.warning("No stations found for '%s'", station_name)
             return None
 
-        # Find the best match (for now, the first result)
-        # The radios library already sorts by popularity
         best_match = stations[0]
         logger.info("Found station: %s (%s)", best_match.name, best_match.url_resolved)
-        return best_match.url_resolved
+        return best_match.url_resolved, best_match.name

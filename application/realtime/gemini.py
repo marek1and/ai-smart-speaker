@@ -27,6 +27,7 @@ from google.genai.types import (
     LiveServerMessage,
 )
 
+import metrics
 from config import AppConfig
 from realtime.base import BaseRealtimeManager
 from functions.registry import get_function
@@ -478,7 +479,14 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 if self._on_interrupted:
                     self._on_interrupted()
 
-        elif hasattr(response, "setup_complete") and response.setup_complete:
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            um = response.usage_metadata
+            if um.prompt_token_count:
+                metrics.TOKENS_INPUT.labels(provider='gemini').inc(um.prompt_token_count)
+            if um.response_token_count:
+                metrics.TOKENS_OUTPUT.labels(provider='gemini').inc(um.response_token_count)
+
+        if hasattr(response, "setup_complete") and response.setup_complete:
             logger.debug("API: setup_complete")
 
         elif hasattr(response, "tool_call") and response.tool_call:
