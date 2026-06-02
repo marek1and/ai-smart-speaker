@@ -47,6 +47,7 @@ class MQTTBridge:
                 async with aiomqtt.Client(
                     hostname=self._config.broker,
                     port=self._config.port,
+                    identifier=self._config.client_id,
                     username=self._config.username,
                     password=self._config.password,
                     will=will,
@@ -58,7 +59,7 @@ class MQTTBridge:
                     )
                     await self._publish_initial_state(client, radio)
                     metrics.MQTT_CONNECTED.set(1)
-                async with asyncio.TaskGroup() as tg:
+                    async with asyncio.TaskGroup() as tg:
                         tg.create_task(self._publish_loop(client, radio))
                         tg.create_task(self._command_loop(client, radio))
             except Exception as e:
@@ -112,8 +113,8 @@ class MQTTBridge:
                 source='mqtt_power',
                 station=self._mpd.get_current_station_name() or '',
             ).inc()
-            await self._mpd.play()
             self._confirm()
+            await self._mpd.play()
         elif payload.upper() == "OFF":
             metrics.MQTT_COMMANDS.labels(command='power_off').inc()
             metrics.RADIO_STOPS.labels(source='mqtt').inc()

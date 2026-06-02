@@ -233,6 +233,7 @@ class MQTTConfig:
     enabled: bool = False
     broker: str = "localhost"
     port: int = 1883
+    client_id: str = "ai-smart-speaker"
     topic_prefix: str = "home/living-room/speaker"
     username: Optional[str] = None
     password: Optional[str] = None
