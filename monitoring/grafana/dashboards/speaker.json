@@ -1262,7 +1262,7 @@
           "expr": "increase(speaker_wake_word_detections_total[$__rate_interval])",
           "legendFormat": "{{context}}",
           "refId": "A",
-          "interval": "1h"
+          "interval": "5m"
         }
       ]
     },
@@ -1352,7 +1352,7 @@
           "expr": "increase(speaker_false_triggers_total[$__rate_interval])",
           "legendFormat": "{{reason}}",
           "refId": "A",
-          "interval": "1h"
+          "interval": "5m"
         }
       ]
     },
@@ -1472,7 +1472,7 @@
           "expr": "increase(speaker_sessions_opened_total[$__rate_interval])",
           "legendFormat": "opened",
           "refId": "A",
-          "interval": "1h"
+          "interval": "5m"
         },
         {
           "datasource": {
@@ -1482,7 +1482,7 @@
           "expr": "increase(speaker_sessions_closed_total[$__rate_interval])",
           "legendFormat": "{{reason}}",
           "refId": "B",
-          "interval": "1h"
+          "interval": "5m"
         }
       ]
     },
@@ -1553,7 +1553,7 @@
           "expr": "increase(speaker_session_turns_total[$__rate_interval])",
           "legendFormat": "turns completed",
           "refId": "A",
-          "interval": "1h"
+          "interval": "5m"
         },
         {
           "datasource": {
@@ -1563,7 +1563,7 @@
           "expr": "increase(speaker_followups_started_total[$__rate_interval])",
           "legendFormat": "follow-ups started",
           "refId": "B",
-          "interval": "1h"
+          "interval": "5m"
         },
         {
           "datasource": {
@@ -1573,7 +1573,7 @@
           "expr": "increase(speaker_followup_timeouts_total[$__rate_interval])",
           "legendFormat": "follow-up timeouts",
           "refId": "C",
-          "interval": "1h"
+          "interval": "5m"
         },
         {
           "datasource": {
@@ -1583,7 +1583,7 @@
           "expr": "increase(speaker_barge_ins_total[$__rate_interval])",
           "legendFormat": "barge-ins",
           "refId": "D",
-          "interval": "1h"
+          "interval": "5m"
         }
       ]
     },
@@ -1891,7 +1891,7 @@
           "expr": "increase(speaker_state_transitions_total[$__rate_interval])",
           "legendFormat": "{{from_state}} → {{to_state}}",
           "refId": "A",
-          "interval": "1h"
+          "interval": "5m"
         }
       ]
     },
@@ -2087,7 +2087,7 @@
           "expr": "sum by (source) (increase(speaker_radio_plays_total[$__rate_interval]))",
           "legendFormat": "{{source}}",
           "refId": "A",
-          "interval": "1h"
+          "interval": "5m"
         }
       ]
     },
@@ -2146,7 +2146,7 @@
           "expr": "increase(speaker_radio_stops_total[$__rate_interval])",
           "legendFormat": "stop ({{source}})",
           "refId": "A",
-          "interval": "1h"
+          "interval": "5m"
         },
         {
           "datasource": {
@@ -2156,7 +2156,7 @@
           "expr": "increase(speaker_radio_ducks_total[$__rate_interval])",
           "legendFormat": "volume duck",
           "refId": "B",
-          "interval": "1h"
+          "interval": "5m"
         },
         {
           "datasource": {
@@ -2166,7 +2166,7 @@
           "expr": "increase(speaker_radio_unducks_total[$__rate_interval])",
           "legendFormat": "volume restore",
           "refId": "C",
-          "interval": "1h"
+          "interval": "5m"
         },
         {
           "datasource": {
@@ -2176,7 +2176,7 @@
           "expr": "increase(speaker_radio_volume_changes_total[$__rate_interval])",
           "legendFormat": "volume change ({{source}})",
           "refId": "D",
-          "interval": "1h"
+          "interval": "5m"
         }
       ]
     },
