@@ -116,6 +116,33 @@ APP_INFO = Info('speaker_app', 'Application information')
 def start(port: int, provider: str = 'unknown') -> None:
     start_http_server(port)
     APP_INFO.info({'provider': provider})
+    _pre_register_labels()
+
+
+def _pre_register_labels() -> None:
+    """Touch all known label combos at 0 so Prometheus scrapes them before the first inc().
+    Without this, increase() misses the first event (counter created and incremented
+    in the same scrape interval, so Prometheus never sees the 0 → 1 transition)."""
+    for ctx in ('idle', 'barge_in', 're_listen'):
+        WAKE_DETECTIONS.labels(context=ctx)
+    for reason in ('initial_silence', 'stt_rejection'):
+        FALSE_TRIGGERS.labels(reason=reason)
+    for reason in ('max_turns', 'inactivity', 'false_trigger'):
+        SESSIONS_CLOSED.labels(reason=reason)
+    for fn in ('play_internet_radio', 'stop_radio', 'set_playback_volume',
+               'get_radio_status', 'set_openhab_item_state', 'watch_tv'):
+        AI_TOOL_CALLS.labels(function=fn)
+    for cmd in ('power_on', 'power_off', 'station', 'volume'):
+        MQTT_COMMANDS.labels(command=cmd)
+    for action in ('power_on', 'channel_switch'):
+        TV_COMMANDS.labels(action=action)
+    for method in ('get', 'set'):
+        for status in ('ok', 'error'):
+            OPENHAB_REQUESTS.labels(method=method, status=status)
+    for source in ('ai', 'mqtt'):
+        RADIO_STOPS.labels(source=source)
+    for source in ('ai_new', 'ai_resume', 'mqtt_power', 'mqtt_station'):
+        RADIO_PLAYS.labels(source=source, station='unknown')
 
 
 def _read_cpu_temp() -> Optional[float]:
