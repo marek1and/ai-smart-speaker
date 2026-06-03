@@ -195,7 +195,6 @@ class RadioConfig:
     """Internet radio configuration."""
 
     country: str = "Poland"
-    popular_stations: list[str] = field(default_factory=list)
 
 
 @dataclass

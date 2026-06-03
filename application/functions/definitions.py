@@ -90,30 +90,10 @@ async def get_radio_status() -> dict:
     """
     client = _mpd()
     status = await client.get_status() or {}
-    playlist = await client.get_playlist_info()
     volume = client.get_restore_volume()
 
-    is_radio_on_playlist = False
-    station_name_on_playlist = None
-    if playlist:
-        first_item = playlist[0]
-        station_name = first_item.get("name") or first_item.get("title")
-        url = first_item.get("file", "")
-
-        is_radio_keyword = (station_name and "radio" in station_name.lower()) or (
-            "radio" in url.lower()
-        ) or ("live" in url.lower())
-
-        is_popular_station = False
-        if station_name:
-            popular_stations = config.radio.popular_stations
-            is_popular_station = any(
-                popular.lower() in station_name.lower() for popular in popular_stations
-            )
-
-        if is_radio_keyword or is_popular_station:
-            is_radio_on_playlist = True
-            station_name_on_playlist = station_name or "Unknown Radio"
+    station_name_on_playlist = client.get_current_station_name()
+    is_radio_on_playlist = station_name_on_playlist is not None
 
     current_song = await client.get_current_song_info()
     currently_playing_station = None

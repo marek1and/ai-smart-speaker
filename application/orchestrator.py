@@ -135,6 +135,7 @@ class AudioOrchestrator:
         # the next natural IDLE boundary.
         self._session_turn_count: int = 0
 
+
         # Current audio frame for status display
         self._current_audio_frame: Optional[np.ndarray] = None
 
