@@ -61,6 +61,9 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
     result = await radio_client.search_station(station_name)
     if result:
         url, official_name = result
+        # Pre-register counter at 0 now; inc() happens after AI speech (~5–30s),
+        # giving Prometheus a scrape cycle to observe the 0 before the increment.
+        metrics.RADIO_PLAYS.labels(source='ai_new', station=official_name)
         return {"url": url, "name": official_name}
     else:
         return {

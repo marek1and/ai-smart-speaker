@@ -2,18 +2,25 @@
 
 import os
 import time
+from pathlib import Path
+from typing import Optional
 
 import psutil
 from prometheus_client import Counter, Gauge, Info, start_http_server
 
 _APP_START_TIME = time.time()
 _PROCESS = psutil.Process(os.getpid())
+_CPU_TEMP_PATH = Path('/sys/class/thermal/thermal_zone0/temp')
 
 # System
 APP_UPTIME = Gauge('speaker_app_uptime_seconds', 'Application uptime in seconds')
 SYSTEM_UPTIME = Gauge('speaker_system_uptime_seconds', 'System uptime in seconds')
 PROCESS_CPU = Gauge('speaker_process_cpu_percent', 'Process CPU usage percent')
+CPU_PER_CORE = Gauge('speaker_cpu_core_percent', 'System CPU usage per core', ['core'])
+CPU_TEMP = Gauge('speaker_cpu_temp_celsius', 'CPU temperature in Celsius')
 PROCESS_MEMORY = Gauge('speaker_process_memory_bytes', 'Process RSS memory in bytes')
+SYSTEM_MEMORY_USED = Gauge('speaker_system_memory_used_bytes', 'System used memory in bytes')
+SYSTEM_MEMORY_TOTAL = Gauge('speaker_system_memory_total_bytes', 'System total memory in bytes')
 
 # Wake word
 WAKE_DETECTIONS = Counter(
@@ -111,8 +118,23 @@ def start(port: int, provider: str = 'unknown') -> None:
     APP_INFO.info({'provider': provider})
 
 
+def _read_cpu_temp() -> Optional[float]:
+    try:
+        return int(_CPU_TEMP_PATH.read_text()) / 1000.0
+    except Exception:
+        return None
+
+
 def update_system_metrics() -> None:
     APP_UPTIME.set(time.time() - _APP_START_TIME)
     SYSTEM_UPTIME.set(time.time() - psutil.boot_time())
     PROCESS_CPU.set(_PROCESS.cpu_percent(interval=None))
+    for i, pct in enumerate(psutil.cpu_percent(percpu=True)):
+        CPU_PER_CORE.labels(core=str(i)).set(pct)
+    temp = _read_cpu_temp()
+    if temp is not None:
+        CPU_TEMP.set(temp)
     PROCESS_MEMORY.set(_PROCESS.memory_info().rss)
+    vm = psutil.virtual_memory()
+    SYSTEM_MEMORY_USED.set(vm.used)
+    SYSTEM_MEMORY_TOTAL.set(vm.total)

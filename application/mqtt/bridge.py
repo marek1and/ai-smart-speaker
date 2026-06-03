@@ -111,7 +111,7 @@ class MQTTBridge:
             metrics.MQTT_COMMANDS.labels(command='power_on').inc()
             metrics.RADIO_PLAYS.labels(
                 source='mqtt_power',
-                station=self._mpd.get_current_station_name() or '',
+                station=self._mpd.get_current_station_name() or 'unknown',
             ).inc()
             self._confirm()
             await self._mpd.play()
@@ -129,11 +129,14 @@ class MQTTBridge:
             logger.warning("MQTT: station '%s' not found", payload)
             return
         url, official_name = result
-        metrics.RADIO_PLAYS.labels(source='mqtt_station', station=official_name).inc()
+        # Pre-register at 0; MPD play commands below are async (~100ms+), giving
+        # Prometheus a chance to scrape the counter at 0 before inc().
+        metrics.RADIO_PLAYS.labels(source='mqtt_station', station=official_name)
         if await self._mpd.is_playing():
             await self._mpd.play_station(url, official_name)
         else:
             await self._mpd.load_station(url, official_name)
+        metrics.RADIO_PLAYS.labels(source='mqtt_station', station=official_name).inc()
 
     async def _handle_volume(self, payload: str) -> None:
         try:

@@ -887,7 +887,7 @@ class AudioOrchestrator:
                     await self.mpd_client.play()
                     metrics.RADIO_PLAYS.labels(
                         source='ai_resume',
-                        station=self.mpd_client.get_current_station_name() or '',
+                        station=self.mpd_client.get_current_station_name() or 'unknown',
                     ).inc()
                     ran_radio_action = True
 
