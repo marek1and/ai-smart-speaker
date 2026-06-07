@@ -1,11 +1,16 @@
-AEC_ASROUTGAIN 1.0
-AUDIO_MGR_OP_L 6 3
-AUDIO_MGR_OP_R 6 3
-AEC_ASROUTONOFF 1
+# XVF3800 firmware parameters - firmware 2.0.9+, 48kHz USB audio
+#
+# These settings are saved to flash via SAVE_CONFIGURATION and survive reboots.
+# Re-apply manually after a firmware upgrade using:
+#   /opt/reSpeaker/xvf_host -e /opt/reSpeaker/init_commands.txt
+#   /opt/reSpeaker/xvf_host SAVE_CONFIGURATION 1
+#
+# The udev rule no longer runs this automatically on device connect.
+
 AEC_HPFONOFF 4
-AUDIO_MGR_REF_GAIN 1.5 
-AUDIO_MGR_MIC_GAIN 90 
-AUDIO_MGR_SYS_DELAY 120 
+AUDIO_MGR_REF_GAIN 8
+AUDIO_MGR_MIC_GAIN 90
+AUDIO_MGR_SYS_DELAY 12
 PP_AGCONOFF 1
 PP_AGCGAIN 2.0
 PP_AGCMAXGAIN 3.0

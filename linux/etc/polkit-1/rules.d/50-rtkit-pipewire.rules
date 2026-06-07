@@ -1,0 +1,11 @@
+// Grants RTKit real-time scheduling to PipeWire on headless systems (no
+// xdg-desktop-portal). Without this, data-loop stays on SCHED_OTHER and
+// audio glitches occur under CPU load.
+// Change "user" to your actual username.
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.RealtimeKit1.acquire-real-time" ||
+         action.id == "org.freedesktop.RealtimeKit1.acquire-high-priority") &&
+        subject.user == "user") {
+        return polkit.Result.YES;
+    }
+});

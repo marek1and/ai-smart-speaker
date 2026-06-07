@@ -10,7 +10,7 @@ The project is organized into the following directories:
 - `functions/`: Handles the definition and registration of tools (functions) that the AI can call, such as controlling smart home devices.
 - `openhab/`: Contains the client for interacting with the OpenHAB REST API.
 - `realtime/`: Manages the real-time communication with the selected API (Gemini or OpenAI).
-- `sounds/`: Stores sound effects for different events (e.g., wake word, end o`f` conversation).
+- `sounds/`: Stores sound effects for different events (e.g., wake word, end of conversation).
 - `tools/`: Includes utility scripts for tasks like tuning audio delay.
 - `config.py`: Defines the data classes for the application's configuration.
 - `main.py`: The main entry point for the application.
@@ -101,7 +101,7 @@ To make the conversation feel natural and avoid the assistant waiting for user i
 
 If you want the assistant to ask follow-up questions or wait for your response after it performs an action, you should explicitly instruct it in the system prompt to call the `request_for_user_input` function. For example:
 
-*   "If you need to ask the user for details or expect a response, ALWAYS call the `request_for_user_input` function."
+- "If you need to ask the user for details or expect a response, ALWAYS call the `request_for_user_input` function."
 
 This allows the AI to control the conversation flow, deciding when to keep listening and when to end the turn.
 
@@ -194,7 +194,7 @@ The application exposes a Prometheus metrics endpoint for real-time operational 
 
 When enabled (default), the application starts an HTTP server on port `9090` that serves metrics in Prometheus format:
 
-```
+```text
 http://<speaker-ip>:9090/metrics
 ```
 
@@ -209,7 +209,7 @@ metrics:
 ### What is Tracked
 
 | Category | Metrics |
-|---|---|
+| --- | --- |
 | **System** | App and system uptime, process CPU %, RAM usage |
 | **Wake Word** | Detection count by context (idle / barge-in / re-listen), false trigger count by reason (initial silence / STT rejection) |
 | **Sessions** | Sessions opened/closed (with close reason: max_turns / inactivity / false_trigger), turns completed, API errors |
@@ -228,15 +228,18 @@ A complete monitoring stack (Prometheus + Grafana) is provided in the `monitorin
 
 1. Edit `monitoring/prometheus.yml` and replace `SPEAKER_IP` with your speaker's IP address.
 2. Start the stack:
+
    ```bash
    cd monitoring
    docker compose up -d
    ```
+
 3. Open Grafana at `http://localhost:3000` (default login: `admin` / `admin`).
 
 The dashboard loads automatically under **AI Smart Speaker → AI Smart Speaker**.
 
 To change the Grafana admin password, set the `GRAFANA_PASSWORD` environment variable before starting:
+
 ```bash
 GRAFANA_PASSWORD=mysecret docker compose up -d
 ```
@@ -245,27 +248,14 @@ Prometheus retains 90 days of data by default.
 
 ## Tools
 
-### Delay Tuning
+### Delay Tuning (legacy — v1 DAC+ builds only)
 
-The `tools/respeaker_delay_tune.py` script helps to tune the audio delay for the ReSpeaker microphone array.
+The `tools/respeaker_delay_tune.py` script calibrates `AUDIO_MGR_SYS_DELAY` for setups where the XVF3800 plays audio through an **external DAC** (e.g., the original RPi DAC+ build). In that configuration the AEC reference and the speaker output travel different paths, so the delay must be measured and set precisely.
 
-To run the delay tuning tool, use the following command:
-
-```bash
-python -m tools.respeaker_delay_tune
-```
-
-**Options:**
-
-- `--startup-wav`: Path to the `startup.wav` file. Defaults to the `sounds/startup.wav` file in the project directory.
-- `--buffer-samples`: Samples to leave so the reference is ahead of the mic. Defaults to `20`.
-- `--dry-run`: If set, the script will not write the new `SYS_DELAY` or save the configuration.
-- `--recording-dir`: Directory to save the recording. Defaults to `recordings/`.
-
-For example, to run the tool in dry-run mode and save the recording to a custom directory, you can use the following command:
+With firmware 2.0.9+ and the XVF3800 acting as both speaker and microphone, this tool is no longer needed — the chip handles the internal delay automatically.
 
 ```bash
-python -m tools.respeaker_delay_tune --dry-run --recording-dir /path/to/recordings
+python -m tools.respeaker_delay_tune --dry-run
 ```
 
 ## Internet Radio and MPD Integration
@@ -299,10 +289,10 @@ Once MPD is running, you can ask the assistant to play radio stations.
 
 **How it Works:**
 
-1.  **User Command:** You ask the assistant to play a radio station (e.g., "Play BBC Radio 1").
-2.  **Function Calling:** The LLM identifies your intent and uses the `play_internet_radio` tool to find a matching station. This search can be improved by setting your country in `config.yml`.
-3.  **Stream Playback:** If a station is found, the tool returns the stream URL to the orchestrator.
-4.  **MPD Control:** The orchestrator commands the MPD client to clear its current playlist, add the new stream URL, and start playing.
+1. **User Command:** You ask the assistant to play a radio station (e.g., "Play BBC Radio 1").
+2. **Function Calling:** The LLM identifies your intent and uses the `play_internet_radio` tool to find a matching station. This search can be improved by setting your country in `config.yml`.
+3. **Stream Playback:** If a station is found, the tool returns the stream URL to the orchestrator.
+4. **MPD Control:** The orchestrator commands the MPD client to clear its current playlist, add the new stream URL, and start playing.
 
 **Configuration:**
 
@@ -317,5 +307,5 @@ radio:
 
 The system features automatic audio ducking. If the radio is playing and you say the wake word:
 
--   The radio volume will be immediately lowered to a configured level (`mpd.volume_duck_percentage`).
--   Once your conversation with the assistant is finished, the radio volume will fade back in to its previous level.
+- The radio volume will be immediately lowered to a configured level (`mpd.volume_duck_percentage`).
+- Once your conversation with the assistant is finished, the radio volume will fade back in to its previous level.
