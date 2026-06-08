@@ -2253,22 +2253,20 @@
       "type": "table",
       "transformations": [
         {
-          "id": "sortBy",
+          "id": "reduce",
           "options": {
-            "fields": [
-              {
-                "desc": true,
-                "displayName": "Value"
-              }
-            ]
+            "reducers": [
+              "lastNotNull"
+            ],
+            "labelsToFields": false
           }
         },
         {
           "id": "organize",
           "options": {
             "renameByName": {
-              "Value": "Plays",
-              "station": "Station"
+              "Field": "Station",
+              "lastNotNull": "Plays"
             }
           }
         }
@@ -3394,7 +3392,8 @@
           },
           "expr": "speaker_respeaker_aec_converged",
           "legendFormat": "",
-          "refId": "A"
+          "refId": "A",
+          "instant": true
         }
       ]
     },
