@@ -47,6 +47,7 @@ class MPDClientWrapper:
         self._current_station_name: Optional[str] = None
         self._current_station_url: Optional[str] = None
         self._state_file = Path(config.state_file)
+        self._play_counts: Dict[str, int] = {}
 
         # State change listeners: each is called with a dict of changed fields.
         # Keys: "state" ("ON"/"OFF"), "station" (str|None), "volume" (int)
@@ -71,15 +72,29 @@ class MPDClientWrapper:
             data = json.loads(self._state_file.read_text())
             self._current_station_name = data.get("name")
             self._current_station_url = data.get("url")
-            logger.info("Restored radio state: station=%s", self._current_station_name)
+            self._play_counts = data.get("play_counts", {})
+            for station, count in self._play_counts.items():
+                metrics.STATION_PLAY_COUNT.labels(station=station).set(count)
+            logger.info("Restored radio state: station=%s play_counts=%s",
+                        self._current_station_name, self._play_counts)
         except Exception as e:
             logger.warning("Could not load radio state file: %s", e)
 
     def _save_radio_state(self, url: Optional[str], name: Optional[str]) -> None:
         try:
-            self._state_file.write_text(json.dumps({"name": name, "url": url}))
+            self._state_file.write_text(json.dumps(
+                {"name": name, "url": url, "play_counts": self._play_counts}
+            ))
         except Exception as e:
             logger.warning("Could not save radio state file: %s", e)
+
+    def record_play(self, station_name: Optional[str]) -> None:
+        """Increment persistent play count for a station and update the Prometheus gauge."""
+        if not station_name or station_name == "unknown":
+            return
+        self._play_counts[station_name] = self._play_counts.get(station_name, 0) + 1
+        metrics.STATION_PLAY_COUNT.labels(station=station_name).set(self._play_counts[station_name])
+        self._save_radio_state(self._current_station_url, self._current_station_name)
 
     def get_current_station_name(self) -> Optional[str]:
         return self._current_station_name
@@ -220,6 +235,7 @@ class MPDClientWrapper:
         self._current_station_name = station_name
         self._current_station_url = url
         self._save_radio_state(url, station_name)
+        self.record_play(station_name)
 
         # Run fade-in outside of the main lock to allow other operations
         await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
@@ -594,4 +610,5 @@ class MPDClientWrapper:
         await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
         metrics.RADIO_PLAYING.set(1)
         metrics.RADIO_VOLUME.set(self._restore_volume)
+        self.record_play(self._current_station_name)
         self._notify(state="ON", station=self._current_station_name, volume=self._restore_volume)

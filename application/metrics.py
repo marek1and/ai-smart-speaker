@@ -80,6 +80,7 @@ RADIO_VOLUME_CHANGES = Counter(
 RADIO_DUCKS = Counter('speaker_radio_ducks_total', 'Radio volume duck events')
 RADIO_UNDUCKS = Counter('speaker_radio_unducks_total', 'Radio volume unduck events')
 RADIO_PLAYING = Gauge('speaker_radio_playing', 'Radio playback state (1=playing, 0=stopped)')
+STATION_PLAY_COUNT = Gauge('speaker_station_play_count', 'Total play count per station (persisted across restarts)', ['station'])
 RADIO_VOLUME = Gauge('speaker_radio_volume_percent', 'Radio restore volume percentage')
 MPD_RECONNECTIONS = Counter('speaker_mpd_reconnections_total', 'MPD error-triggered reconnection events')
 
@@ -109,6 +110,17 @@ AI_TOOL_CALLS = Counter(
     'speaker_ai_tool_calls_total', 'AI-invoked tool function calls',
     ['function'],
 )
+
+# ReSpeaker XVF3800 hardware
+RESPEAKER_AVAILABLE = Gauge('speaker_respeaker_available', 'ReSpeaker USB device available (1=yes)')
+RESPEAKER_AEC_CONVERGED = Gauge('speaker_respeaker_aec_converged', 'AEC convergence (1=converged)')
+RESPEAKER_AEC_PATH_CHANGE = Gauge('speaker_respeaker_aec_path_change', 'AEC path change flag (1=change detected)')
+RESPEAKER_RT60 = Gauge('speaker_respeaker_rt60_seconds', 'Room RT60 reverberation estimate (seconds; negative=invalid)')
+RESPEAKER_SPEECH_ENERGY = Gauge('speaker_respeaker_speech_energy', 'Speech energy per beam (>0 = speech)', ['beam'])
+RESPEAKER_AGC_GAIN_DB = Gauge('speaker_respeaker_agc_gain_db', 'AGC current gain (dB)')
+RESPEAKER_DOA_AZIMUTH = Gauge('speaker_respeaker_doa_azimuth_degrees', 'Direction of arrival azimuth (degrees)', ['source'])
+RESPEAKER_AEC_HEADROOM_US = Gauge('speaker_respeaker_aec_headroom_us', 'AEC DSP current idle headroom (µs)')
+RESPEAKER_PP_HEADROOM_US = Gauge('speaker_respeaker_pp_headroom_us', 'Post-processing DSP current idle headroom (µs)')
 
 APP_INFO = Info('speaker_app', 'Application information')
 
@@ -143,6 +155,10 @@ def _pre_register_labels() -> None:
         RADIO_STOPS.labels(source=source)
     for source in ('ai_new', 'ai_resume', 'mqtt_power', 'mqtt_station'):
         RADIO_PLAYS.labels(source=source, station='unknown')
+    for beam in ('beam_1', 'beam_2', 'free_running', 'auto_select'):
+        RESPEAKER_SPEECH_ENERGY.labels(beam=beam)
+    for src in ('processed', 'auto_select'):
+        RESPEAKER_DOA_AZIMUTH.labels(source=src)
 
 
 def _read_cpu_temp() -> Optional[float]:

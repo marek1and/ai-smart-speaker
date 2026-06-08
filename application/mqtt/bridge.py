@@ -109,10 +109,8 @@ class MQTTBridge:
     async def _handle_power(self, payload: str) -> None:
         if payload.upper() == "ON":
             metrics.MQTT_COMMANDS.labels(command='power_on').inc()
-            metrics.RADIO_PLAYS.labels(
-                source='mqtt_power',
-                station=self._mpd.get_current_station_name() or 'unknown',
-            ).inc()
+            station = self._mpd.get_current_station_name() or 'unknown'
+            metrics.RADIO_PLAYS.labels(source='mqtt_power', station=station).inc()
             self._confirm()
             await self._mpd.play()
         elif payload.upper() == "OFF":

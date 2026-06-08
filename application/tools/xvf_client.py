@@ -35,19 +35,40 @@ CONTROL_SUCCESS = 0
 SERVICER_COMMAND_RETRY = 64
 TIMEOUT_MS = 100000
 
-# Commands used for delay tuning (name -> resid, cmdid, count, rw, type)
-# Same names as xvf_host for 1:1 mapping
+# Commands: (resid, cmdid, count, rw, type) — same names as xvf_host for 1:1 mapping
 PARAMETERS = {
-    "AUDIO_MGR_OP_L": (35, 15, 2, "rw", "uint8"),
-    "AUDIO_MGR_OP_R": (35, 19, 2, "rw", "uint8"),
+    # Delay tuning
+    "AUDIO_MGR_OP_L":   (35, 15, 2, "rw", "uint8"),
+    "AUDIO_MGR_OP_R":   (35, 19, 2, "rw", "uint8"),
     "AUDIO_MGR_SYS_DELAY": (35, 26, 1, "rw", "int32"),
     "SAVE_CONFIGURATION": (48, 9, 1, "wo", "uint8"),
-    "LED_EFFECT": (20, 12, 1, "rw", "uint8"),
-    "LED_BRIGHTNESS": (20, 13, 1, "rw", "uint8"),
-    "LED_SPEED": (20, 15, 1, "rw", "uint8"),
-    "LED_COLOR": (20, 16, 1, "rw", "uint32"),
-    "LED_DOA_COLOR": (20, 17, 2, "rw", "uint32"),
-    "LED_RING_COLOR": (20, 19, 12, "rw", "uint32"),
+    # LEDs
+    "LED_EFFECT":       (20, 12,  1, "rw", "uint8"),
+    "LED_BRIGHTNESS":   (20, 13,  1, "rw", "uint8"),
+    "LED_SPEED":        (20, 15,  1, "rw", "uint8"),
+    "LED_COLOR":        (20, 16,  1, "rw", "uint32"),
+    "LED_DOA_COLOR":    (20, 17,  2, "rw", "uint32"),
+    "LED_RING_COLOR":   (20, 19, 12, "rw", "uint32"),
+    # Post-processing tunable params
+    "PP_MIN_NS":                 (17, 21, 1, "rw", "float"),
+    "PP_MIN_NN":                 (17, 22, 1, "rw", "float"),
+    # AEC monitoring
+    "AEC_AECCONVERGED":          (33,  3, 1, "ro", "int32"),
+    "AEC_AECPATHCHANGE":         (33,  0, 1, "ro", "int32"),
+    "AEC_RT60":                  (33,  9, 1, "ro", "float"),
+    "AEC_SPENERGY_VALUES":       (33, 80, 4, "ro", "float"),
+    "AEC_CURRENT_IDLE_TIME":     (33, 77, 1, "ro", "uint32"),
+    "AEC_MIN_IDLE_TIME":         (33, 78, 1, "ro", "uint32"),
+    # Post-processing monitoring
+    "PP_AGCGAIN":                (17, 13, 1, "rw", "float"),
+    "PP_CURRENT_IDLE_TIME":      (17, 70, 1, "ro", "uint32"),
+    "PP_MIN_IDLE_TIME":          (17, 71, 1, "ro", "uint32"),
+    # Direction of arrival
+    "AUDIO_MGR_SELECTED_AZIMUTHS": (35, 11, 2, "ro", "radians"),
+    "DOA_VALUE":                 (20, 18, 2, "ro", "uint16"),
+    # Audio manager CPU headroom
+    "AUDIO_MGR_CURRENT_IDLE_TIME": (35,  2, 1, "ro", "int32"),
+    "AUDIO_MGR_MIN_IDLE_TIME":   (35,  3, 1, "ro", "int32"),
 }
 
 
@@ -59,7 +80,7 @@ def _find_device(vid: int = 0x2886, pid: int = 0x001A):
 
 
 class ReSpeaker:
-    """Minimal ReSpeaker control (write / read int32)."""
+    """ReSpeaker XVF3800 USB control: write and typed read for all parameter types."""
 
     def __init__(self, dev) -> None:
         self._dev = dev
@@ -88,18 +109,21 @@ class ReSpeaker:
             TIMEOUT_MS,
         )
 
-    def read_int32(self, name: str) -> int:
-        """Read one int32 value (e.g. AUDIO_MGR_SYS_DELAY)."""
+    def read(self, name: str) -> tuple:
+        """Read any readable parameter. Returns a tuple of values."""
         data = PARAMETERS.get(name)
         if not data:
             raise ValueError(f"Unknown command: {name}")
         if data[3] == "wo":
             raise ValueError(f"{name} is write-only")
-        if data[4] != "int32" or data[2] != 1:
-            raise ValueError(f"{name} is not a single int32")
 
         windex, wvalue, data_cnt, _rw, data_type = data
-        length = data_cnt * 4 + 1  # status + 4 bytes
+        if data_type == "uint16":
+            length = data_cnt * 2 + 1
+        elif data_type == "uint8":
+            length = data_cnt + 1
+        else:
+            length = data_cnt * 4 + 1
         wvalue_read = 0x80 | wvalue
 
         read_attempts = 0
@@ -124,10 +148,28 @@ class ReSpeaker:
         else:
             raise RuntimeError("ReSpeaker read attempt limit exceeded")
 
-        return struct.unpack("<i", bytes(response[1:5]))[0]
+        return _parse_response(bytes(response), data_type, data_cnt)
+
+    def read_int32(self, name: str) -> int:
+        """Read one int32 value. Kept for backward compatibility."""
+        return self.read(name)[0]
 
     def close(self) -> None:
         usb.util.dispose_resources(self._dev)
+
+
+def _parse_response(response_bytes: bytes, data_type: str, data_cnt: int) -> tuple:
+    if data_type == "uint8":
+        return struct.unpack(f"<{'B' * data_cnt}", response_bytes[1: 1 + data_cnt])
+    if data_type == "uint16":
+        return struct.unpack(f"<{'H' * data_cnt}", response_bytes[1: 1 + data_cnt * 2])
+    if data_type in ("float", "radians"):
+        return struct.unpack(f"<{'f' * data_cnt}", response_bytes[1: 1 + data_cnt * 4])
+    if data_type == "uint32":
+        return struct.unpack(f"<{'I' * data_cnt}", response_bytes[1: 1 + data_cnt * 4])
+    if data_type == "int32":
+        return struct.unpack(f"<{'i' * data_cnt}", response_bytes[1: 1 + data_cnt * 4])
+    raise ValueError(f"Unsupported type: {data_type}")
 
 
 def _build_payload(

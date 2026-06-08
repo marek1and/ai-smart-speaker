@@ -40,6 +40,7 @@ from mpd_client.client import MPDClientWrapper
 from realtime import BaseRealtimeManager, create_realtime_manager
 from state import AudioFrame, SpeakerState, WakeWordResult
 from tools.xvf_client import ReSpeakerLeds, open_respeaker
+from tools.respeaker_monitor import respeaker_monitor_task
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +371,10 @@ class AudioOrchestrator:
                 self._inactivity_monitor_task(), name="inactivity_monitor"
             ),
         ]
+        if self._respeaker:
+            tasks.append(asyncio.create_task(
+                respeaker_monitor_task(self._respeaker), name="respeaker_monitor"
+            ))
 
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
@@ -892,10 +897,8 @@ class AudioOrchestrator:
                 elif payload.get("action") == "play":
                     logger.info("Executing deferred action: play_internet_radio (resume)")
                     await self.mpd_client.play()
-                    metrics.RADIO_PLAYS.labels(
-                        source='ai_resume',
-                        station=self.mpd_client.get_current_station_name() or 'unknown',
-                    ).inc()
+                    station = self.mpd_client.get_current_station_name() or 'unknown'
+                    metrics.RADIO_PLAYS.labels(source='ai_resume', station=station).inc()
                     ran_radio_action = True
 
             elif action_type == "set_playback_volume":
