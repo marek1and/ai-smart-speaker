@@ -11,6 +11,7 @@ Architecture:
 import asyncio
 import logging
 import queue
+import sys
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -146,6 +147,8 @@ class AudioOrchestrator:
         # ReSpeaker LEDs
         self._respeaker = None
         self._leds = None
+
+        self._is_tty = sys.stdout.isatty()
 
     # -------------------------------------------------------------------------
     # State and wake-detector helpers
@@ -513,7 +516,8 @@ class AudioOrchestrator:
         if now - self._last_barge_in_time < BARGE_IN_COOLDOWN:
             return
 
-        print()  # New line after status
+        if self._is_tty:
+            print()  # New line after status
         logger.info("Wake word detected! (score=%.3f)", result.score)
         self._last_barge_in_time = now
 
@@ -552,6 +556,8 @@ class AudioOrchestrator:
 
     def _print_status(self, result: WakeWordResult) -> None:
         """Print current status line based on state."""
+        if not self._is_tty:
+            return
         if self._state == SpeakerState.IDLE:
             if self._frames_since_reset <= self._warmup_frames_needed:
                 print(
@@ -968,7 +974,8 @@ class AudioOrchestrator:
             await self._api_manager.close_session()
             self._recorder.close()
 
-        print()
+        if self._is_tty:
+            print()
         if self._api_manager is not None and self._api_manager.session_active:
             logger.info(
                 "Listening for wake word... (session kept alive for %.0fs)",
