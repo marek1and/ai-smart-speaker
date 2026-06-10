@@ -33,7 +33,9 @@ def _poll(respeaker: ReSpeaker) -> None:
     metrics.RESPEAKER_AEC_PATH_CHANGE.set(path_change)
 
     (rt60,) = respeaker.read("AEC_RT60")
-    metrics.RESPEAKER_RT60.set(rt60)
+    # Device returns ~1.4e-45 (float32 denormal) when no active speech to estimate from.
+    # Use NaN so Prometheus/Grafana shows "No data" rather than a misleading near-zero.
+    metrics.RESPEAKER_RT60.set(rt60 if rt60 > 1e-10 else float("nan"))
 
     energies = respeaker.read("AEC_SPENERGY_VALUES")
     for label, val in zip(_BEAM_LABELS, energies):

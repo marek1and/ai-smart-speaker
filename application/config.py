@@ -124,7 +124,7 @@ class LiveConfig:
     # Session management
     session_inactivity_timeout: float = 10.0  # Close session after N seconds idle
     session_max_turns: int = (
-        2  # Close session after N completed turns (fresh context on next wake)
+        4  # Close session after N completed turns (fresh context on next wake)
     )
     max_reconnect_attempts: int = 3
 
@@ -210,9 +210,11 @@ class TVConfig:
 
     power_item: str = "GF_LivingRoom_TV_Power"
     channel_item: str = "GF_LivingRoom_TV_Channel"
-    boot_wait_timeout: float = 5.0    # Max seconds to wait for TV to confirm ON
-    boot_poll_interval: float = 1.0   # How often to poll power state after cold start
-    post_boot_delay: float = 2.0      # Extra seconds to wait after TV confirms ON before sending channel
+    boot_wait_timeout: float = 5.0  # Max seconds to wait for TV to confirm ON
+    boot_poll_interval: float = 1.0  # How often to poll power state after cold start
+    post_boot_delay: float = (
+        2.0  # Extra seconds to wait after TV confirms ON before sending channel
+    )
     # channel name (as user says it) -> channel number
     channels: dict = field(default_factory=dict)
 
@@ -298,17 +300,15 @@ class AppConfig:
             # Inject TV channel names
             if tv.channels:
                 channel_names = ", ".join(tv.channels.keys())
-                live_data["system_instruction"] = live_data["system_instruction"].replace(
-                    "{tv_channels}", channel_names
-                )
+                live_data["system_instruction"] = live_data[
+                    "system_instruction"
+                ].replace("{tv_channels}", channel_names)
             # Inject pinned station names so the model uses canonical names
             if radio.stations:
-                station_list = ", ".join(
-                    pin.name for pin in radio.stations.values()
-                )
-                live_data["system_instruction"] = live_data["system_instruction"].replace(
-                    "{radio_stations}", station_list
-                )
+                station_list = ", ".join(pin.name for pin in radio.stations.values())
+                live_data["system_instruction"] = live_data[
+                    "system_instruction"
+                ].replace("{radio_stations}", station_list)
 
         return cls(
             audio=AudioConfig(**config_data.get("audio", {})),
