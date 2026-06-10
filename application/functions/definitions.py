@@ -24,6 +24,7 @@ def inject_mpd_client(client: MPDClientWrapper) -> None:
     """Called once by AudioOrchestrator.start() to share its MPD client."""
     global _mpd_client
     _mpd_client = client
+    radio_client.set_state(client.radio_state)
 
 
 async def close_radio_client() -> None:
@@ -60,11 +61,9 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
 
     result = await radio_client.search_station(station_name)
     if result:
-        url, official_name = result
-        # Pre-register counter at 0 now; inc() happens after AI speech (~5–30s),
-        # giving Prometheus a scrape cycle to observe the 0 before the increment.
+        url, official_name, key = result
         metrics.RADIO_PLAYS.labels(source='ai_new', station=official_name)
-        return {"url": url, "name": official_name}
+        return {"url": url, "name": official_name, "key": key}
     else:
         return {
             "status": "error",
@@ -92,20 +91,28 @@ async def get_radio_status() -> dict:
     status = await client.get_status() or {}
     volume = client.get_restore_volume()
 
-    station_name_on_playlist = client.get_current_station_name()
-    is_radio_on_playlist = station_name_on_playlist is not None
+    # 1. current_station_key → name from state
+    station_name = client.get_current_station_name()
 
-    current_song = await client.get_current_song_info()
-    currently_playing_station = None
-    if current_song:
-        currently_playing_station = current_song.get("title") or current_song.get("name")
+    current_song = None
+    if not station_name:
+        current_song = await client.get_current_song_info()
+        if current_song:
+            # 2. URL-based lookup against station list (handles external MPD clients)
+            playlist_url = current_song.get("file") or ""
+            station_name = client.radio_state.get_name_by_url(playlist_url)
+            # 3. MPD metadata fallback
+            if not station_name:
+                station_name = current_song.get("title") or current_song.get("name")
+
+    is_radio_on_playlist = station_name is not None
 
     return {
-        "playback_state": status.get("state"),  # play, stop, pause
+        "playback_state": status.get("state"),
         "volume": volume,
         "is_radio_on_playlist": is_radio_on_playlist,
-        "station_name_on_playlist": station_name_on_playlist,
-        "current_track_title": currently_playing_station or "Unknown",
+        "station_name_on_playlist": station_name,
+        "current_track_title": station_name or "Unknown",
     }
 
 

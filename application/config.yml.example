@@ -106,12 +106,15 @@ live:
     3.  Items with `State`, `Temperature`, or `Humidity` in their name or description are read-only.
     4.  For controlling roller shutters, use percentage values (0-100).
     5.  The playback volume for radio can be set using percentages (e.g., "set volume to 50%").
-    6.  For any radio-related requests (play, stop, status), ALWAYS call `get_radio_status` first to understand the current state. Based on the result:
-        - If the user asks to "turn on radio" and a station is already on the playlist (`is_radio_on_playlist` is true), you MUST first confirm the action with a short spoken response (e.g., "Okay, playing the radio.") and THEN call `play_internet_radio` without parameters to resume.
-        - If no station is on the playlist, you MUST ask the user for a station name before calling a tool.
-        - If the user asks to "turn off radio" and something is playing (`playback_state` is 'play'), you MUST first confirm the action with a short spoken response (e.g., "Okay, stopping the radio.") and THEN call `stop_radio`.
-        - If a specific station name is provided, confirm the action verbally (e.g., "Okay, playing [station name].") and then use `play_internet_radio` with the `station_name`.
-    7. After calling a tool that changes the state of a device (e.g., turning on a light, playing the radio), you must always provide a brief, spoken confirmation that the action was taken.
+    6.  Radio rules:
+        - Available pinned stations: {radio_stations}. Use these names as station_name. For unlisted stations use the name as the user said it.
+        - Turn on radio (no station): call `play_internet_radio()` immediately and say "Playing the radio."
+        - Turn on radio (with station): call `play_internet_radio(station_name="...")` immediately and say "Playing [station]."
+        - Turn off radio: call `stop_radio()` and say "Stopping the radio."
+        - Change station: call `play_internet_radio(station_name="...")` with the new station.
+        - Check what's playing: only then call `get_radio_status`.
+        - Radio tools are async — speak and end the turn immediately after calling; do not wait for confirmation.
+    7. After calling a tool that changes the state of a device (e.g., turning on a light, playing the radio), always provide a brief spoken confirmation.
     8. If for any reason you need to ask the user for details (e.g., unclear command, choosing an option) or expect a response, ALWAYS call the `request_for_user_input` function and then ask your brief question.
 
   temperature: 0.2
@@ -148,14 +151,24 @@ sound:
   output_device: null # Audio device for sounds (null = default)
 
 radio:
-  # Country for radio station search
+  # Country used as filter for RadioBrowser name search (fallback for unpinned stations)
   country: "Poland"
-  # To correctly identify stations that do not have "radio" in their name 
-  # (e.g., "BBC Radio 1" is fine, but "Classic FM" is not), add them to the 'popular_stations' list.
-  popular_stations:
-    - "RMF FM"
-    - "Radio ZET"
-    - "Classic FM"
+
+  # Pinned stations: stable RadioBrowser UUIDs guarantee the correct station is
+  # always resolved, even when stream URLs change. Resolved URLs are cached in
+  # radio_state.json — subsequent plays require no RadioBrowser API call.
+  #
+  # Find UUIDs at https://www.radio-browser.info (station detail page).
+  # Station names listed here are injected into the system prompt via {radio_stations}
+  # so the model knows exactly which names to pass to play_internet_radio().
+  # Matching is case-insensitive; official name also matches (e.g. "RMF FM" finds key "rmf fm").
+  stations:
+    rmf fm:
+      uuid: "399b7c2a-6680-11e8-b15b-52543be04c81"
+      name: "RMF FM"
+    radio zet:
+      uuid: "59e30dda-64bf-11ea-be63-52543be04c81"
+      name: "Radio Zet"
 
 tv:
   # TV channel mapping: name (as user says it) -> channel number.
@@ -173,7 +186,7 @@ mpd:
   volume_fade_in_seconds: 1.0  # Duration of volume fade-in (resuming)
   volume_duck_percentage: 20   # Volume percentage during conversation
   default_playback_volume: 70  # Default playback volume if no previous volume is known
-  state_file: "radio_state.json"  # Persists station name across restarts
+  state_file: "radio_state.json"  # Persists current station, URL cache, and play counts
 
 mqtt:
   enabled: false

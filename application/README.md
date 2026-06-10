@@ -289,23 +289,50 @@ Once MPD is running, you can ask the assistant to play radio stations.
 
 **How it Works:**
 
-1. **User Command:** You ask the assistant to play a radio station (e.g., "Play BBC Radio 1").
-2. **Function Calling:** The LLM identifies your intent and uses the `play_internet_radio` tool to find a matching station. This search can be improved by setting your country in `config.yml`.
-3. **Stream Playback:** If a station is found, the tool returns the stream URL to the orchestrator.
-4. **MPD Control:** The orchestrator commands the MPD client to clear its current playlist, add the new stream URL, and start playing.
+1. **User Command:** You ask the assistant to play a radio station (e.g., "Play RMF FM").
+2. **Function Calling:** The LLM uses the `play_internet_radio` tool with the station name.
+3. **Station Resolution:** The system resolves the stream URL using this priority chain:
+   - **URL cache** in `radio_state.json` — instant, no network call.
+   - **Pinned station UUID** — looked up via RadioBrowser API, URL cached for next time.
+   - **RadioBrowser name search** — fallback for unpinned stations, result cached too.
+4. **MPD Control:** The orchestrator tells MPD to load and play the resolved stream URL.
 
-**Configuration:**
-
-To improve the accuracy of the radio station search, set your country in the `radio` section of `config.yml`:
+**Basic Configuration:**
 
 ```yaml
 radio:
   country: "Poland"
 ```
 
+**Pinned Stations:**
+
+For popular stations, pin them by their stable [RadioBrowser](https://www.radio-browser.info) UUID. This avoids ambiguous search results and automatically refreshes the stream URL when a station migrates CDN.
+
+```yaml
+radio:
+  country: "Poland"
+  stations:
+    rmf fm:
+      uuid: "399b7c2a-6680-11e8-b15b-52543be04c81"
+      name: "RMF FM"
+    radio zet:
+      uuid: "59e30dda-64bf-11ea-be63-52543be04c81"
+      name: "Radio Zet"
+```
+
+The `name` field is what the assistant says aloud and what the LLM receives in the system prompt. The key (`rmf fm`) is matched case-insensitively against the user's query — both `"rmf fm"` and `"RMF FM"` resolve to the same pin. Matching also works by official name, so `"Radio Zet"` and `"radio zet"` both find the pin.
+
+Pinned station names are automatically injected into the system prompt via `{radio_stations}`, so the model knows exactly which names to use as `station_name` parameter.
+
+To find a station's UUID, search at [radio-browser.info](https://www.radio-browser.info) and copy the UUID from the station detail page.
+
+**State persistence (`radio_state.json`):**
+
+Resolved stream URLs are cached in `radio_state.json` (path configurable via `mpd.state_file`). The file also tracks the current station and per-station play counts used by Prometheus metrics. After the first successful UUID resolution, subsequent plays of the same station require no RadioBrowser API call.
+
 **Audio Ducking:**
 
 The system features automatic audio ducking. If the radio is playing and you say the wake word:
 
-- The radio volume will be immediately lowered to a configured level (`mpd.volume_duck_percentage`).
-- Once your conversation with the assistant is finished, the radio volume will fade back in to its previous level.
+- The radio volume is immediately lowered to `mpd.volume_duck_percentage`.
+- Once the conversation ends, the volume fades back to its previous level.

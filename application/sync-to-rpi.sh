@@ -24,6 +24,7 @@ rsync -avz --delete \
     --exclude 'recordings' \
     --exclude '.env' \
     --exclude '*.log' \
+    --exclude 'radio_state.json' \
     ./ "${HOST}:${REMOTE_DIR}/"
 
 echo "Done! Files synced to ${HOST}:${REMOTE_DIR}"

@@ -523,7 +523,10 @@ class AudioOrchestrator:
 
         if self._is_tty:
             print()  # New line after status
-        logger.info("Wake word detected! (score=%.3f)", result.score)
+        if result.verifier_score is not None:
+            logger.info("Wake word detected! (score=%.3f, verifier=%.3f)", result.score, result.verifier_score)
+        else:
+            logger.info("Wake word detected! (score=%.3f)", result.score)
         self._last_barge_in_time = now
 
         _wake_context = (
@@ -891,7 +894,7 @@ class AudioOrchestrator:
                 elif payload.get("url"):
                     logger.info("Executing deferred action: play_internet_radio (url)")
                     station = payload.get("name") or ""
-                    await self.mpd_client.play_station(payload["url"], station)
+                    await self.mpd_client.play_station(payload["url"], station, key=payload.get("key"))
                     metrics.RADIO_PLAYS.labels(source='ai_new', station=station).inc()
                     ran_radio_action = True
                 elif payload.get("action") == "play":
@@ -949,6 +952,13 @@ class AudioOrchestrator:
             self._pending_verification = None
 
         await self.mpd_client.unduck()
+
+        # Guard: a barge-in may have already transitioned state to LISTENING while
+        # we were awaiting unduck() above.  In that case the new turn is already
+        # in progress — do not stomp it by setting IDLE here.
+        if self._state != SpeakerState.RESPONDING:
+            logger.debug("_finish_turn: state is %s after unduck, skipping IDLE transition", self._state.value)
+            return
 
         self._drain_queue(self._api_input_queue)
         self._reset_wake_detector(cooldown=True)

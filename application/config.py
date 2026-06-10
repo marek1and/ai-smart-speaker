@@ -191,10 +191,17 @@ class OpenHabConfig:
 
 
 @dataclass
+class StationPin:
+    uuid: str
+    name: str = ""
+
+
+@dataclass
 class RadioConfig:
     """Internet radio configuration."""
 
     country: str = "Poland"
+    stations: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -247,6 +254,17 @@ class MetricsConfig:
     port: int = 9090
 
 
+def _parse_radio_config(data: dict) -> "RadioConfig":
+    raw_stations = data.pop("stations", {})
+    cfg = RadioConfig(**data)
+    for keyword, pin in raw_stations.items():
+        if isinstance(pin, dict):
+            cfg.stations[keyword.lower()] = StationPin(**pin)
+        elif isinstance(pin, str):
+            cfg.stations[keyword.lower()] = StationPin(uuid=pin)
+    return cfg
+
+
 @dataclass
 class AppConfig:
     """Root application configuration."""
@@ -273,15 +291,24 @@ class AppConfig:
                 config_data = yaml.safe_load(f)
 
         tv = TVConfig(**config_data.get("tv", {}))
+        radio = _parse_radio_config(config_data.get("radio", {}))
 
-        # Inject channel names into system_instruction so the model knows what
-        # values to pass to watch_tv — single source of truth in tv.channels.
         live_data = dict(config_data.get("live", {}))
-        if tv.channels and "system_instruction" in live_data:
-            channel_names = ", ".join(tv.channels.keys())
-            live_data["system_instruction"] = live_data["system_instruction"].replace(
-                "{tv_channels}", channel_names
-            )
+        if "system_instruction" in live_data:
+            # Inject TV channel names
+            if tv.channels:
+                channel_names = ", ".join(tv.channels.keys())
+                live_data["system_instruction"] = live_data["system_instruction"].replace(
+                    "{tv_channels}", channel_names
+                )
+            # Inject pinned station names so the model uses canonical names
+            if radio.stations:
+                station_list = ", ".join(
+                    pin.name for pin in radio.stations.values()
+                )
+                live_data["system_instruction"] = live_data["system_instruction"].replace(
+                    "{radio_stations}", station_list
+                )
 
         return cls(
             audio=AudioConfig(**config_data.get("audio", {})),
@@ -291,7 +318,7 @@ class AppConfig:
             sound=SoundConfig(**config_data.get("sound", {})),
             api_keys=ApiKeys(**config_data.get("api_keys", {})),
             openhab=OpenHabConfig(**config_data.get("openhab", {})),
-            radio=RadioConfig(**config_data.get("radio", {})),
+            radio=radio,
             mpd=MPDConfig(**config_data.get("mpd", {})),
             tv=tv,
             mqtt=MQTTConfig(**config_data.get("mqtt", {})),

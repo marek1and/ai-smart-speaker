@@ -1,11 +1,10 @@
-import json
 import logging
 import asyncio
 import numpy as np
-from pathlib import Path
 from typing import Callable, Optional, Dict, Any, List
 from mpd import MPDClient, MPDError, ConnectionError as MPDConnectionError
 from config import MPDConfig
+from mpd_client.state import RadioStateManager
 import metrics
 
 logger = logging.getLogger(__name__)
@@ -43,11 +42,8 @@ class MPDClientWrapper:
         # None means "unknown — ask MPD".
         self._is_playing: Optional[bool] = None
 
-        # Station state
-        self._current_station_name: Optional[str] = None
-        self._current_station_url: Optional[str] = None
-        self._state_file = Path(config.state_file)
-        self._play_counts: Dict[str, int] = {}
+        # Radio state (station list, current station, play counts)
+        self._radio_state = RadioStateManager(config.state_file)
 
         # State change listeners: each is called with a dict of changed fields.
         # Keys: "state" ("ON"/"OFF"), "station" (str|None), "volume" (int)
@@ -65,43 +61,22 @@ class MPDClientWrapper:
             except Exception as e:
                 logger.error("State listener error: %s", e)
 
-    def _load_radio_state(self) -> None:
-        if not self._state_file.exists():
-            return
-        try:
-            data = json.loads(self._state_file.read_text())
-            self._current_station_name = data.get("name")
-            self._current_station_url = data.get("url")
-            self._play_counts = data.get("play_counts", {})
-            for station, count in self._play_counts.items():
-                metrics.STATION_PLAY_COUNT.labels(station=station).set(count)
-            logger.info("Restored radio state: station=%s play_counts=%s",
-                        self._current_station_name, self._play_counts)
-        except Exception as e:
-            logger.warning("Could not load radio state file: %s", e)
+    @property
+    def radio_state(self) -> RadioStateManager:
+        return self._radio_state
 
-    def _save_radio_state(self, url: Optional[str], name: Optional[str]) -> None:
-        try:
-            self._state_file.write_text(json.dumps(
-                {"name": name, "url": url, "play_counts": self._play_counts}
-            ))
-        except Exception as e:
-            logger.warning("Could not save radio state file: %s", e)
-
-    def record_play(self, station_name: Optional[str]) -> None:
-        """Increment persistent play count for a station and update the Prometheus gauge."""
-        if not station_name or station_name == "unknown":
-            return
-        self._play_counts[station_name] = self._play_counts.get(station_name, 0) + 1
-        metrics.STATION_PLAY_COUNT.labels(station=station_name).set(self._play_counts[station_name])
-        self._save_radio_state(self._current_station_url, self._current_station_name)
+    def _restore_play_count_metrics(self) -> None:
+        for key in self._radio_state.get_play_counts():
+            entry = self._radio_state.get_entry(key)
+            if entry:
+                metrics.STATION_PLAY_COUNT.labels(station=entry.name).set(entry.play_count)
 
     def get_current_station_name(self) -> Optional[str]:
-        return self._current_station_name
+        return self._radio_state.get_current_name()
 
     async def initialize_state(self):
         """Initializes and logs the MPD client state."""
-        self._load_radio_state()
+        self._restore_play_count_metrics()
         logger.info("Initializing MPD client state...")
         async with self._mpd_lock:
             await self._connect()
@@ -168,7 +143,7 @@ class MPDClientWrapper:
         await self._disconnect_unsafe()
         return await self._connect()
 
-    async def load_station(self, url: str, station_name: Optional[str] = None) -> None:
+    async def load_station(self, url: str, station_name: Optional[str] = None, key: Optional[str] = None) -> None:
         """Loads a station into the MPD playlist without starting playback."""
         async with self._mpd_lock:
             if not await self._connect():
@@ -194,12 +169,12 @@ class MPDClientWrapper:
                 await self._disconnect_unsafe()
                 return
 
-        self._current_station_name = station_name
-        self._current_station_url = url
-        self._save_radio_state(url, station_name)
+        effective_key = key or self._radio_state.get_key_by_url(url) or (station_name.lower() if station_name else None)
+        if effective_key:
+            self._radio_state.set_current(effective_key)
         self._notify(station=station_name)
 
-    async def play_station(self, url: str, station_name: Optional[str] = None) -> None:
+    async def play_station(self, url: str, station_name: Optional[str] = None, key: Optional[str] = None) -> None:
         """Clears the playlist, adds a new station, plays it, and fades the volume in."""
         async with self._mpd_lock:
             if not await self._connect():
@@ -232,13 +207,18 @@ class MPDClientWrapper:
                 await self._disconnect_unsafe()
                 return
 
-        self._current_station_name = station_name
-        self._current_station_url = url
-        self._save_radio_state(url, station_name)
-        self.record_play(station_name)
+        effective_key = key or self._radio_state.get_key_by_url(url) or (station_name.lower() if station_name else None)
+        if effective_key:
+            self._radio_state.set_current_and_play(effective_key)
+            entry = self._radio_state.get_entry(effective_key)
+            if entry:
+                metrics.STATION_PLAY_COUNT.labels(station=entry.name).set(entry.play_count)
 
-        # Run fade-in outside of the main lock to allow other operations
+        # Run fade-in outside of the main lock to allow other operations.
+        # Fades to _restore_volume, which is the pre-duck level when ducked — so
+        # clear _is_ducked here; unduck() would otherwise repeat the same fade.
         await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
+        self._is_ducked = False
         metrics.RADIO_PLAYING.set(1)
         metrics.RADIO_VOLUME.set(self._restore_volume)
         self._notify(state="ON", station=station_name, volume=self._restore_volume)
@@ -610,5 +590,10 @@ class MPDClientWrapper:
         await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
         metrics.RADIO_PLAYING.set(1)
         metrics.RADIO_VOLUME.set(self._restore_volume)
-        self.record_play(self._current_station_name)
-        self._notify(state="ON", station=self._current_station_name, volume=self._restore_volume)
+        current_key = self._radio_state.get_current_key()
+        if current_key:
+            self._radio_state.record_play(current_key)
+            entry = self._radio_state.get_entry(current_key)
+            if entry:
+                metrics.STATION_PLAY_COUNT.labels(station=entry.name).set(entry.play_count)
+        self._notify(state="ON", station=self._radio_state.get_current_name(), volume=self._restore_volume)

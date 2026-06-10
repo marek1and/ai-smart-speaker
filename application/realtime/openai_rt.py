@@ -538,7 +538,9 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = event.get("transcript", "")
             if transcript:
-                self._user_transcript += transcript
+                # Discard if a new turn already started (late delivery after barge-in)
+                if self._frames_sent >= self._min_frames_for_turn_complete or self._activity_started:
+                    self._user_transcript += transcript
 
         # --- Text response ---
         elif event_type == "response.output_text.delta":

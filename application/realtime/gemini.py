@@ -432,7 +432,10 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     hasattr(sc.input_transcription, "text")
                     and sc.input_transcription.text
                 ):
-                    self._user_transcript += sc.input_transcription.text
+                    # Discard transcription that arrives after a new turn started
+                    # (Gemini sends async; may arrive after start_new_turn() cleared buffers)
+                    if self._frames_sent >= self._min_frames_for_turn_complete or self._activity_started:
+                        self._user_transcript += sc.input_transcription.text
 
             # Handle output transcription (AI's speech -> text)
             if hasattr(sc, "output_transcription") and sc.output_transcription:
