@@ -956,8 +956,9 @@ class AudioOrchestrator:
         # Guard: a barge-in may have already transitioned state to LISTENING while
         # we were awaiting unduck() above.  In that case the new turn is already
         # in progress — do not stomp it by setting IDLE here.
-        if self._state != SpeakerState.RESPONDING:
-            logger.debug("_finish_turn: state is %s after unduck, skipping IDLE transition", self._state.value)
+        # NOTE: FOLLOW_UP is also a valid caller (timeout path) and must proceed to IDLE.
+        if self._state == SpeakerState.LISTENING:
+            logger.debug("_finish_turn: barge-in already in progress (LISTENING), skipping IDLE transition")
             return
 
         self._drain_queue(self._api_input_queue)
