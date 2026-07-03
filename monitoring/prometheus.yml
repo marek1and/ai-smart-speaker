@@ -7,4 +7,6 @@ scrape_configs:
     # Replace with your speaker's IP address or hostname
     static_configs:
       - targets: ["SPEAKER_IP:9090"]
+        labels:
+          instance: "ai-smart-speaker"
     scrape_timeout: 10s

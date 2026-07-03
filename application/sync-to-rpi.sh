@@ -5,7 +5,7 @@
 
 set -e
 
-HOST="${1:-raspberrypi}"
+HOST="${1:-aispeaker}"
 REMOTE_DIR="/opt/ai-smart-speaker"
 
 echo "Syncing to ${HOST}:${REMOTE_DIR}..."

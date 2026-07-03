@@ -95,9 +95,9 @@ class MQTTBridge:
             topic = str(message.topic)
             payload = message.payload.decode().strip()
             if topic == f"{radio}/command/power":
-                await self._handle_power(payload)
+                asyncio.create_task(self._handle_power(payload))
             elif topic == f"{radio}/command/station":
-                await self._handle_station(payload)
+                asyncio.create_task(self._handle_station(payload))
             elif topic == f"{radio}/command/volume":
                 await self._handle_volume(payload)
 
