@@ -11,20 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class MPDClientWrapper:
-    _instance = None
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            logger.info("Creating new MPDClientWrapper singleton instance.")
-            cls._instance = super(MPDClientWrapper, cls).__new__(cls)
-        return cls._instance
+    """Single shared instance is created by AudioOrchestrator and distributed
+    via inject_mpd_client() — no singleton magic needed."""
 
     def __init__(self, config: MPDConfig):
-        # Singleton pattern: prevent re-initialization
-        if hasattr(self, "config"):
-            logger.debug("MPDClientWrapper instance already initialized.")
-            return
-
         self.config = config
         self.client = MPDClient()
         self.client.timeout = config.connection_timeout
@@ -49,10 +39,16 @@ class MPDClientWrapper:
         # Keys: "state" ("ON"/"OFF"), "station" (str|None), "volume" (int)
         self._state_listeners: list[Callable[[dict], None]] = []
 
+        # Last play/stop state sent to listeners — lets the external-change
+        # watcher notify only on changes it didn't originate itself.
+        self._last_notified_state: Optional[str] = None
+
     def add_state_listener(self, cb: Callable[[dict], None]) -> None:
         self._state_listeners.append(cb)
 
     def _notify(self, **kwargs) -> None:
+        if "state" in kwargs:
+            self._last_notified_state = kwargs["state"]
         if not self._state_listeners:
             return
         for cb in self._state_listeners:
@@ -60,6 +56,38 @@ class MPDClientWrapper:
                 cb(kwargs)
             except Exception as e:
                 logger.error("State listener error: %s", e)
+
+    async def watch_external_changes(self) -> None:
+        """Detect play/stop changes made outside this app (stream died, mpc,
+        another MPD client) and notify listeners so MQTT/HA stay in sync.
+
+        Also serves as the connection keepalive and keeps the _is_playing
+        cache fresh (every status poll updates it).
+        """
+        interval = self.config.state_poll_interval
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                status = await self.get_status()
+                if status is None:
+                    continue
+                state_str = "ON" if status.get("state") == "play" else "OFF"
+                if (
+                    self._last_notified_state is not None
+                    and state_str != self._last_notified_state
+                ):
+                    logger.info(
+                        "External MPD state change detected: %s -> %s",
+                        self._last_notified_state, state_str,
+                    )
+                    metrics.RADIO_PLAYING.set(1 if state_str == "ON" else 0)
+                    self._notify(state=state_str)
+                elif self._last_notified_state is None:
+                    self._last_notified_state = state_str
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("MPD external-change watcher error: %s", e)
 
     @property
     def radio_state(self) -> RadioStateManager:

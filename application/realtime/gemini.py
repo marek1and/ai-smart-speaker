@@ -154,6 +154,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         # A fixed sleep races against slow networks; polling is reliable.
         deadline = asyncio.get_running_loop().time() + 10.0
         while not self._session_active:
+            # Fast-fail: if the conversation task already died (bad API key,
+            # no network), don't make the user wait out the full deadline.
+            if self._conversation_task and self._conversation_task.done():
+                logger.warning("open_session: Gemini conversation task exited early")
+                break
             if asyncio.get_running_loop().time() > deadline:
                 logger.warning("open_session: timed out waiting for Gemini session")
                 break
@@ -583,9 +588,21 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     )
                 )
 
-        # Send all responses (real or fake) back to the API
+        # Send all responses (real or fake) back to the API.
+        #
+        # NOTE: _handle_tool_calls is intentionally awaited inline in the
+        # receive loop, even though a slow smart-home call (up to the HTTP
+        # timeout) delays processing of subsequent API messages. Running it
+        # as a background task would let turn_complete be processed BEFORE
+        # pending_actions is populated — the orchestrator would then dispatch
+        # deferred actions too early and e.g. the radio would not start until
+        # the next wake word. Ordering is load-bearing here.
         logger.debug(f"Sending tool responses to API: {function_responses}")
-        await self._session.send_tool_response(function_responses=function_responses)
-        
+        try:
+            await self._session.send_tool_response(function_responses=function_responses)
+        except Exception as e:
+            logger.error("Failed to send tool responses: %s", e)
+            return
+
         # Start watchdog in case API hangs after function call without sending turn_complete
         self.start_watchdog(timeout=self.live_cfg.turn_watchdog_timeout)

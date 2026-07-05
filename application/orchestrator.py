@@ -149,7 +149,19 @@ class AudioOrchestrator:
         self._respeaker = None
         self._leds = None
 
+        # Strong references to fire-and-forget tasks (MQTT bridge, barge-in,
+        # MPD watcher). The event loop keeps only weak refs — an unreferenced
+        # task can be garbage-collected mid-flight and silently disappear.
+        self._bg_tasks: set[asyncio.Task] = set()
+
         self._is_tty = sys.stdout.isatty()
+
+    def _spawn(self, coro, name: str) -> asyncio.Task:
+        """create_task with a strong reference held for the task's lifetime."""
+        task = asyncio.create_task(coro, name=name)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     # -------------------------------------------------------------------------
     # State and wake-detector helpers
@@ -232,8 +244,12 @@ class AudioOrchestrator:
             from mqtt.bridge import MQTTBridge
             self._mqtt_bridge = MQTTBridge(self.config.mqtt, self.mpd_client, get_radio_client(), self._sound_player)
             self.mpd_client.add_state_listener(self._mqtt_bridge.on_state_change)
-            asyncio.create_task(self._mqtt_bridge.run())
+            self._spawn(self._mqtt_bridge.run(), name="mqtt_bridge")
             logger.info("MQTT bridge started (broker=%s:%d)", self.config.mqtt.broker, self.config.mqtt.port)
+
+        # Watch for MPD state changes made outside this app (stream died, mpc,
+        # another client) so MQTT/HA stay in sync. Also acts as the keepalive.
+        self._spawn(self.mpd_client.watch_external_changes(), name="mpd_watcher")
 
         # Initialize audio I/O (SoundDevice)
         self._audio_input = AudioInput(self.audio_cfg, self._mic_queue)
@@ -314,8 +330,7 @@ class AudioOrchestrator:
         """Callback when API signals interruption."""
         if self._state == SpeakerState.RESPONDING:
             logger.info("API signaled interruption, executing barge-in")
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._execute_barge_in())
+            self._spawn(self._execute_barge_in(), name="barge_in")
 
     def _on_turn_timeout(self) -> None:
         """Callback when API hangs (watchdog timeout)."""
@@ -333,6 +348,11 @@ class AudioOrchestrator:
     async def _cleanup(self) -> None:
         """Clean up all resources."""
         self._running = False
+
+        for task in list(self._bg_tasks):
+            task.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
 
         if self._api_manager:
             self._api_manager.shutdown()
@@ -429,8 +449,13 @@ class AudioOrchestrator:
                 elif self._state == SpeakerState.FOLLOW_UP:
                     await self._process_followup_audio(mono, mono_bytes)
 
-            except OSError as e:
-                logger.error("Audio capture error: %s", e)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Broad by design: this task must survive any handler bug —
+                # letting an exception escape kills the whole application
+                # mid-conversation (FIRST_EXCEPTION in _main_loop).
+                logger.exception("Audio capture error")
                 await asyncio.sleep(0.1)
 
     async def _process_listening_audio(
@@ -492,7 +517,7 @@ class AudioOrchestrator:
     ) -> WakeWordResult:
         """Run wake word inference in executor."""
 
-        def _inference() -> tuple[float, float, bool]:
+        def _inference() -> tuple[float, float, float, bool]:
             return self._wake_detector.process(mono)
 
         if self._frames_since_reset <= self._warmup_frames_needed:
@@ -508,7 +533,7 @@ class AudioOrchestrator:
             score=score,
             max_score=max_score,
             vad_score=vad_score,
-            verifier_score=self._wake_detector._last_verifier_score,
+            verifier_score=self._wake_detector.last_verifier_score,
         )
 
     async def _handle_wake_word_result(self, result: WakeWordResult) -> None:
@@ -736,10 +761,11 @@ class AudioOrchestrator:
                     else:
                         await asyncio.sleep(0.05)
 
-            except (OSError, ConnectionError) as e:
-                logger.error("State machine error: %s", e)
-                import traceback
-                traceback.print_exc()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Broad by design — see _audio_capture_task.
+                logger.exception("State machine error")
                 await asyncio.sleep(1.0)
 
     async def _handle_idle_state(self) -> None:
@@ -1043,21 +1069,14 @@ class AudioOrchestrator:
             await self.mpd_client.duck()
 
     async def _inactivity_monitor_task(self) -> None:
-        """Close the API session after a period of IDLE inactivity."""
-        _mpd_keepalive_interval = 45.0
-        _last_mpd_ping = time.time()
+        """Close the API session after a period of IDLE inactivity.
 
+        (MPD keepalive lives in mpd_client.watch_external_changes now.)
+        """
         while self._running:
             await asyncio.sleep(5.0)
 
             metrics.update_system_metrics()
-
-            # Keepalive: ping MPD periodically so its connection doesn't idle-timeout
-            # (default MPD connection_timeout is 60s).
-            if time.time() - _last_mpd_ping >= _mpd_keepalive_interval:
-                if self.mpd_client.is_connected:
-                    await self.mpd_client.get_status()
-                _last_mpd_ping = time.time()
 
             if not self._api_manager.session_active:
                 continue

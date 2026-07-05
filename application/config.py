@@ -1,5 +1,5 @@
 import yaml
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Optional, Sequence
 from google.genai.types import Modality
@@ -241,6 +241,9 @@ class MPDConfig:
     host: str = "localhost"
     port: int = 6600
     connection_timeout: int = 5
+    # How often to poll MPD for state changes made outside this app
+    # (stream died, mpc, another MPD client) so MQTT/HA stay in sync.
+    state_poll_interval: float = 2.0
     volume_fade_in_seconds: float = 2.0  # Duration of volume fade-in (resuming)
     volume_duck_percentage: int = 20  # Volume percentage during conversation
     default_playback_volume: int = (
@@ -271,9 +274,22 @@ class MetricsConfig:
     port: int = 9090
 
 
+def _dataclass_from(cls_, data: dict, section: str):
+    """Build a config dataclass, rejecting unknown keys with a readable error
+    instead of the cryptic TypeError a dataclass constructor would raise."""
+    valid = {f.name for f in fields(cls_)}
+    unknown = set(data) - valid
+    if unknown:
+        raise ValueError(
+            f"Unknown key(s) in config section '{section}': {sorted(unknown)}. "
+            f"Valid keys: {sorted(valid)}"
+        )
+    return cls_(**data)
+
+
 def _parse_radio_config(data: dict) -> "RadioConfig":
     raw_stations = data.pop("stations", {})
-    cfg = RadioConfig(**data)
+    cfg = _dataclass_from(RadioConfig, data, "radio")
     for keyword, pin in raw_stations.items():
         if isinstance(pin, dict):
             cfg.stations[keyword.lower()] = StationPin(**pin)
@@ -301,14 +317,19 @@ class AppConfig:
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
 
     @classmethod
-    def from_yaml(cls, path: str = "config.yml") -> "AppConfig":
-        """Loads configuration from a YAML file, with fallbacks to defaults."""
-        config_data = {}
-        if Path(path).exists():
-            with open(path, "r") as f:
-                config_data = yaml.safe_load(f)
+    def from_yaml(cls, path: Optional[str] = None) -> "AppConfig":
+        """Loads configuration from a YAML file, with fallbacks to defaults.
 
-        tv = TVConfig(**config_data.get("tv", {}))
+        Default path resolves next to this file (the application directory),
+        not the process CWD, so startup does not depend on WorkingDirectory.
+        """
+        resolved = Path(path) if path else Path(__file__).with_name("config.yml")
+        config_data = {}
+        if resolved.exists():
+            with open(resolved, "r") as f:
+                config_data = yaml.safe_load(f) or {}
+
+        tv = _dataclass_from(TVConfig, config_data.get("tv", {}), "tv")
         radio = _parse_radio_config(config_data.get("radio", {}))
 
         live_data = dict(config_data.get("live", {}))
@@ -327,17 +348,31 @@ class AppConfig:
                 ].replace("{radio_stations}", station_list)
 
         return cls(
-            audio=AudioConfig(**config_data.get("audio", {})),
-            vad=VADConfig(**config_data.get("vad", {})),
-            wake_word=WakeWordConfig(**config_data.get("wake_word", {})),
-            live=LiveConfig(**live_data),
-            sound=SoundConfig(**config_data.get("sound", {})),
-            api_keys=ApiKeys(**config_data.get("api_keys", {})),
-            openhab=OpenHabConfig(**config_data.get("openhab", {})),
-            home_assistant=HomeAssistantConfig(**config_data.get("home_assistant", {})),
+            audio=_dataclass_from(AudioConfig, config_data.get("audio", {}), "audio"),
+            vad=_dataclass_from(VADConfig, config_data.get("vad", {}), "vad"),
+            wake_word=_dataclass_from(WakeWordConfig, config_data.get("wake_word", {}), "wake_word"),
+            live=_dataclass_from(LiveConfig, live_data, "live"),
+            sound=_dataclass_from(SoundConfig, config_data.get("sound", {}), "sound"),
+            api_keys=_dataclass_from(ApiKeys, config_data.get("api_keys", {}), "api_keys"),
+            openhab=_dataclass_from(OpenHabConfig, config_data.get("openhab", {}), "openhab"),
+            home_assistant=_dataclass_from(HomeAssistantConfig, config_data.get("home_assistant", {}), "home_assistant"),
             radio=radio,
-            mpd=MPDConfig(**config_data.get("mpd", {})),
+            mpd=_dataclass_from(MPDConfig, config_data.get("mpd", {}), "mpd"),
             tv=tv,
-            mqtt=MQTTConfig(**config_data.get("mqtt", {})),
-            metrics=MetricsConfig(**config_data.get("metrics", {})),
+            mqtt=_dataclass_from(MQTTConfig, config_data.get("mqtt", {}), "mqtt"),
+            metrics=_dataclass_from(MetricsConfig, config_data.get("metrics", {}), "metrics"),
         )
+
+
+# Shared config instance: main.py and functions/definitions.py must see the
+# SAME AppConfig (previously each did its own from_yaml(), so two independent
+# copies could diverge if a non-default path was ever used).
+_shared_config: Optional[AppConfig] = None
+
+
+def get_config() -> AppConfig:
+    """Return the process-wide AppConfig, loading it on first use."""
+    global _shared_config
+    if _shared_config is None:
+        _shared_config = AppConfig.from_yaml()
+    return _shared_config

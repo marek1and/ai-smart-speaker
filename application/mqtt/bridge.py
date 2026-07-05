@@ -145,7 +145,6 @@ class MQTTBridge:
             logger.warning("MQTT: station '%s' not found", payload)
             return
         url, official_name, key = result
-        metrics.RADIO_PLAYS.labels(source='mqtt_station', station=official_name)
         if await self._mpd.is_playing():
             await self._mpd.play_station(url, official_name, key=key)
         else:

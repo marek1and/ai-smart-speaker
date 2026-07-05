@@ -220,6 +220,7 @@ mpd:
   host: "localhost"
   port: 6600
   connection_timeout: 5
+  state_poll_interval: 2.0  # How often to detect external MPD state changes (stream died, mpc)
   volume_fade_in_seconds: 1.0  # Duration of volume fade-in (resuming)
   volume_duck_percentage: 20   # Volume percentage during conversation
   default_playback_volume: 70  # Default playback volume if no previous volume is known

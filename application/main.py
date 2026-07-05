@@ -12,16 +12,14 @@ import sys
 from orchestrator import AudioOrchestrator
 import functions.definitions
 import metrics
-from config import AppConfig
+from config import get_config
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,  # Set global level to INFO
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-# Keep MPD client logs at DEBUG level
-logging.getLogger("mpd_client").setLevel(logging.DEBUG)
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +28,7 @@ async def run() -> None:
     """Main entry point."""
 
     # Load configuration from YAML (with defaults)
-    config = AppConfig.from_yaml()
+    config = get_config()
 
     logger.info("Realtime provider: %s", config.live.provider)
 

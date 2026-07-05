@@ -5,14 +5,26 @@ from datetime import datetime
 from functions.registry import register_function
 from openhab.client import OpenHabClient
 from homeassistant.client import HomeAssistantClient
-from config import AppConfig
+from config import get_config
 from mpd_client.client import MPDClientWrapper
 from radio.client import RadioClient
 import metrics
 
 logger = logging.getLogger(__name__)
 
-config = AppConfig.from_yaml()
+config = get_config()
+
+# Strong references to fire-and-forget tasks (TV boot watchers). The event
+# loop only keeps weak refs — an unreferenced task can be garbage-collected
+# mid-flight and silently never finish.
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro, name: str) -> asyncio.Task:
+    task = asyncio.create_task(coro, name=name)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
 openhab_client = (
     OpenHabClient(config.openhab)
     if config.openhab.url and config.openhab.api_key
@@ -82,7 +94,6 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
     result = await radio_client.search_station(station_name)
     if result:
         url, official_name, key = result
-        metrics.RADIO_PLAYS.labels(source="ai_new", station=official_name)
         return {"url": url, "name": official_name, "key": key}
     else:
         return {
@@ -313,8 +324,9 @@ async def watch_tv(channel_name: Optional[str] = None) -> dict:
             await asyncio.to_thread(ha_client.play_channel, power_item, channel_num)
             logger.info("TV channel set to %s (%d) via HA", channel_name, channel_num)
         else:
-            asyncio.create_task(
-                _ha_switch_channel_after_boot(channel_name, channel_num, power_item)
+            _spawn(
+                _ha_switch_channel_after_boot(channel_name, channel_num, power_item),
+                name="ha_tv_boot",
             )
 
         metrics.TV_COMMANDS.labels(action="channel_switch").inc()
@@ -349,7 +361,10 @@ async def watch_tv(channel_name: Optional[str] = None) -> dict:
     if already_on:
         await _oh_send_tv_channel(channel_name, channel_num)
     else:
-        asyncio.create_task(_oh_switch_channel_after_boot(channel_name, channel_num))
+        _spawn(
+            _oh_switch_channel_after_boot(channel_name, channel_num),
+            name="oh_tv_boot",
+        )
 
     metrics.TV_COMMANDS.labels(action="channel_switch").inc()
     return {"status": "success", "message": f"TV on, switching to {channel_name}."}

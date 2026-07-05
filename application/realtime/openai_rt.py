@@ -102,6 +102,11 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         # Poll until the session is established (or give up after 10 s).
         deadline = asyncio.get_running_loop().time() + 10.0
         while not self._session_active:
+            # Fast-fail: if the conversation task already died (bad API key,
+            # no network), don't make the user wait out the full deadline.
+            if self._conversation_task and self._conversation_task.done():
+                logger.warning("open_session: OpenAI conversation task exited early")
+                break
             if asyncio.get_running_loop().time() > deadline:
                 logger.warning("open_session: timed out waiting for OpenAI session")
                 break
@@ -564,7 +569,11 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 if usage.get("output_tokens"):
                     metrics.TOKENS_OUTPUT.labels(provider='openai').inc(usage["output_tokens"])
 
-            # Handle tool calls if present in the output
+            # Handle tool calls if present in the output.
+            # Intentionally awaited inline (not spawned as a task): a background
+            # task would let the next response.done be processed before
+            # pending_actions is populated, so the orchestrator could dispatch
+            # deferred actions too early. Ordering is load-bearing here.
             if "output" in response and response["output"]:
                 tool_calls_handled = False
                 for item in response["output"]:

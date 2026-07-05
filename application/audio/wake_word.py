@@ -42,6 +42,11 @@ class WakeWordDetector:
         self.model = self._load_model()
         self._verifier: Optional[Any] = self._load_verifier()
 
+    @property
+    def last_verifier_score(self) -> Optional[float]:
+        """Verifier probability from the most recent process() call, if any."""
+        return self._last_verifier_score
+
     def _load_model(self) -> Model:
         """
         Load the configured wake word model (ONNX only).

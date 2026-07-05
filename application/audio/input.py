@@ -89,6 +89,10 @@ class AudioInput:
         self._last_clip_log_time: float = 0.0
         self._clip_threshold: int = 32000  # Close to int16 max (32767)
 
+        # Rate-limited status logging (logging from the realtime audio
+        # callback can block; keep it to at most once per second)
+        self._last_status_log_time: float = 0.0
+
         # Find device
         self._device = self._find_device(config.input_device, kind="input")
         if self._device is not None:
@@ -133,7 +137,10 @@ class AudioInput:
         Called from audio thread - must be fast, no blocking operations.
         """
         if status:
-            logger.warning("Audio input status: %s", status)
+            now = time.time()
+            if now - self._last_status_log_time >= 1.0:
+                logger.warning("Audio input status: %s", status)
+                self._last_status_log_time = now
 
         if not self._running:
             return

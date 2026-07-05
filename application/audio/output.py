@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -54,6 +55,10 @@ class AudioOutput:
         self._running = False
         self._stop_event = threading.Event()
 
+        # Rate-limited status logging (logging from the realtime audio
+        # callback can block; keep it to at most once per second)
+        self._last_status_log_time: float = 0.0
+
         # Buffer for partial frames
         self._buffer = np.array([], dtype=np.int16)
         self._buffer_lock = threading.Lock()
@@ -94,10 +99,16 @@ class AudioOutput:
         Called from audio thread - must be fast, fill buffer completely.
         """
         if status:
-            logger.warning("Audio output status: %s", status)
+            now = time.time()
+            if now - self._last_status_log_time >= 1.0:
+                logger.warning("Audio output status: %s", status)
+                self._last_status_log_time = now
+
+        # Zero the whole buffer first: with multi-channel output only channel 0
+        # is written below — the rest would otherwise contain garbage.
+        outdata.fill(0)
 
         if self._stop_event.is_set():
-            outdata.fill(0)
             return
 
         needed = frames
