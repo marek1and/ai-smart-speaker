@@ -1,0 +1,222 @@
+# Example configuration file for AI Smart Speaker.
+# To use, copy this file to 'config.yml' and fill in your data.
+
+api_keys:
+  # Google API Key (required for Gemini Live API)
+  google_api_key: "YOUR_GOOGLE_API_KEY_HERE"
+  # OpenAI API Key (required for OpenAI Real-time API)
+  openai_api_key: "YOUR_OPENAI_API_KEY_HERE"
+
+openhab:
+  # URL of your OpenHab instance
+  url: "http://localhost:8080"
+  # API key for OpenHab (if required)
+  api_key: "YOUR_OPENHAB_API_KEY"
+  # request_timeout: 5.0  # seconds; raise if OpenHAB is slow to respond over the network
+
+audio:
+  # Input settings (microphone)
+  input_sample_rate: 16000
+  input_channels: 2
+  input_chunk: 512
+  input_device: null  # Device name or null for default
+
+  # Output settings (speaker)
+  output_sample_rate: 24000
+  output_channels: 1
+  output_device: null # Device name or null for default
+
+  # Queue sizes
+  input_queue_maxsize: 50
+  output_queue_maxsize: 500
+
+wake_word:
+  model_id: "alexa"  # Built-in: alexa, hey_mycroft, hey_jarvis, hey_rhasspy
+  # model_path: "/path/to/custom_model.onnx"  # Custom model file (overrides model_id)
+  threshold: 0.8
+  # Silero VAD gate: scores zeroed on non-speech frames — prevents false triggers
+  # during silence, ambient noise, or distant TV. 0 = disabled, 0.5 = recommended.
+  vad_threshold: 0.5
+  window_seconds: 0.8
+  cooldown_seconds: 2.5
+  min_activation_frames: 2
+  # STT post-trigger verification via faster-whisper (reduces false positives).
+  # Runs in parallel with session open — no added latency for valid triggers.
+  # Requires: pip install faster-whisper
+  verify_with_stt: false
+  stt_model: "tiny.en"  # Options: tiny.en, base.en, small.en
+  stt_keywords: ["alexa", "alexia", "aleksa", "lexa"]
+
+vad:
+  # VAD mode: "silero" (recommended) or "rms"
+  mode: "silero"
+  
+  # Silero VAD settings
+  silero_threshold: 0.6
+  silero_frame_size: 512
+  
+  # RMS VAD settings
+  rms_threshold: 1500.0
+  
+  # Temporal smoothing
+  speech_frames_required: 3
+  silence_frames_required: 15
+
+live:
+  # AI provider selection. Options: "gemini" or "openai"
+  provider: "gemini"
+  
+  # System instruction defining assistant behavior. This is a crucial part of the configuration.
+  # The example below is for an English-speaking assistant named Alexa, integrated with OpenHAB.
+  # You should customize the persona, rules, and especially the device list for your own setup.
+  system_instruction: |
+    You are a voice assistant controlling a smart home integrated with the OpenHAB system.
+    Your name is Alexa, and you identify as female, so you should respond accordingly.
+    You understand and speak only English, unless explicitly asked to translate to another language.
+    You are versatile: you manage the house but also answer general knowledge questions.
+    Respond concisely, in one sentence, unless asked for a detailed explanation.
+    Location: Warsaw, PL. Time zone: Europe/Warsaw.
+    You have access to a set of tools (functions) that allow you to control devices (e.g., turn on/off, dim) and read their state (e.g., temperature, window open). To use these tools, you must provide the exact device identifier (Item ID). Only use Item ID values from the list below — never guess or invent one.
+    For aggregate questions ("are all lights off?") or group commands ("turn off all lights in the
+    living room"), call get_openhab_items_state/set_openhab_items_state ONCE with the full list of
+    matching Item IDs instead of calling the single-item tools in a loop.
+
+    Here is the complete list of available rooms and devices with their Item IDs that you must use:
+
+    ### GROUND FLOOR (GF)
+
+    **Living Room**
+    *   **Lighting:**
+        *   Main: `GF_LivingRoom_MainLight` (Switch On/Off)
+        *   Dimmer: `GF_LivingRoom_Dimmer` (Dimming 0-100%)
+    *   **Climate:**
+        *   Temperature: `GF_LivingRoom_Temperature` (Read-only)
+    *   **Windows:**
+        *   Terrace Window: `GF_LivingRoom_TerraceWindow` (Read-only open state)
+
+    ### FIRST FLOOR (FF)
+
+    **Bedroom**
+    *   **Lighting:**
+        *   Bedside Lamp: `FF_Bedroom_BedsideLamp` (Switch On/Off)
+    *   **Other:**
+        *   Rollershutter: `FF_Bedroom_Rollershutter` (Control 0-100%, where 0=open, 100=closed)
+
+    ---
+
+    ### OPERATING RULES:
+    1.  If the user asks to turn a light on/off, use the appropriate Item ID. If a dimmer is available and the user doesn't specify brightness, use the switch. If they provide a percentage, use the dimmer.
+    2.  If the user does not specify which light source (e.g., "turn on the light in the living room"), assume they mean the main light.
+    3.  Items with `State`, `Temperature`, or `Humidity` in their name or description are read-only.
+    4.  For controlling roller shutters, use percentage values (0-100).
+    5.  The playback volume for radio can be set using percentages (e.g., "set volume to 50%").
+    6.  Radio rules:
+        - Available pinned stations: {radio_stations}. Use these names as station_name. For unlisted stations use the name as the user said it.
+        - Turn on radio (no station): call `play_internet_radio()` immediately and say "Playing the radio."
+        - Turn on radio (with station): call `play_internet_radio(station_name="...")` immediately and say "Playing [station]."
+        - Turn off radio: call `stop_radio()` and say "Stopping the radio."
+        - Change station: call `play_internet_radio(station_name="...")` with the new station.
+        - Check what's playing: only then call `get_radio_status`.
+        - Radio tools are async — speak and end the turn immediately after calling; do not wait for confirmation.
+    7. After calling a tool that changes the state of a device (e.g., turning on a light, playing the radio), always provide a brief spoken confirmation.
+    8. If for any reason you need to ask the user for details (e.g., unclear command, choosing an option) or expect a response, ALWAYS call the `request_for_user_input` function and then ask your brief question.
+
+  temperature: 0.2
+  response_modalities: ["AUDIO"]
+  lang: "en-US"
+  
+  # Audio format settings
+  send_sample_rate: 16000
+  receive_sample_rate: 24000
+  input_mime_type: "audio/pcm;rate=16000"
+  
+  preroll_seconds: 1.5
+  barge_in: true
+  session_inactivity_timeout: 30.0
+  max_reconnect_attempts: 3
+  followup_timeout: 3.0
+  
+  enable_manual_vad: true
+  api_vad_timeout: 2.0
+  turn_watchdog_timeout: 5.0
+  
+  # Gemini-specific settings
+  model: "gemini-3.1-flash-live-preview"
+  voice_name: "Zephyr" # Options: Aoede, Charon, Fenrir, Kore, Puck, Zephyr
+  
+  # OpenAI-specific settings
+  openai_model: "gpt-realtime"
+  openai_voice: "shimmer" # Options: alloy, ash, ballad, coral, echo, sage, shimmer, verse
+
+sound:
+  enabled: true
+  volume: 1.0
+  sounds_dir: null # Custom sounds directory (null = default)
+  output_device: null # Audio device for sounds (null = default)
+
+radio:
+  # Country used as filter for RadioBrowser name search (fallback for unpinned stations)
+  country: "Poland"
+
+  # Pinned stations: stable RadioBrowser UUIDs guarantee the correct station is
+  # always resolved, even when stream URLs change. Resolved URLs are cached in
+  # radio_state.json — subsequent plays require no RadioBrowser API call.
+  #
+  # Find UUIDs at https://www.radio-browser.info (station detail page).
+  # Station names listed here are injected into the system prompt via {radio_stations}
+  # so the model knows exactly which names to pass to play_internet_radio().
+  # Matching is case-insensitive; official name also matches (e.g. "RMF FM" finds key "rmf fm").
+  stations:
+    rmf fm:
+      uuid: "399b7c2a-6680-11e8-b15b-52543be04c81"
+      name: "RMF FM"
+    radio zet:
+      uuid: "59e30dda-64bf-11ea-be63-52543be04c81"
+      name: "Radio Zet"
+
+tv:
+  # OpenHAB item name for the TV power switch (String/Switch type).
+  # Used by watch_tv() to turn the TV on and poll its boot state.
+  power_item: "GF_LivingRoom_TV_Power"
+
+  # OpenHAB item name that accepts a channel number string (String type).
+  channel_item: "GF_LivingRoom_TV_Channel"
+
+  boot_wait_timeout: 20.0  # Max seconds to wait for TV to confirm ON
+  boot_poll_interval: 1.0
+  post_boot_delay: 5.0     # Extra seconds after TV confirms ON before sending channel
+
+  # TV channel mapping: name (as user says it) -> channel number.
+  # Names listed here are injected into the system_instruction via {tv_channels}
+  # so the model knows exactly which names to pass to watch_tv().
+  channels:
+    "BBC One": 101
+    "BBC Two": 102
+    "ITV": 103
+
+mpd:
+  host: "localhost"
+  port: 6600
+  connection_timeout: 5
+  volume_fade_in_seconds: 1.0  # Duration of volume fade-in (resuming)
+  volume_duck_percentage: 20   # Volume percentage during conversation
+  default_playback_volume: 70  # Default playback volume if no previous volume is known
+  state_file: "radio_state.json"  # Persists current station, URL cache, and play counts
+
+mqtt:
+  enabled: false
+  broker: "192.168.1.x"
+  port: 1883
+  topic_prefix: "home/living-room/speaker"
+  # username: ~
+  # password: ~
+  reconnect_interval: 5.0
+  # Topics published (retain=true):
+  #   {topic_prefix}/radio/availability → online / offline (LWT)
+  #   {topic_prefix}/radio/state    → ON / OFF
+  #   {topic_prefix}/radio/station  → station name
+  #   {topic_prefix}/radio/volume   → 0-100
+  # Topics subscribed (commands from OpenHAB):
+  #   {topic_prefix}/radio/command/power    → ON / OFF
+  #   {topic_prefix}/radio/command/station  → station name (loads without playing if radio is off)
+  #   {topic_prefix}/radio/command/volume   → 0-100

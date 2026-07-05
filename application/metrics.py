@@ -100,6 +100,16 @@ OPENHAB_ITEM_SETS = Counter(
     'speaker_openhab_item_sets_total', 'OpenHAB item state changes',
     ['item'],
 )
+
+# Home Assistant
+HA_REQUESTS = Counter(
+    'speaker_ha_requests_total', 'Home Assistant REST API requests',
+    ['method', 'status'],  # method: get/set — status: ok/error
+)
+HA_ENTITY_SETS = Counter(
+    'speaker_ha_entity_sets_total', 'Home Assistant entity state changes',
+    ['entity'],
+)
 TV_COMMANDS = Counter(
     'speaker_tv_commands_total', 'TV control commands',
     ['action'],  # power_on, channel_switch
@@ -142,8 +152,13 @@ def _pre_register_labels() -> None:
     for reason in ('max_turns', 'inactivity', 'false_trigger'):
         SESSIONS_CLOSED.labels(reason=reason)
     for fn in ('play_internet_radio', 'stop_radio', 'set_playback_volume',
-               'get_radio_status', 'set_openhab_item_state', 'watch_tv'):
+               'get_radio_status', 'set_openhab_item_state', 'watch_tv',
+               'get_ha_entity_state', 'set_ha_entity_state', 'get_ha_entities_state',
+               'set_ha_entities_state', 'get_openhab_items_state', 'set_openhab_items_state'):
         AI_TOOL_CALLS.labels(function=fn)
+    for method in ('get', 'set'):
+        for status in ('ok', 'error'):
+            HA_REQUESTS.labels(method=method, status=status)
     for cmd in ('power_on', 'power_off', 'station', 'volume'):
         MQTT_COMMANDS.labels(command=cmd)
     for action in ('power_on', 'channel_switch'):

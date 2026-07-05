@@ -1,5 +1,6 @@
-# Example configuration file for AI Smart Speaker.
-# To use, copy this file to 'config.yml' and fill in your data.
+# Example configuration file for AI Smart Speaker — Home Assistant backend.
+# To use, copy this file to 'config.ha.yml', fill in your credentials, then:
+#   ln -sf config.ha.yml config.yml
 
 api_keys:
   # Google API Key (required for Gemini Live API)
@@ -7,11 +8,12 @@ api_keys:
   # OpenAI API Key (required for OpenAI Real-time API)
   openai_api_key: "YOUR_OPENAI_API_KEY_HERE"
 
-openhab:
-  # URL of your OpenHab instance
-  url: "http://localhost:8080"
-  # API key for OpenHab (if required)
-  api_key: "YOUR_OPENHAB_API_KEY"
+home_assistant:
+  # Base URL of your Home Assistant instance
+  url: "http://YOUR_HA_IP:8123"
+  # Long-lived access token: Profile → Security → Long-lived access tokens
+  api_key: "YOUR_HA_LONG_LIVED_TOKEN"
+  # request_timeout: 5.0  # seconds; raise if HA is slow to respond over the network
 
 audio:
   # Input settings (microphone)
@@ -49,14 +51,14 @@ wake_word:
 vad:
   # VAD mode: "silero" (recommended) or "rms"
   mode: "silero"
-  
+
   # Silero VAD settings
   silero_threshold: 0.6
   silero_frame_size: 512
-  
+
   # RMS VAD settings
   rms_threshold: 1500.0
-  
+
   # Temporal smoothing
   speech_frames_required: 3
   silence_frames_required: 15
@@ -64,82 +66,107 @@ vad:
 live:
   # AI provider selection. Options: "gemini" or "openai"
   provider: "gemini"
-  
+
   # System instruction defining assistant behavior. This is a crucial part of the configuration.
-  # The example below is for an English-speaking assistant named Alexa, integrated with OpenHAB.
-  # You should customize the persona, rules, and especially the device list for your own setup.
+  # The example below is for an English-speaking assistant named Alexa, integrated with Home Assistant.
+  # Customize the persona, rules, and especially the device list for your own setup.
+  # Use entity IDs from your HA instance (Developer Tools → States, or GET /api/states).
+  #
+  # State formats for set_ha_entity_state:
+  #   light.*        — "ON"/"OFF", brightness "0"-"100", color "H,S,B" (hue 0-360, sat 0-100, bri 0-100)
+  #   switch.*, fan.* — "ON"/"OFF"
+  #   cover.*        — position "0"-"100" (0=closed, 100=open)
+  #   media_player.* — "ON"/"OFF", volume "0"-"100", "MUTE"/"UNMUTE"
   system_instruction: |
-    You are a voice assistant controlling a smart home integrated with the OpenHAB system.
+    You are a voice assistant controlling a smart home integrated with Home Assistant.
     Your name is Alexa, and you identify as female, so you should respond accordingly.
     You understand and speak only English, unless explicitly asked to translate to another language.
     You are versatile: you manage the house but also answer general knowledge questions.
     Respond concisely, in one sentence, unless asked for a detailed explanation.
-    Location: Warsaw, PL. Time zone: Europe/Warsaw.
-    You have access to a set of tools (functions) that allow you to control devices (e.g., turn on/off, dim) and read their state (e.g., temperature, window open). To use these tools, you must provide the exact device identifier (Item ID).
+    Location: YOUR_CITY, YOUR_COUNTRY. Time zone: YOUR_TIMEZONE.
+    You have access to tools get_ha_entity_state, set_ha_entity_state, get_ha_entities_state and
+    set_ha_entities_state to control devices and read their state.
+    Always use the full entity_id (e.g. light.living_room_main). Only use entity_id values from
+    the list below — never guess or invent one.
+    For aggregate questions ("are all lights off?") or group commands ("turn off all lights in
+    the living room"), call get_ha_entities_state/set_ha_entities_state ONCE with the full list of
+    matching entity_id values instead of calling the single-entity tools in a loop.
 
-    Here is the complete list of available rooms and devices with their Item IDs that you must use:
+    Here is the complete list of available rooms and devices with their entity_id values:
 
     ### GROUND FLOOR (GF)
 
     **Living Room**
     *   **Lighting:**
-        *   Main: `GF_LivingRoom_MainLight` (Switch On/Off)
-        *   Dimmer: `GF_LivingRoom_Dimmer` (Dimming 0-100%)
-    *   **Climate:**
-        *   Temperature: `GF_LivingRoom_Temperature` (Read-only)
-    *   **Windows:**
-        *   Terrace Window: `GF_LivingRoom_TerraceWindow` (Read-only open state)
+        *   Main: `light.living_room_main` (ON/OFF + brightness 0-100%)
+        *   Dimmer: `light.living_room_dimmer` (ON/OFF + brightness 0-100%)
+    *   **Climate (read-only):**
+        *   Temperature: `sensor.temperature_living_room`
+    *   **Windows (read-only):**
+        *   Terrace Window: `binary_sensor.window_terrace`
+
+    **TV (Living Room)**
+    *   Turn on or switch channel: use `watch_tv(channel_name="BBC One")` or `watch_tv()`.
+        Always use this function — never set_ha_entity_state for TV power or channels.
+    *   Turn off TV: `set_ha_entity_state(entity_id='media_player.living_room_tv', state='OFF')`.
+    *   Volume: `set_ha_entity_state(entity_id='media_player.living_room_tv', state='50')` (0-100).
+    *   Mute: `set_ha_entity_state(entity_id='media_player.living_room_tv', state='MUTE')`.
+    *   Available TV channels (pass exact name to watch_tv): {tv_channels}
 
     ### FIRST FLOOR (FF)
 
     **Bedroom**
     *   **Lighting:**
-        *   Bedside Lamp: `FF_Bedroom_BedsideLamp` (Switch On/Off)
+        *   Bedside Lamp: `light.bedroom_bedside` (ON/OFF + brightness 0-100%)
     *   **Other:**
-        *   Rollershutter: `FF_Bedroom_Rollershutter` (Control 0-100%, where 0=open, 100=closed)
+        *   Roller shutter: `cover.bedroom_shutter` (0=closed, 100=open)
+        *   USB charger: `switch.bedroom_usb`
 
     ---
 
     ### OPERATING RULES:
-    1.  If the user asks to turn a light on/off, use the appropriate Item ID. If a dimmer is available and the user doesn't specify brightness, use the switch. If they provide a percentage, use the dimmer.
-    2.  If the user does not specify which light source (e.g., "turn on the light in the living room"), assume they mean the main light.
-    3.  Items with `State`, `Temperature`, or `Humidity` in their name or description are read-only.
-    4.  For controlling roller shutters, use percentage values (0-100).
-    5.  The playback volume for radio can be set using percentages (e.g., "set volume to 50%").
-    6.  Radio rules:
-        - Available pinned stations: {radio_stations}. Use these names as station_name. For unlisted stations use the name as the user said it.
-        - Turn on radio (no station): call `play_internet_radio()` immediately and say "Playing the radio."
-        - Turn on radio (with station): call `play_internet_radio(station_name="...")` immediately and say "Playing [station]."
+    1.  If the user asks to turn a light on/off, use the appropriate entity_id.
+        If the light supports brightness and no percentage is given, use "ON"/"OFF".
+        If the user gives a percentage, send the numeric value (e.g. "50").
+    2.  If the user does not specify which light (e.g. "turn on the light in the living room"),
+        assume they mean the main light (light.*_main).
+    3.  Entities with sensor.* or binary_sensor.* are read-only.
+    4.  Roller shutters: 0=closed, 100=open.
+    5.  Radio rules:
+        - Available pinned stations: {radio_stations}. Use these names as station_name.
+        - Turn on radio (no station): call `play_internet_radio()` and say "Playing the radio."
+        - Turn on radio (with station): call `play_internet_radio(station_name="...")` and say "Playing [station]."
         - Turn off radio: call `stop_radio()` and say "Stopping the radio."
         - Change station: call `play_internet_radio(station_name="...")` with the new station.
         - Check what's playing: only then call `get_radio_status`.
-        - Radio tools are async — speak and end the turn immediately after calling; do not wait for confirmation.
-    7. After calling a tool that changes the state of a device (e.g., turning on a light, playing the radio), always provide a brief spoken confirmation.
-    8. If for any reason you need to ask the user for details (e.g., unclear command, choosing an option) or expect a response, ALWAYS call the `request_for_user_input` function and then ask your brief question.
+        - Radio tools are async — speak and end the turn immediately after calling.
+    6.  After changing a device state, always provide a brief spoken confirmation.
+    7.  If you need clarification or expect a user response, ALWAYS call `request_for_user_input`
+        before asking the question.
 
   temperature: 0.2
   response_modalities: ["AUDIO"]
   lang: "en-US"
-  
+
   # Audio format settings
   send_sample_rate: 16000
   receive_sample_rate: 24000
   input_mime_type: "audio/pcm;rate=16000"
-  
+
   preroll_seconds: 1.5
   barge_in: true
   session_inactivity_timeout: 30.0
   max_reconnect_attempts: 3
   followup_timeout: 3.0
-  
+
   enable_manual_vad: true
   api_vad_timeout: 2.0
   turn_watchdog_timeout: 5.0
-  
+
   # Gemini-specific settings
   model: "gemini-3.1-flash-live-preview"
   voice_name: "Zephyr" # Options: Aoede, Charon, Fenrir, Kore, Puck, Zephyr
-  
+
   # OpenAI-specific settings
   openai_model: "gpt-realtime"
   openai_voice: "shimmer" # Options: alloy, ash, ballad, coral, echo, sage, shimmer, verse
@@ -161,7 +188,6 @@ radio:
   # Find UUIDs at https://www.radio-browser.info (station detail page).
   # Station names listed here are injected into the system prompt via {radio_stations}
   # so the model knows exactly which names to pass to play_internet_radio().
-  # Matching is case-insensitive; official name also matches (e.g. "RMF FM" finds key "rmf fm").
   stations:
     rmf fm:
       uuid: "399b7c2a-6680-11e8-b15b-52543be04c81"
@@ -171,9 +197,20 @@ radio:
       name: "Radio Zet"
 
 tv:
+  # Home Assistant entity used to power the TV on/off.
+  # Normally a media_player entity, which also enables channel switching.
+  # If your TV's media_player integration can't power it on remotely (many
+  # can't wake a fully-off TV), point this at a switch entity instead — e.g.
+  # a "switch.tv_wake_on_lan" backed by HA's wake_on_lan integration. In that
+  # case channel switching is unavailable (the TV must already be on).
+  power_item: "media_player.living_room_tv"
+
+  boot_wait_timeout: 20.0  # Max seconds to wait for TV to confirm ON
+  boot_poll_interval: 1.0
+  post_boot_delay: 5.0     # Extra seconds after TV confirms ON before sending channel
+
   # TV channel mapping: name (as user says it) -> channel number.
-  # Names listed here are injected into the system_instruction via {tv_channels}
-  # so the model knows exactly which names to pass to watch_tv().
+  # Names listed here are injected into the system_instruction via {tv_channels}.
   channels:
     "BBC One": 101
     "BBC Two": 102
@@ -197,10 +234,11 @@ mqtt:
   # password: ~
   reconnect_interval: 5.0
   # Topics published (retain=true):
+  #   {topic_prefix}/radio/availability → online / offline (LWT; HA availability_topic)
   #   {topic_prefix}/radio/state    → ON / OFF
   #   {topic_prefix}/radio/station  → station name
   #   {topic_prefix}/radio/volume   → 0-100
-  # Topics subscribed (commands from OpenHAB):
+  # Topics subscribed (commands from HA automations):
   #   {topic_prefix}/radio/command/power    → ON / OFF
   #   {topic_prefix}/radio/command/station  → station name (loads without playing if radio is off)
   #   {topic_prefix}/radio/command/volume   → 0-100

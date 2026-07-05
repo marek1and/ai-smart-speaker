@@ -11,6 +11,7 @@ This project is a hardware retrofit of the **Edifier D12** 70W Bluetooth speaker
 - [Hardware Evolution: v1 DAC+ to v2 XVF3800-only](#hardware-evolution-v1-dac-to-v2-xvf3800-only)
 - [Hardware Implementation](#️-hardware-implementation)
 - [System Configuration](#️-system-configuration)
+- [Smart Home Backend Configuration](#smart-home-backend-configuration)
 - [Future Improvements](#future-improvements)
 
 ## ⚠️ Safety Warning & Disclaimer
@@ -38,7 +39,7 @@ The project prioritizes audio quality, low latency, and a modular software desig
 - **Hardware AEC:** The XVF3800's on-chip AEC cancels speaker echo using its internal reference — no software loopback required.
 - **Real-time Conversational AI:** Leverages the native streaming APIs from **Google Gemini** and **OpenAI** for low-latency, natural-feeling conversations.
 - **Robust Voice Capture:** The XVF3800 DSP provides hardware beamforming and AEC. Wake word detection runs in the application via [openWakeWord](https://github.com/dscripka/openWakeWord) (ONNX model, custom-trainable).
-- **Smart Home Control via Function Calling:** Integrates seamlessly with **OpenHAB** to control smart devices like lights, switches, and sensors.
+- **Smart Home Control via Function Calling:** Integrates with **Home Assistant** and **OpenHAB** to control lights, switches, covers, sensors, and TV.
 - **Multi-lingual:** While designed for Polish, the system can be configured for any language supported by the chosen AI provider.
 - **Operational Monitoring:** Built-in Prometheus metrics endpoint with a pre-configured Grafana dashboard.
 
@@ -70,7 +71,7 @@ This architecture trades the privacy and offline capabilities of traditional sys
   - Industrial Metal USB 3.0 Type-A Panel Mount
   - Premium internal RCA and USB interconnects
 
-> **Note:** The original v1 build included a **Raspberry Pi DAC+** for audio output. This has been superseded — see [Hardware Evolution](#hardware-evolution-v1-dac--v2-xvf3800-only) below.
+> **Note:** The original v1 build included a **Raspberry Pi DAC+** for audio output. This has been superseded — see [Hardware Evolution](#hardware-evolution-v1-dac-to-v2-xvf3800-only) below.
 
 ---
 
@@ -204,6 +205,84 @@ Key parameters (see `linux/opt/reSpeaker/init_commands.txt` for the full list):
 | `PP_NLATTENONOFF` | 1 | Non-linear echo attenuation enabled |
 
 The AEC converges automatically via its adaptive filter. `AUDIO_MGR_SYS_DELAY` only fine-tunes the chip-internal path and has a valid range of `[-64, 256]` samples.
+
+## Smart Home Backend Configuration
+
+The application supports two backends for smart home control, selected by which config file `config.yml` points to.
+
+### Home Assistant (recommended)
+
+1. Copy the example config and fill in your credentials:
+
+   ```bash
+   cp config.example.ha.yml config.ha.yml
+   ln -sf config.ha.yml config.yml
+   ```
+
+2. Edit `config.ha.yml` — replace the placeholders:
+
+   ```yaml
+   home_assistant:
+     url: "http://YOUR_HA_IP:8123"
+     api_key: "YOUR_HA_LONG_LIVED_TOKEN"
+
+   tv:
+     power_item: "media_player.<your_tv_entity>"
+   ```
+
+3. Update the `system_instruction` in `config.ha.yml` with the entity IDs from your HA instance. Use `GET /api/states` to list all entities.
+
+**AI functions available with HA backend:**
+
+| Function | Description |
+| --- | --- |
+| `get_ha_entity_state(entity_id)` | Read state of any entity |
+| `set_ha_entity_state(entity_id, state)` | Smart dispatcher — calls the right HA service based on domain and state value |
+| `get_ha_entities_state(entity_ids)` | Read states of multiple entities in one call (single HA API request) — for aggregate questions like "are all lights off?" |
+| `set_ha_entities_state(entity_ids, state)` | Apply the same state to multiple entities in one call — for group commands like "turn off all lights in the living room" |
+| `watch_tv(channel_name?)` | Turn on TV and/or switch channel via `media_player` |
+
+**State formats for `set_ha_entity_state`:**
+
+| Domain | Format | Example |
+| --- | --- | --- |
+| `light.*` | `"ON"/"OFF"`, brightness `"0"-"100"`, HSB `"H,S,B"` | `"50"`, `"0,100,100"` |
+| `switch.*`, `fan.*` | `"ON"/"OFF"` | `"ON"` |
+| `cover.*` | position `"0"-"100"` (0=closed, 100=open) | `"50"` |
+| `media_player.*` | `"ON"/"OFF"`, volume `"0"-"100"`, `"MUTE"/"UNMUTE"` | `"30"` |
+
+> **Note on covers:** HA uses 0=closed, 100=open — opposite of OpenHAB convention.
+
+### OpenHAB
+
+1. Copy the example config and fill in your credentials:
+
+   ```bash
+   cp config.example.openhab.yml config.openhab.yml
+   ln -sf config.openhab.yml config.yml
+   ```
+
+2. Edit `config.openhab.yml` — replace the placeholders under `openhab:` with your URL and API key.
+
+**AI functions available with OpenHAB backend:**
+
+| Function | Description |
+| --- | --- |
+| `get_openhab_item_state(item_name)` | Read state of an item |
+| `set_openhab_item_state(item_name, state)` | POST raw state string to item |
+| `get_openhab_items_state(item_names)` | Read states of multiple items in one call (single OpenHAB API request) — for aggregate questions like "are all lights off?" |
+| `set_openhab_items_state(item_names, state)` | Apply the same state to multiple items in one call — for group commands like "turn off all lights in the living room" |
+| `watch_tv(channel_name?)` | TV power + channel via OpenHAB items |
+
+### Switching between backends
+
+The active backend is detected automatically at startup by inspecting `config.yml`. Both `url` and `api_key` must be present for a backend to be considered configured:
+
+- `home_assistant.url` + `home_assistant.api_key` set → HA functions exposed to the AI
+- `openhab.url` + `openhab.api_key` set → OpenHAB functions exposed to the AI
+- Neither configured → no smarthome functions exposed; any attempt to control devices returns a "not configured" error to the AI
+
+There is no implicit fallback — if a backend section is incomplete, it is ignored.
 
 ## Future Improvements
 

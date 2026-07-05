@@ -1,5 +1,7 @@
 from google.genai.types import FunctionDeclaration, Schema, Tool, Type
 
+from functions.definitions import ACTIVE_SMARTHOME_BACKEND as _BACKEND
+
 
 # ---------------------------------------------------------------------------
 # Tool declarations (single source of truth)
@@ -47,6 +49,124 @@ SET_OPENHAB_ITEM_STATE_FUNC = FunctionDeclaration(
             "state": Schema(type=Type.STRING, description="The state to set."),
         },
         required=["item_name", "state"],
+    ),
+)
+
+GET_OPENHAB_ITEMS_STATE_FUNC = FunctionDeclaration(
+    name="get_openhab_items_state",
+    description=(
+        "Gets the states of multiple OpenHAB items in a single call. "
+        "Use for aggregate questions like 'are all lights off?' or 'are any windows open?' "
+        "instead of calling get_openhab_item_state separately for each item — pass every "
+        "relevant item_name from your instructions at once and reason over the returned states."
+    ),
+    parameters=Schema(
+        type=Type.OBJECT,
+        properties={
+            "item_names": Schema(
+                type=Type.ARRAY,
+                items=Schema(type=Type.STRING),
+                description="Item names to check, e.g. ['GF_LivingRoom_Light', 'GF_Kitchen_Light'].",
+            )
+        },
+        required=["item_names"],
+    ),
+)
+
+SET_OPENHAB_ITEMS_STATE_FUNC = FunctionDeclaration(
+    name="set_openhab_items_state",
+    description=(
+        "Sets the same state on multiple OpenHAB items in a single call. "
+        "Use for group commands like 'turn off all lights in the living room' — pass every "
+        "relevant item_name from your instructions at once instead of calling "
+        "set_openhab_item_state separately for each one."
+    ),
+    parameters=Schema(
+        type=Type.OBJECT,
+        properties={
+            "item_names": Schema(
+                type=Type.ARRAY,
+                items=Schema(type=Type.STRING),
+                description="Item names to set, e.g. ['GF_LivingRoom_Light', 'GF_Kitchen_Light'].",
+            ),
+            "state": Schema(type=Type.STRING, description="The state to apply to all listed items."),
+        },
+        required=["item_names", "state"],
+    ),
+)
+
+GET_HA_ENTITY_STATE_FUNC = FunctionDeclaration(
+    name="get_ha_entity_state",
+    description="Gets the state of any Home Assistant entity (sensor, light, switch, cover, media_player, binary_sensor, etc.).",
+    parameters=Schema(
+        type=Type.OBJECT,
+        properties={
+            "entity_id": Schema(type=Type.STRING, description="Full HA entity ID, e.g. 'light.living_room_main' or 'sensor.temperature_bedroom'.")
+        },
+        required=["entity_id"],
+    ),
+)
+
+SET_HA_ENTITY_STATE_FUNC = FunctionDeclaration(
+    name="set_ha_entity_state",
+    description=(
+        "Sets the state of a Home Assistant entity by calling the appropriate service. "
+        "Supported state formats per domain: "
+        "light — 'ON'/'OFF', brightness '0'-'100', color 'H,S,B' (hue 0-360, sat 0-100, bri 0-100). "
+        "switch/fan/input_boolean — 'ON'/'OFF'. "
+        "cover — position '0'-'100' (0=closed, 100=open). "
+        "media_player — 'ON'/'OFF', volume '0'-'100', 'MUTE'/'UNMUTE'."
+    ),
+    parameters=Schema(
+        type=Type.OBJECT,
+        properties={
+            "entity_id": Schema(type=Type.STRING, description="Full HA entity ID, e.g. 'light.living_room_main'."),
+            "state": Schema(type=Type.STRING, description="Desired state value (see description for format)."),
+        },
+        required=["entity_id", "state"],
+    ),
+)
+
+GET_HA_ENTITIES_STATE_FUNC = FunctionDeclaration(
+    name="get_ha_entities_state",
+    description=(
+        "Gets the states of multiple Home Assistant entities in a single call. "
+        "Use for aggregate questions like 'are all lights off?' or 'are any windows open?' "
+        "instead of calling get_ha_entity_state separately for each entity — pass every "
+        "relevant entity_id from your instructions at once and reason over the returned states."
+    ),
+    parameters=Schema(
+        type=Type.OBJECT,
+        properties={
+            "entity_ids": Schema(
+                type=Type.ARRAY,
+                items=Schema(type=Type.STRING),
+                description="Full HA entity IDs to check, e.g. ['light.salon_glowne', 'light.kuchnia_glowne'].",
+            )
+        },
+        required=["entity_ids"],
+    ),
+)
+
+SET_HA_ENTITIES_STATE_FUNC = FunctionDeclaration(
+    name="set_ha_entities_state",
+    description=(
+        "Sets the same state on multiple Home Assistant entities in a single call. "
+        "Use for group commands like 'turn off all lights in the living room' — pass every "
+        "relevant entity_id from your instructions at once instead of calling "
+        "set_ha_entity_state separately for each one. Same state formats per domain as set_ha_entity_state."
+    ),
+    parameters=Schema(
+        type=Type.OBJECT,
+        properties={
+            "entity_ids": Schema(
+                type=Type.ARRAY,
+                items=Schema(type=Type.STRING),
+                description="Full HA entity IDs to set, e.g. ['light.salon_glowne', 'light.salon_scienne'].",
+            ),
+            "state": Schema(type=Type.STRING, description="Desired state value to apply to all listed entities."),
+        },
+        required=["entity_ids", "state"],
     ),
 )
 
@@ -98,9 +218,9 @@ WATCH_TV_FUNC = FunctionDeclaration(
     name="watch_tv",
     description=(
         "Turns on the TV and/or switches to a channel by name. "
-        "Use for: 'turn on TV', 'watch Polsat', 'switch to TVN', 'put on TVP 1'. "
-        "Pass channel_name exactly as listed in your instructions (e.g. 'Polsat', 'TVN', 'TVP 1'). "
-        "Do NOT use set_openhab_item_state for TV power or channel switching."
+        "Use for: 'turn on TV', 'watch BBC One', 'switch to ITV', 'put on BBC Two'. "
+        "Pass channel_name exactly as listed in your instructions. "
+        "Do NOT use smarthome state functions for TV power or channel switching — always use this function."
     ),
     parameters=Schema(
         type=Type.OBJECT,
@@ -124,11 +244,9 @@ REQUEST_FOR_USER_INPUT_FUNC = FunctionDeclaration(
     ),
 )
 
-_ALL_DECLARATIONS = [
+_COMMON_DECLARATIONS = [
     GET_CURRENT_TIME_FUNC,
     GET_CURRENT_DATE_FUNC,
-    GET_OPENHAB_ITEM_STATE_FUNC,
-    SET_OPENHAB_ITEM_STATE_FUNC,
     WATCH_TV_FUNC,
     PLAY_INTERNET_RADIO_FUNC,
     STOP_RADIO_FUNC,
@@ -136,6 +254,27 @@ _ALL_DECLARATIONS = [
     GET_RADIO_STATUS_FUNC,
     REQUEST_FOR_USER_INPUT_FUNC,
 ]
+
+_OH_DECLARATIONS = [
+    GET_OPENHAB_ITEM_STATE_FUNC,
+    SET_OPENHAB_ITEM_STATE_FUNC,
+    GET_OPENHAB_ITEMS_STATE_FUNC,
+    SET_OPENHAB_ITEMS_STATE_FUNC,
+]
+
+_HA_DECLARATIONS = [
+    GET_HA_ENTITY_STATE_FUNC,
+    SET_HA_ENTITY_STATE_FUNC,
+    GET_HA_ENTITIES_STATE_FUNC,
+    SET_HA_ENTITIES_STATE_FUNC,
+]
+
+
+_ALL_DECLARATIONS = _COMMON_DECLARATIONS + (
+    _HA_DECLARATIONS if _BACKEND == "home_assistant"
+    else _OH_DECLARATIONS if _BACKEND == "openhab"
+    else []
+)
 
 # ---------------------------------------------------------------------------
 # Provider-specific tool lists (generated from declarations above)
@@ -160,6 +299,9 @@ def _schema_to_json(schema: Schema) -> dict:
     props = getattr(schema, "properties", None)
     if props is not None:
         result["properties"] = {k: _schema_to_json(v) for k, v in props.items()}
+    items = getattr(schema, "items", None)
+    if items is not None:
+        result["items"] = _schema_to_json(items)
     req = getattr(schema, "required", None)
     if req is not None:
         result["required"] = list(req)

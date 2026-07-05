@@ -28,6 +28,13 @@ class MQTTBridge:
         self._radio = radio_client
         self._sound_player = sound_player
         self._publish_queue: asyncio.Queue[dict] = asyncio.Queue()
+        # Tracks the in-flight power/station handler so a burst of rapid or
+        # replayed commands (e.g. after a broker reconnect) only ever applies
+        # the latest one, instead of thrashing MPD with every stale command
+        # in between (each contended asyncio.create_task call was previously
+        # left to run to completion regardless of newer messages arriving).
+        self._power_task: Optional[asyncio.Task] = None
+        self._station_task: Optional[asyncio.Task] = None
 
     def on_state_change(self, event: dict) -> None:
         """Sync callback registered with MPDClientWrapper. Enqueues MQTT publish."""
@@ -36,9 +43,11 @@ class MQTTBridge:
     async def run(self) -> None:
         """Main loop — connects to broker, subscribes, and handles publish/command tasks."""
         radio = f"{self._config.topic_prefix}/radio"
+        # LWT marks the bridge unavailable instead of publishing a false
+        # "radio off" — MPD keeps playing even when the MQTT link blinks.
         will = aiomqtt.Will(
-            topic=f"{radio}/state",
-            payload="OFF",
+            topic=f"{radio}/availability",
+            payload="offline",
             retain=True,
             qos=1,
         )
@@ -51,8 +60,12 @@ class MQTTBridge:
                     username=self._config.username,
                     password=self._config.password,
                     will=will,
+                    # Persistent session (fixed client_id) so the broker queues
+                    # QoS 1 commands/state while we're briefly disconnected,
+                    # instead of silently dropping them.
+                    clean_session=False,
                 ) as client:
-                    await client.subscribe(f"{radio}/command/#")
+                    await client.subscribe(f"{radio}/command/#", qos=1)
                     logger.info(
                         "MQTT connected to %s:%d, subscribed to %s/command/#",
                         self._config.broker, self._config.port, radio,
@@ -75,31 +88,36 @@ class MQTTBridge:
         state = "ON" if await self._mpd.is_playing() else "OFF"
         station = self._mpd.get_current_station_name() or ""
         volume = self._mpd.get_restore_volume()
-        await client.publish(f"{radio}/state", state, retain=True)
-        await client.publish(f"{radio}/station", station, retain=True)
-        await client.publish(f"{radio}/volume", str(volume), retain=True)
+        await client.publish(f"{radio}/availability", "online", qos=1, retain=True)
+        await client.publish(f"{radio}/state", state, qos=1, retain=True)
+        await client.publish(f"{radio}/station", station, qos=1, retain=True)
+        await client.publish(f"{radio}/volume", str(volume), qos=1, retain=True)
         logger.debug("MQTT initial state published: state=%s station=%s volume=%d", state, station, volume)
 
     async def _publish_loop(self, client: aiomqtt.Client, radio: str) -> None:
         while True:
             event = await self._publish_queue.get()
             if "state" in event:
-                await client.publish(f"{radio}/state", event["state"], retain=True)
+                await client.publish(f"{radio}/state", event["state"], qos=1, retain=True)
             if "station" in event:
-                await client.publish(f"{radio}/station", event["station"] or "", retain=True)
+                await client.publish(f"{radio}/station", event["station"] or "", qos=1, retain=True)
             if "volume" in event:
-                await client.publish(f"{radio}/volume", str(event["volume"]), retain=True)
+                await client.publish(f"{radio}/volume", str(event["volume"]), qos=1, retain=True)
 
     async def _command_loop(self, client: aiomqtt.Client, radio: str) -> None:
         async for message in client.messages:
             topic = str(message.topic)
             payload = message.payload.decode().strip()
             if topic == f"{radio}/command/power":
-                asyncio.create_task(self._handle_power(payload))
+                if self._power_task and not self._power_task.done():
+                    self._power_task.cancel()
+                self._power_task = asyncio.create_task(self._handle_power(payload))
             elif topic == f"{radio}/command/station":
-                asyncio.create_task(self._handle_station(payload))
+                if self._station_task and not self._station_task.done():
+                    self._station_task.cancel()
+                self._station_task = asyncio.create_task(self._handle_station(payload))
             elif topic == f"{radio}/command/volume":
-                await self._handle_volume(payload)
+                asyncio.create_task(self._handle_volume(payload))
 
     def _confirm(self) -> None:
         if self._sound_player:

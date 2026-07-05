@@ -188,6 +188,16 @@ class OpenHabConfig:
 
     url: str = "http://localhost:8080"
     api_key: Optional[str] = None
+    request_timeout: float = 5.0  # seconds, for the OpenHAB REST client
+
+
+@dataclass
+class HomeAssistantConfig:
+    """Home Assistant integration configuration."""
+
+    url: str = "http://localhost:8123"
+    api_key: Optional[str] = None
+    request_timeout: float = 5.0  # seconds, for the HA REST client
 
 
 @dataclass
@@ -206,15 +216,20 @@ class RadioConfig:
 
 @dataclass
 class TVConfig:
-    """Samsung TV control configuration."""
+    """TV control configuration (shared by both backends).
 
-    power_item: str = "GF_LivingRoom_TV_Power"
-    channel_item: str = "GF_LivingRoom_TV_Channel"
-    boot_wait_timeout: float = 5.0  # Max seconds to wait for TV to confirm ON
-    boot_poll_interval: float = 1.0  # How often to poll power state after cold start
-    post_boot_delay: float = (
-        2.0  # Extra seconds to wait after TV confirms ON before sending channel
-    )
+    power_item — the main handle for the TV:
+      Home Assistant: media_player entity (e.g. 'media_player.living_room_tv')
+      OpenHAB:        power switch item   (e.g. 'GF_LivingRoom_TV_Power')
+    channel_item — OpenHAB only: item that accepts a channel number string.
+    """
+
+    power_item: str = ""
+    channel_item: str = ""  # OpenHAB only
+
+    boot_wait_timeout: float = 5.0
+    boot_poll_interval: float = 1.0
+    post_boot_delay: float = 2.0
     # channel name (as user says it) -> channel number
     channels: dict = field(default_factory=dict)
 
@@ -278,6 +293,7 @@ class AppConfig:
     sound: SoundConfig = field(default_factory=SoundConfig)
     api_keys: ApiKeys = field(default_factory=ApiKeys)
     openhab: OpenHabConfig = field(default_factory=OpenHabConfig)
+    home_assistant: HomeAssistantConfig = field(default_factory=HomeAssistantConfig)
     radio: RadioConfig = field(default_factory=RadioConfig)
     mpd: MPDConfig = field(default_factory=MPDConfig)
     tv: TVConfig = field(default_factory=TVConfig)
@@ -318,6 +334,7 @@ class AppConfig:
             sound=SoundConfig(**config_data.get("sound", {})),
             api_keys=ApiKeys(**config_data.get("api_keys", {})),
             openhab=OpenHabConfig(**config_data.get("openhab", {})),
+            home_assistant=HomeAssistantConfig(**config_data.get("home_assistant", {})),
             radio=radio,
             mpd=MPDConfig(**config_data.get("mpd", {})),
             tv=tv,

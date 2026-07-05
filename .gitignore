@@ -5,5 +5,7 @@ recordings/
 *.log
 .env
 config.yml
+config.ha.yml
+config.openhab.yml
 typings
 models/

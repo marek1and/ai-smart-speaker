@@ -162,8 +162,9 @@ Add a `tv` section to `config.yml`. The `channels` map defines the names the mod
 
 ```yaml
 tv:
+  # OpenHAB: power switch item name | Home Assistant: media_player entity ID
   power_item: "GF_LivingRoom_TV_Power"
-  channel_item: "GF_LivingRoom_TV_Channel"
+  channel_item: "GF_LivingRoom_TV_Channel"  # OpenHAB only
   boot_wait_timeout: 20.0   # max seconds to poll for TV ON after cold start
   boot_poll_interval: 1.0
   post_boot_delay: 10.0     # seconds to wait after TV reports ON before switching channel
@@ -172,6 +173,8 @@ tv:
     "BBC Two": 102
     "ITV": 103
 ```
+
+**Home Assistant note:** many TV integrations (Samsung Tizen, LG webOS, Android TV via ADB) can't power on a fully-off TV over the network — the TV's Wi-Fi/Ethernet is asleep and won't respond until it sees a Wake-on-LAN magic packet. Some integrations send WOL automatically if you configure a MAC address in the integration itself; check your integration's options first. If yours doesn't, point `power_item` at a `switch.*` entity backed by HA's own `wake_on_lan` integration instead of the `media_player` entity — `watch_tv` will use it to power the TV on generically. Channel switching still requires a `media_player` entity, so it's unavailable in that setup until the TV is already on.
 
 Reference the placeholder in your system instruction so the model knows exactly which names to pass:
 
