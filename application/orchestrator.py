@@ -517,8 +517,17 @@ class AudioOrchestrator:
     ) -> WakeWordResult:
         """Run wake word inference in executor."""
 
+        # While OUR radio plays, every gate scores lower on voice-over-music —
+        # the detector adapts per config (verifier bypass or relaxed threshold,
+        # relaxed VAD gate). is_playing() hits the local cache, which the MPD
+        # watcher refreshes every state_poll_interval.
+        radio_mode = (
+            self.wake_cfg.bypass_verifier_when_radio
+            or self.wake_cfg.radio_verifier_threshold is not None
+        ) and await self.mpd_client.is_playing()
+
         def _inference() -> tuple[float, float, float, bool]:
-            return self._wake_detector.process(mono)
+            return self._wake_detector.process(mono, radio_mode=radio_mode)
 
         if self._frames_since_reset <= self._warmup_frames_needed:
             await loop.run_in_executor(self._executor, _inference)

@@ -9,3 +9,4 @@ config.ha.yml
 config.openhab.yml
 typings
 models/
+.claude/

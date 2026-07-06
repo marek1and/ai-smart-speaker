@@ -107,17 +107,44 @@ class WakeWordDetector:
             print(f"[ERROR] Failed to load verifier '{self.cfg.verifier_path}': {e}")
             return None
 
-    def process(self, mono: np.ndarray) -> Tuple[float, float, float, bool]:
+    def process(
+        self, mono: np.ndarray, radio_mode: bool = False
+    ) -> Tuple[float, float, float, bool]:
         """
         Process audio frame and detect wake word.
 
         Args:
             mono: Mono audio samples as int16 numpy array
+            radio_mode: True while the radio plays through this speaker.
+                Voice-over-music scores lower on every gate (post-AEC residue
+                + postfilter artefacts), so depending on config this either
+                bypasses the verifier entirely (bypass_verifier_when_radio;
+                stricter model threshold applies) or keeps it active with a
+                relaxed threshold (radio_verifier_threshold). The internal
+                VAD gate is relaxed in both variants.
 
         Returns:
             Tuple of (current_score, max_window_score, vad_score, triggered)
         """
-        predictions = self.model.predict(mono)
+        bypass_verifier = radio_mode and self.cfg.bypass_verifier_when_radio
+        verifier_threshold = self.cfg.verifier_threshold
+        if (
+            radio_mode
+            and not bypass_verifier
+            and self.cfg.radio_verifier_threshold is not None
+        ):
+            verifier_threshold = self.cfg.radio_verifier_threshold
+
+        # Relax the internal VAD gate in radio mode: voice-over-music reads
+        # as non-speech for ~half of real utterances, zeroing scores before
+        # they surface. Toggled per call — openwakeword checks the instance
+        # attribute on every predict().
+        if radio_mode and self.cfg.vad_threshold > 0:
+            self.model.vad_threshold = self.cfg.bypass_vad_threshold
+        try:
+            predictions = self.model.predict(mono)
+        finally:
+            self.model.vad_threshold = self.cfg.vad_threshold
         score = float(predictions.get(self._prediction_key, 0.0))
 
         vad_score = 0.0
@@ -129,11 +156,14 @@ class WakeWordDetector:
 
         # Track consecutive frames where BOTH model and verifier (if loaded) approve.
         model_above = score >= self.cfg.threshold
-        if model_above and self._verifier is not None:
+        if bypass_verifier and self._verifier is not None:
+            self._last_verifier_score = None
+            approved = score >= self.cfg.bypass_verifier_threshold
+        elif model_above and self._verifier is not None:
             n_features = self.model.model_inputs.get(self._prediction_key, 16)
             features = self.model.preprocessor.get_features(n_features)
             self._last_verifier_score = float(self._verifier.predict_proba(features)[0][-1])
-            approved = self._last_verifier_score >= self.cfg.verifier_threshold
+            approved = self._last_verifier_score >= verifier_threshold
         else:
             self._last_verifier_score = None
             approved = model_above

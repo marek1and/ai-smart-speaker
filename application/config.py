@@ -64,6 +64,23 @@ class WakeWordConfig:
     verifier_path: Optional[str] = None  # Path to .pkl verifier
     # Wake word passes only when: model_score >= threshold AND verifier_score >= verifier_threshold
     verifier_threshold: float = 0.7
+    # Skip the verifier while the radio is playing through this speaker.
+    # Rationale: AEC suppresses our own playback almost completely (residual
+    # ~-41 dBFS), so false-positive pressure is minimal — while the verifier,
+    # trained on clean audio, rejects valid wake words spoken over music.
+    bypass_verifier_when_radio: bool = False
+    # Stricter main-model threshold used while the verifier is bypassed.
+    bypass_verifier_threshold: float = 0.9
+    # Middle ground instead of a full bypass: keep the verifier active during
+    # radio playback but with this relaxed threshold (voice-over-music scores
+    # lower even on a noise-augmented verifier). Takes effect when set AND
+    # bypass_verifier_when_radio is false.
+    radio_verifier_threshold: Optional[float] = None
+    # Relaxed VAD gate while the radio plays: the standard gate (vad_threshold)
+    # zeroes wake word scores on frames Silero doesn't classify as speech, and
+    # voice-over-music reads as non-speech for ~half of real utterances
+    # (measured). Kept >0 so the internal VAD stays fed with audio.
+    bypass_vad_threshold: float = 0.1
 
     # STT post-trigger verification (reduces false positives via faster-whisper)
     verify_with_stt: bool = False

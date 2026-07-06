@@ -40,6 +40,14 @@ wake_word:
   window_seconds: 0.8
   cooldown_seconds: 2.5
   min_activation_frames: 2
+  # Skip the sklearn verifier while the radio plays through this speaker.
+  # A verifier trained on clean audio rejects valid wake words spoken over
+  # post-AEC music residue; AEC keeps false-positive pressure minimal.
+  # bypass_verifier_when_radio: true
+  # bypass_verifier_threshold: 0.9  # stricter model threshold during bypass
+  # Middle ground: keep the verifier active during radio, just with a relaxed
+  # threshold (needs a noise-augmented verifier). Effective when bypass is off.
+  # radio_verifier_threshold: 0.4
   # STT post-trigger verification via faster-whisper (reduces false positives).
   # Runs in parallel with session open — no added latency for valid triggers.
   # Requires: pip install faster-whisper
