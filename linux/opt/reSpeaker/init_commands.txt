@@ -7,7 +7,7 @@
 #
 # The udev rule no longer runs this automatically on device connect.
 
-AEC_ASROUTGAIN 1.0
+AEC_ASROUTGAIN 4.0
 AUDIO_MGR_OP_L 6 3
 AUDIO_MGR_OP_R 6 3
 AEC_ASROUTONOFF 1

@@ -64,23 +64,30 @@ class WakeWordConfig:
     verifier_path: Optional[str] = None  # Path to .pkl verifier
     # Wake word passes only when: model_score >= threshold AND verifier_score >= verifier_threshold
     verifier_threshold: float = 0.7
-    # Skip the verifier while the radio is playing through this speaker.
-    # Rationale: AEC suppresses our own playback almost completely (residual
-    # ~-41 dBFS), so false-positive pressure is minimal — while the verifier,
-    # trained on clean audio, rejects valid wake words spoken over music.
-    bypass_verifier_when_radio: bool = False
-    # Stricter main-model threshold used while the verifier is bypassed.
-    bypass_verifier_threshold: float = 0.9
-    # Middle ground instead of a full bypass: keep the verifier active during
-    # radio playback but with this relaxed threshold (voice-over-music scores
-    # lower even on a noise-augmented verifier). Takes effect when set AND
-    # bypass_verifier_when_radio is false.
-    radio_verifier_threshold: Optional[float] = None
-    # Relaxed VAD gate while the radio plays: the standard gate (vad_threshold)
-    # zeroes wake word scores on frames Silero doesn't classify as speech, and
-    # voice-over-music reads as non-speech for ~half of real utterances
-    # (measured). Kept >0 so the internal VAD stays fed with audio.
-    bypass_vad_threshold: float = 0.1
+    # --- Relaxed mode: active while THIS speaker produces output (radio
+    # playing or own TTS during RESPONDING). Voice spoken over that output
+    # scores lower on every gate (post-AEC residue + postfilter artefacts),
+    # so each strict gate has a relaxed_* counterpart; None = keep the strict
+    # value. Relaxed mode engages only when at least one knob below is set. ---
+    #
+    # Verifier threshold over own output (voice-over-music scores lower even
+    # on a noise-augmented verifier).
+    relaxed_verifier_threshold: Optional[float] = None
+    # VAD gate over own output: voice-over-music reads as non-speech for ~half
+    # of real utterances (measured: score=1.0, vad=0.00 — even a 0.1 gate
+    # blocked them). 0 disables the gate entirely; the detector keeps feeding
+    # Silero manually so the strict IDLE gate resumes warm. >0 = relaxed gate.
+    relaxed_vad_threshold: Optional[float] = None
+    # Consecutive-frame requirement over own output: voice-over-music sustains
+    # only 2-3 approved frames (measured), while the strict value is tuned to
+    # kill ambient transients in IDLE and rejects those valid calls.
+    relaxed_min_activation_frames: Optional[int] = None
+    # Fallback: skip the verifier entirely in relaxed mode (a verifier trained
+    # on clean audio rejects valid wake words over music residue); the stricter
+    # relaxed_bypass_threshold on the main model applies instead. Unused since
+    # the verifier was retrained on radio/TV positives (2026-07-08).
+    relaxed_bypass_verifier: bool = False
+    relaxed_bypass_threshold: float = 0.9
 
     # STT post-trigger verification (reduces false positives via faster-whisper)
     verify_with_stt: bool = False

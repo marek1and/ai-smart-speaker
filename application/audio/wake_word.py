@@ -108,43 +108,55 @@ class WakeWordDetector:
             return None
 
     def process(
-        self, mono: np.ndarray, radio_mode: bool = False
+        self, mono: np.ndarray, relaxed_mode: bool = False
     ) -> Tuple[float, float, float, bool]:
         """
         Process audio frame and detect wake word.
 
         Args:
             mono: Mono audio samples as int16 numpy array
-            radio_mode: True while the radio plays through this speaker.
-                Voice-over-music scores lower on every gate (post-AEC residue
-                + postfilter artefacts), so depending on config this either
-                bypasses the verifier entirely (bypass_verifier_when_radio;
-                stricter model threshold applies) or keeps it active with a
-                relaxed threshold (radio_verifier_threshold). The internal
-                VAD gate is relaxed in both variants.
+            relaxed_mode: True while THIS speaker produces output — radio
+                playing OR our own TTS during a response (barge-in). Voice
+                spoken over that output scores lower on every gate (post-AEC
+                residue + postfilter artefacts), so every relaxed_* config
+                knob that is set replaces its strict counterpart: verifier
+                threshold (relaxed_verifier_threshold, or full bypass via
+                relaxed_bypass_verifier with the stricter relaxed_bypass_threshold
+                on the main model), VAD gate (relaxed_vad_threshold; 0 = off,
+                Silero kept warm) and frame count (relaxed_min_activation_frames).
 
         Returns:
             Tuple of (current_score, max_window_score, vad_score, triggered)
         """
-        bypass_verifier = radio_mode and self.cfg.bypass_verifier_when_radio
+        bypass_verifier = relaxed_mode and self.cfg.relaxed_bypass_verifier
         verifier_threshold = self.cfg.verifier_threshold
         if (
-            radio_mode
+            relaxed_mode
             and not bypass_verifier
-            and self.cfg.radio_verifier_threshold is not None
+            and self.cfg.relaxed_verifier_threshold is not None
         ):
-            verifier_threshold = self.cfg.radio_verifier_threshold
+            verifier_threshold = self.cfg.relaxed_verifier_threshold
 
-        # Relax the internal VAD gate in radio mode: voice-over-music reads
+        # Relax the internal VAD gate in relaxed mode: voice-over-output reads
         # as non-speech for ~half of real utterances, zeroing scores before
         # they surface. Toggled per call — openwakeword checks the instance
         # attribute on every predict().
-        if radio_mode and self.cfg.vad_threshold > 0:
-            self.model.vad_threshold = self.cfg.bypass_vad_threshold
+        gate_relaxed = (
+            relaxed_mode
+            and self.cfg.vad_threshold > 0
+            and self.cfg.relaxed_vad_threshold is not None
+        )
+        if gate_relaxed:
+            self.model.vad_threshold = self.cfg.relaxed_vad_threshold
         try:
             predictions = self.model.predict(mono)
         finally:
             self.model.vad_threshold = self.cfg.vad_threshold
+        if gate_relaxed and self.cfg.relaxed_vad_threshold <= 0:
+            # predict() skips the internal VAD entirely at threshold 0 — feed it
+            # manually so its LSTM state and prediction buffer stay warm; the
+            # strict gate resumes instantly when we return to IDLE.
+            self.model.vad(mono)
         score = float(predictions.get(self._prediction_key, 0.0))
 
         vad_score = 0.0
@@ -158,7 +170,7 @@ class WakeWordDetector:
         model_above = score >= self.cfg.threshold
         if bypass_verifier and self._verifier is not None:
             self._last_verifier_score = None
-            approved = score >= self.cfg.bypass_verifier_threshold
+            approved = score >= self.cfg.relaxed_bypass_threshold
         elif model_above and self._verifier is not None:
             n_features = self.model.model_inputs.get(self._prediction_key, 16)
             features = self.model.preprocessor.get_features(n_features)
@@ -177,9 +189,17 @@ class WakeWordDetector:
         now = time.time()
         in_cooldown = (now - self._last_trigger_time) < self.cfg.cooldown_seconds
 
+        # Relaxed consecutive-frame requirement: voice-over-music sustains
+        # only 2-3 approved frames (measured); IDLE keeps the stricter count
+        # that kills ambient transients. FP risk stays low because the
+        # verifier is active in relaxed mode.
+        min_frames = self.cfg.min_activation_frames
+        if relaxed_mode and self.cfg.relaxed_min_activation_frames is not None:
+            min_frames = self.cfg.relaxed_min_activation_frames
+
         # Require N consecutive frames above threshold before triggering
         triggered = (
-            self._consecutive_above_threshold >= self.cfg.min_activation_frames
+            self._consecutive_above_threshold >= min_frames
             and not in_cooldown
         )
 

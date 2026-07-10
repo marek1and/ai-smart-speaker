@@ -34,7 +34,11 @@ from config import (
     VADConfig,
     WakeWordConfig,
 )
-from functions.definitions import close_radio_client, get_radio_client, inject_mpd_client
+from functions.definitions import (
+    close_radio_client,
+    get_radio_client,
+    inject_mpd_client,
+)
 import metrics
 from mpd_client.client import MPDClientWrapper
 from realtime import BaseRealtimeManager, create_realtime_manager
@@ -137,7 +141,6 @@ class AudioOrchestrator:
         # the next natural IDLE boundary.
         self._session_turn_count: int = 0
 
-
         # Current audio frame for status display
         self._current_audio_frame: Optional[np.ndarray] = None
 
@@ -179,7 +182,9 @@ class AudioOrchestrator:
         logger.info("STATE: %s -> %s", old_state.value, new_state.value)
         self._last_activity_time = time.time()
 
-        metrics.STATE_TRANSITIONS.labels(from_state=old_state.value, to_state=new_state.value).inc()
+        metrics.STATE_TRANSITIONS.labels(
+            from_state=old_state.value, to_state=new_state.value
+        ).inc()
         metrics.STATE_ACTIVE.labels(state=old_state.value).set(0)
         metrics.STATE_ACTIVE.labels(state=new_state.value).set(1)
 
@@ -242,10 +247,20 @@ class AudioOrchestrator:
 
         if self.config.mqtt.enabled:
             from mqtt.bridge import MQTTBridge
-            self._mqtt_bridge = MQTTBridge(self.config.mqtt, self.mpd_client, get_radio_client(), self._sound_player)
+
+            self._mqtt_bridge = MQTTBridge(
+                self.config.mqtt,
+                self.mpd_client,
+                get_radio_client(),
+                self._sound_player,
+            )
             self.mpd_client.add_state_listener(self._mqtt_bridge.on_state_change)
             self._spawn(self._mqtt_bridge.run(), name="mqtt_bridge")
-            logger.info("MQTT bridge started (broker=%s:%d)", self.config.mqtt.broker, self.config.mqtt.port)
+            logger.info(
+                "MQTT bridge started (broker=%s:%d)",
+                self.config.mqtt.broker,
+                self.config.mqtt.port,
+            )
 
         # Watch for MPD state changes made outside this app (stream died, mpc,
         # another client) so MQTT/HA stay in sync. Also acts as the keepalive.
@@ -392,9 +407,11 @@ class AudioOrchestrator:
             ),
         ]
         if self._respeaker:
-            tasks.append(asyncio.create_task(
-                respeaker_monitor_task(self._respeaker), name="respeaker_monitor"
-            ))
+            tasks.append(
+                asyncio.create_task(
+                    respeaker_monitor_task(self._respeaker), name="respeaker_monitor"
+                )
+            )
 
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
@@ -470,7 +487,9 @@ class AudioOrchestrator:
 
             if speech_started:
                 logger.info("VAD: Speech started - sending activity_start")
-                self._listening_entry_time = None  # user spoke — silence timeout no longer applies
+                self._listening_entry_time = (
+                    None  # user spoke — silence timeout no longer applies
+                )
                 await self._api_manager.send_activity_start()
 
             if speech_ended:
@@ -517,17 +536,37 @@ class AudioOrchestrator:
     ) -> WakeWordResult:
         """Run wake word inference in executor."""
 
-        # While OUR radio plays, every gate scores lower on voice-over-music —
-        # the detector adapts per config (verifier bypass or relaxed threshold,
-        # relaxed VAD gate). is_playing() hits the local cache, which the MPD
-        # watcher refreshes every state_poll_interval.
-        radio_mode = (
-            self.wake_cfg.bypass_verifier_when_radio
-            or self.wake_cfg.radio_verifier_threshold is not None
-        ) and await self.mpd_client.is_playing()
+        # Relax gating whenever THIS speaker produces output — radio playing OR
+        # our own TTS during RESPONDING (barge-in). Voice spoken over that output
+        # scores lower on every gate (post-AEC residue + postfilter artefacts),
+        # so the detector adapts per config (verifier bypass or relaxed threshold,
+        # relaxed VAD gate). Without covering RESPONDING, barge-in fails: the
+        # strict IDLE verifier rejects wake word spoken over the residue of
+        # speaker own voice. is_playing() hits the local cache, which the MPD
+        # watcher refreshes every state_poll_interval; RESPONDING short-circuits
+        # it so we skip the await.
+        relaxation_configured = (
+            self.wake_cfg.relaxed_bypass_verifier
+            or self.wake_cfg.relaxed_verifier_threshold is not None
+            or self.wake_cfg.relaxed_vad_threshold is not None
+            or self.wake_cfg.relaxed_min_activation_frames is not None
+        )
+        # Debounce: is_playing() flips to False transiently even while
+        # MPD plays steadily (stale/corrupted status reads in the client cache; MPD
+        # itself is rock-stable). Those bad reads
+        # flipped the wake thresholds to strict IDLE mid-radio, dropping ~half of valid
+        # calls. Hold "radio playing" for 5s after the last True so gaps are bridged.
+        playing = await self.mpd_client.is_playing()
+        if playing:
+            self._radio_playing_until = time.monotonic() + 5.0
+        relaxed_mode = relaxation_configured and (
+            self._state == SpeakerState.RESPONDING
+            or playing
+            or time.monotonic() < getattr(self, "_radio_playing_until", 0.0)
+        )
 
         def _inference() -> tuple[float, float, float, bool]:
-            return self._wake_detector.process(mono, radio_mode=radio_mode)
+            return self._wake_detector.process(mono, relaxed_mode=relaxed_mode)
 
         if self._frames_since_reset <= self._warmup_frames_needed:
             await loop.run_in_executor(self._executor, _inference)
@@ -558,15 +597,21 @@ class AudioOrchestrator:
         if self._is_tty:
             print()  # New line after status
         if result.verifier_score is not None:
-            logger.info("Wake word detected! (score=%.3f, verifier=%.3f)", result.score, result.verifier_score)
+            logger.info(
+                "Wake word detected! (score=%.3f, verifier=%.3f)",
+                result.score,
+                result.verifier_score,
+            )
         else:
             logger.info("Wake word detected! (score=%.3f)", result.score)
         self._last_barge_in_time = now
 
         _wake_context = (
-            'barge_in' if self._state == SpeakerState.RESPONDING
-            else 're_listen' if self._state == SpeakerState.LISTENING
-            else 'idle'
+            "barge_in"
+            if self._state == SpeakerState.RESPONDING
+            else "re_listen"
+            if self._state == SpeakerState.LISTENING
+            else "idle"
         )
         metrics.WAKE_DETECTIONS.labels(context=_wake_context).inc()
 
@@ -789,7 +834,9 @@ class AudioOrchestrator:
         if not self._api_manager.session_active:
             await self._api_manager.open_session()
             if not self._api_manager.session_active:
-                logger.error("Failed to open API session — playing error sound and returning to IDLE")
+                logger.error(
+                    "Failed to open API session — playing error sound and returning to IDLE"
+                )
                 metrics.API_ERRORS.inc()
                 if self._sound_player:
                     self._sound_player.play(SoundEvent.ERROR)
@@ -798,8 +845,12 @@ class AudioOrchestrator:
                 return
             metrics.SESSIONS_OPENED.inc()
             self._recorder.start(
-                model_score=self._last_wake_result.score if self._last_wake_result else None,
-                verifier_score=self._last_wake_result.verifier_score if self._last_wake_result else None,
+                model_score=self._last_wake_result.score
+                if self._last_wake_result
+                else None,
+                verifier_score=self._last_wake_result.verifier_score
+                if self._last_wake_result
+                else None,
             )
             self._session_turn_count = 0
         else:
@@ -833,7 +884,7 @@ class AudioOrchestrator:
             activity_started = self._api_manager and self._api_manager.activity_started
             if not verified and not activity_started:
                 logger.info("STT verification failed — false trigger, aborting session")
-                metrics.FALSE_TRIGGERS.labels(reason='stt_rejection').inc()
+                metrics.FALSE_TRIGGERS.labels(reason="stt_rejection").inc()
                 await self._close_on_initial_silence()
                 return
 
@@ -880,7 +931,10 @@ class AudioOrchestrator:
             if self._playback_interrupted:
                 break
             if time.time() > drain_deadline:
-                logger.warning("Speaker queue did not drain within %.1fs — clearing buffers", self.live_cfg.speaker_drain_timeout)
+                logger.warning(
+                    "Speaker queue did not drain within %.1fs — clearing buffers",
+                    self.live_cfg.speaker_drain_timeout,
+                )
                 break
             await asyncio.sleep(0.1)
 
@@ -925,18 +979,26 @@ class AudioOrchestrator:
 
             if action_type == "play_internet_radio":
                 if payload.get("status") == "error":
-                    logger.warning("play_internet_radio deferred error: %s", payload.get("details"))
+                    logger.warning(
+                        "play_internet_radio deferred error: %s", payload.get("details")
+                    )
                 elif payload.get("url"):
                     logger.info("Executing deferred action: play_internet_radio (url)")
                     station = payload.get("name") or ""
-                    await self.mpd_client.play_station(payload["url"], station, key=payload.get("key"))
-                    metrics.RADIO_PLAYS.labels(source='ai_new', station=station).inc()
+                    await self.mpd_client.play_station(
+                        payload["url"], station, key=payload.get("key")
+                    )
+                    metrics.RADIO_PLAYS.labels(source="ai_new", station=station).inc()
                     ran_radio_action = True
                 elif payload.get("action") == "play":
-                    logger.info("Executing deferred action: play_internet_radio (resume)")
+                    logger.info(
+                        "Executing deferred action: play_internet_radio (resume)"
+                    )
                     await self.mpd_client.play()
-                    station = self.mpd_client.get_current_station_name() or 'unknown'
-                    metrics.RADIO_PLAYS.labels(source='ai_resume', station=station).inc()
+                    station = self.mpd_client.get_current_station_name() or "unknown"
+                    metrics.RADIO_PLAYS.labels(
+                        source="ai_resume", station=station
+                    ).inc()
                     ran_radio_action = True
 
             elif action_type == "set_playback_volume":
@@ -958,10 +1020,15 @@ class AudioOrchestrator:
         radio_playing = await self.mpd_client.is_playing()
 
         if not self._playback_interrupted:
-            requested = self._api_manager is not None and self._api_manager.request_for_user_input
+            requested = (
+                self._api_manager is not None
+                and self._api_manager.request_for_user_input
+            )
             if requested or self._ai_ended_with_question():
                 if not requested:
-                    logger.info("Follow-up triggered by question mark in AI transcript.")
+                    logger.info(
+                        "Follow-up triggered by question mark in AI transcript."
+                    )
                 logger.info(
                     "Waiting for follow-up (%.1fs, Silero VAD)...",
                     self.live_cfg.followup_timeout,
@@ -993,7 +1060,9 @@ class AudioOrchestrator:
         # in progress — do not stomp it by setting IDLE here.
         # NOTE: FOLLOW_UP is also a valid caller (timeout path) and must proceed to IDLE.
         if self._state == SpeakerState.LISTENING:
-            logger.debug("_finish_turn: barge-in already in progress (LISTENING), skipping IDLE transition")
+            logger.debug(
+                "_finish_turn: barge-in already in progress (LISTENING), skipping IDLE transition"
+            )
             return
 
         self._drain_queue(self._api_input_queue)
@@ -1019,7 +1088,7 @@ class AudioOrchestrator:
                 "Session turn limit reached (%d), closing session.",
                 self._session_turn_count,
             )
-            metrics.SESSIONS_CLOSED.labels(reason='max_turns').inc()
+            metrics.SESSIONS_CLOSED.labels(reason="max_turns").inc()
             await self._api_manager.close_session()
             self._recorder.close()
 
@@ -1050,8 +1119,8 @@ class AudioOrchestrator:
         if self._api_manager:
             await self._api_manager.close_session()
         self._recorder.close_as_false_trigger()
-        metrics.FALSE_TRIGGERS.labels(reason='initial_silence').inc()
-        metrics.SESSIONS_CLOSED.labels(reason='false_trigger').inc()
+        metrics.FALSE_TRIGGERS.labels(reason="initial_silence").inc()
+        metrics.SESSIONS_CLOSED.labels(reason="false_trigger").inc()
 
         self._reset_wake_detector(cooldown=True)
         if self._hybrid_vad:
@@ -1095,7 +1164,7 @@ class AudioOrchestrator:
             elapsed = time.time() - self._last_activity_time
             if elapsed > self.live_cfg.session_inactivity_timeout:
                 logger.info("Session inactive for %.0fs, closing...", elapsed)
-                metrics.SESSIONS_CLOSED.labels(reason='inactivity').inc()
+                metrics.SESSIONS_CLOSED.labels(reason="inactivity").inc()
                 await self._api_manager.close_session()
                 self._recorder.close()
 

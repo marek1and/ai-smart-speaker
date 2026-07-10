@@ -40,14 +40,16 @@ wake_word:
   window_seconds: 0.8
   cooldown_seconds: 2.5
   min_activation_frames: 2
-  # Skip the sklearn verifier while the radio plays through this speaker.
-  # A verifier trained on clean audio rejects valid wake words spoken over
-  # post-AEC music residue; AEC keeps false-positive pressure minimal.
-  # bypass_verifier_when_radio: true
-  # bypass_verifier_threshold: 0.9  # stricter model threshold during bypass
-  # Middle ground: keep the verifier active during radio, just with a relaxed
-  # threshold (needs a noise-augmented verifier). Effective when bypass is off.
-  # radio_verifier_threshold: 0.4
+  # Relaxed mode: active while THIS speaker produces output (radio via MPD or
+  # own TTS while responding). Voice over that output scores lower on every
+  # gate, so each strict gate has a relaxed_* counterpart used then; unset =
+  # keep the strict value. Setting any knob enables the mode.
+  # relaxed_verifier_threshold: 0.6   # verifier stays active, relaxed threshold
+  # relaxed_vad_threshold: 0          # 0 = VAD gate off (Silero still fed, stays warm)
+  # relaxed_min_activation_frames: 3  # voice-over-music sustains fewer approved frames
+  # Fallback: skip the verifier entirely; a stricter main-model threshold applies.
+  # relaxed_bypass_verifier: true
+  # relaxed_bypass_threshold: 0.9
   # STT post-trigger verification via faster-whisper (reduces false positives).
   # Runs in parallel with session open — no added latency for valid triggers.
   # Requires: pip install faster-whisper
