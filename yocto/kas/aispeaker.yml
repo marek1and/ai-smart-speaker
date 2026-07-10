@@ -1,0 +1,83 @@
+header:
+  version: 14
+
+machine: raspberrypi5
+distro: aispeaker
+target: aispeaker-image
+
+repos:
+  # this repository (ai-smart-speaker) — the layer lives in a subdirectory
+  ai-smart-speaker:
+    layers:
+      yocto/meta-aispeaker:
+
+  poky:
+    url: "https://git.yoctoproject.org/poky"
+    # walnascar (Yocto 5.2) ships Python 3.13, required by Mopidy 4 /
+    # Mopidy-Spotify 5. NOTE: not an LTS branch (scarthgap is) — plan to bump
+    # to a newer release when walnascar goes EOL.
+    branch: walnascar
+    # pinned to the commit that produced the first green build (2026-07-09).
+    # To move to a newer walnascar tip: update the sha (or drop the line to
+    # float on branch), rebuild, re-pin.
+    commit: d0b46a6624ec9c61c47270745dd0b2d5abbe6ac1
+    layers:
+      meta:
+      meta-poky:
+
+  meta-openembedded:
+    url: "https://git.openembedded.org/meta-openembedded"
+    branch: walnascar
+    commit: 07330a98cf93806b7a4e0170a541b94962ff3960
+    layers:
+      meta-oe:
+      meta-python:
+      meta-networking:
+      meta-multimedia:
+      meta-filesystems:
+
+  meta-raspberrypi:
+    url: "https://git.yoctoproject.org/meta-raspberrypi"
+    branch: walnascar
+    commit: 0f68e8754514d64f2fe5480195b8992f341d54af
+
+local_conf_header:
+  aispeaker: |
+    # Broadcom WiFi/BT firmware (RPi) requires accepting this license flag
+    LICENSE_FLAGS_ACCEPTED += "synaptics-killswitch"
+
+    # patent-encumbered codecs (gstreamer1.0-plugins-ugly/bad, gst-libav) —
+    # accepted so the speaker can decode arbitrary internet radio / YouTube audio
+    LICENSE_FLAGS_ACCEPTED += "commercial"
+
+    # meta-raspberrypi also provides rpidistro-ffmpeg; pin the plain one
+    # (we only need audio decode, not the RPi video-accel variant) so gst-libav
+    # resolves deterministically
+    PREFERRED_PROVIDER_ffmpeg = "ffmpeg"
+
+    # hostname and timezone
+    hostname:pn-base-files = "aispeaker"
+    DEFAULT_TIMEZONE = "Europe/Warsaw"
+
+    # Raspberry Pi 5 — headless
+    GPU_MEM = "16"
+    ENABLE_UART = "1"
+    # dtoverlay=nospi10 carried over from the current config.txt ([pi5] section);
+    # disable_splash/boot_delay shave firmware time off the boot
+    RPI_EXTRA_CONFIG = "dtoverlay=nospi10\ndisable_splash=1\nboot_delay=0\n"
+    CMDLINE:append = " quiet"
+
+    # reSpeaker XVF3800 (USB) must be the ONLY sound card. Onboard bcm2835 audio
+    # is already off on Pi5 (the recipe only enables it on Pi3); this appends
+    # ",noaudio" to the KMS overlay so HDMI audio doesn't register an ALSA card
+    # either (matches the old Raspbian "vc4-kms-v3d,noaudio").
+    VC4DTBO = "vc4-kms-v3d,noaudio"
+
+
+  build-tuning: |
+    # DL_DIR/SSTATE_DIR default to ${TOPDIR}/downloads and ${TOPDIR}/sstate-cache
+    # (inside the build dir, which kas-container persists on the host as ./build).
+    # To share a cache across separate build trees, point these at a path you
+    # bind-mount into the container and set it here.
+    INHERIT += "rm_work"
+    RM_WORK_EXCLUDE += "aispeaker-image"

@@ -1,0 +1,25 @@
+[Unit]
+Description=AI Smart Speaker Service
+After=pipewire.service wireplumber.service mopidy.service
+Requires=pipewire.service wireplumber.service mopidy.service
+# don't fail-loop on a fresh image before the application is deployed
+ConditionPathExists=/opt/ai-smart-speaker/.venv/bin/python
+
+[Service]
+Type=simple
+User=speaker
+SupplementaryGroups=audio,plugdev
+WorkingDirectory=/opt/ai-smart-speaker
+# pipewire runs in system mode; caches (huggingface etc.) must stay off the
+# read-only rootfs
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+Environment=XDG_RUNTIME_DIR=/run/pipewire
+Environment=XDG_CACHE_HOME=/data/cache
+ExecStart=/opt/ai-smart-speaker/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

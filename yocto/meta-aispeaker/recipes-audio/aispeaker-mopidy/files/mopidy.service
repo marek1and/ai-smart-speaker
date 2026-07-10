@@ -1,0 +1,22 @@
+[Unit]
+Description=Mopidy music server (MPD-compatible)
+After=pipewire.service pipewire-pulse.service wireplumber.service network-online.target
+Wants=network-online.target
+Requires=pipewire.service pipewire-pulse.service
+
+[Service]
+Type=simple
+User=speaker
+SupplementaryGroups=audio
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+Environment=XDG_RUNTIME_DIR=/run/pipewire
+Environment=PULSE_SERVER=unix:/run/pipewire/pulse/native
+Environment=XDG_CACHE_HOME=/data/cache
+# base config from the image, then optional secret/extension overrides on /data
+ExecStart=/usr/bin/mopidy \
+    --config /etc/mopidy/mopidy.conf:/data/mopidy/mopidy.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

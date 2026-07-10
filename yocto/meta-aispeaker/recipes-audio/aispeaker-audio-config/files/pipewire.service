@@ -1,0 +1,21 @@
+[Unit]
+Description=PipeWire multimedia server (system mode)
+
+[Service]
+User=speaker
+SupplementaryGroups=audio
+RuntimeDirectory=pipewire
+RuntimeDirectoryPreserve=yes
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+Environment=XDG_RUNTIME_DIR=/run/pipewire
+ExecStart=/usr/bin/pipewire
+Restart=on-failure
+RestartSec=2
+# RT scheduling directly via rlimits — no rtkit/polkit on the image
+LimitRTPRIO=95
+LimitNICE=-19
+LimitRTTIME=infinity
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

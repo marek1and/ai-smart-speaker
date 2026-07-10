@@ -1,0 +1,15 @@
+[Unit]
+Description=Persist NetworkManager state on /data (leases, seen-bssids)
+RequiresMountsFor=/data
+After=aispeaker-data-setup.service
+Requires=aispeaker-data-setup.service
+Before=NetworkManager.service
+
+[Mount]
+What=/data/var/lib/NetworkManager
+Where=/var/lib/NetworkManager
+Type=none
+Options=bind
+
+[Install]
+WantedBy=multi-user.target

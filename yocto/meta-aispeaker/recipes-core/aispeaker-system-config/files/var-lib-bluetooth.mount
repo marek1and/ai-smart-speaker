@@ -1,0 +1,15 @@
+[Unit]
+Description=Persist Bluetooth pairings on /data
+RequiresMountsFor=/data
+After=aispeaker-data-setup.service
+Requires=aispeaker-data-setup.service
+Before=bluetooth.service
+
+[Mount]
+What=/data/var/lib/bluetooth
+Where=/var/lib/bluetooth
+Type=none
+Options=bind
+
+[Install]
+WantedBy=multi-user.target

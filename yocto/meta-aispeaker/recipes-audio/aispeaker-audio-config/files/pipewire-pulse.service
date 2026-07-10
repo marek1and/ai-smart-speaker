@@ -1,0 +1,16 @@
+[Unit]
+Description=PipeWire PulseAudio replacement (system mode)
+After=pipewire.service
+Requires=pipewire.service
+
+[Service]
+User=speaker
+SupplementaryGroups=audio
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+Environment=XDG_RUNTIME_DIR=/run/pipewire
+ExecStart=/usr/bin/pipewire-pulse
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

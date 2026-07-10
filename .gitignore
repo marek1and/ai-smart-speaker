@@ -10,3 +10,19 @@ config.openhab.yml
 typings
 models/
 .claude/
+# editor / tooling backup copies
+*.bak
+*.bak_*
+*.orig
+# yocto: build dir (holds downloads + sstate-cache) and kas-cloned upstream layers
+yocto/build/
+yocto/local/
+yocto/poky/
+yocto/meta-openembedded/
+yocto/meta-raspberrypi/
+# safety net: a plain `kas-container build` (without yocto/kas.sh) drops these
+# at the repo root — always prefer the wrapper, but never let them reach git
+/build/
+/poky/
+/meta-openembedded/
+/meta-raspberrypi/

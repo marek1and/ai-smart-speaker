@@ -1,0 +1,12 @@
+# SD card layout for the AI speaker (RPi5):
+#  p1  boot   (FAT32, RPi firmware + kernel)         — effectively RO (mounted ro)
+#  p2  root   (ext4, read-only rootfs)               — RO, power-loss resilient
+#  p3  data   (ext4, rw) — /data: application (.venv), recordings, MPD state,
+#             /etc overlay, /var/lib/NetworkManager etc.
+#
+# The rest of the card stays unallocated — /data can be grown after flashing
+# (parted + resize2fs) or by raising --size below.
+
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 256M --fsoptions "ro,nofail"
+part /     --source rootfs            --ondisk mmcblk0 --fstype=ext4 --label root --align 4096 --size 3G
+part /data                            --ondisk mmcblk0 --fstype=ext4 --label data --align 4096 --size 8G --fsoptions "defaults,noatime,nofail"

@@ -1,0 +1,61 @@
+#!/bin/sh
+# AISpeaker in-place installer (initramfs PID1).
+#
+# Booted once via RPi5 tryboot, this runs from RAM and writes the aispeaker
+# image onto the internal SD card, reading the compressed .wic from a USB
+# stick (so the source is never the disk being overwritten). On any failure
+# it drops to a shell instead of touching the card; a plain power-cycle then
+# returns to the previous system (tryboot is one-shot).
+
+TARGET=/dev/mmcblk0
+PATTERN='aispeaker-image*.wic.bz2'
+
+/bin/busybox --install -s 2>/dev/null || true
+mount -t proc     proc /proc 2>/dev/null
+mount -t sysfs    sys  /sys  2>/dev/null
+mount -t devtmpfs dev  /dev  2>/dev/null || { mdev -s; }
+exec >/dev/console 2>&1
+
+echo
+echo "=== AISpeaker in-place installer ==="
+echo "Target card: $TARGET  |  Source: USB stick with $PATTERN"
+
+# best-effort module load; on the RPi5 kernel USB/mmc may be built-in
+for m in xhci_pci usb_storage uas sd_mod vfat nls_cp437 nls_iso8859_1; do
+    modprobe "$m" 2>/dev/null || true
+done
+
+echo "Waiting for USB storage to enumerate..."
+SRC=""
+for _try in 1 2 3 4 5 6 7 8 9 10; do
+    for part in /dev/sd[a-z]1 /dev/sd[a-z]; do
+        [ -b "$part" ] || continue
+        mkdir -p /mnt/src
+        mount -o ro "$part" /mnt/src 2>/dev/null || continue
+        found=$(ls /mnt/src/$PATTERN 2>/dev/null | head -n1)
+        if [ -n "$found" ]; then SRC="$found"; break; fi
+        umount /mnt/src 2>/dev/null
+    done
+    [ -n "$SRC" ] && break
+    sleep 1
+done
+
+if [ -z "$SRC" ]; then
+    echo "ERROR: no $PATTERN found on any USB stick."
+    echo "Insert the USB stick and reboot to retry, or flash manually below."
+    exec sh
+fi
+
+echo "Found image: $SRC"
+echo "Writing to $TARGET in 5s — DO NOT power off. Ctrl-C to abort."
+sleep 5
+
+if bunzip2 -c "$SRC" | dd of="$TARGET" bs=4M conv=fsync; then
+    sync
+    echo "Flash complete. Rebooting into the new system in 5s..."
+    sleep 5
+    reboot -f
+else
+    echo "ERROR: write failed. Card may be inconsistent — reflash before use."
+    exec sh
+fi

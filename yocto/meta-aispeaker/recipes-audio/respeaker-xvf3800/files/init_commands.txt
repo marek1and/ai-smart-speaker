@@ -1,0 +1,1 @@
+../../../../../linux/opt/reSpeaker/init_commands.txt
