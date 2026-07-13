@@ -9,6 +9,43 @@ logger = logging.getLogger(__name__)
 _RECORDINGS_DIR = "recordings"
 
 
+def save_clip(
+    frames: list[bytes],
+    sample_rate: int,
+    prefix: str = "trigger",
+    model_score: Optional[float] = None,
+    verifier_score: Optional[float] = None,
+    channels: int = 1,
+) -> Optional[str]:
+    """Write buffered PCM16 frames to a timestamped WAV file.
+
+    Used to dump the wake detector's input ring buffer at trigger time —
+    unlike session recordings (which start at API session open), the clip
+    contains exactly the audio the detector scored. With stereo frames
+    (channels=2) the right channel carries the far-end reference. Returns
+    the path, or None when there is nothing to write.
+    """
+    if not frames:
+        return None
+    os.makedirs(_RECORDINGS_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Verifier before model score: openWakeWord review_clips.py sorts by the
+    # trailing _s<score> pattern, so the model score must end the stem.
+    score_tag = ""
+    if verifier_score is not None:
+        score_tag += f"_v{verifier_score:.3f}"
+    if model_score is not None:
+        score_tag += f"_s{model_score:.3f}"
+    path = os.path.join(_RECORDINGS_DIR, f"{prefix}_{timestamp}{score_tag}.wav")
+    with wave.open(path, "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(b"".join(frames))
+    logger.info("Trigger clip saved: %s", path)
+    return path
+
+
 class SessionRecorder:
     """Manages WAV recording scoped to a single API session.
 

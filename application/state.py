@@ -30,4 +30,7 @@ class WakeWordResult:
     max_score: float
     vad_score: float = 0.0
     verifier_score: Optional[float] = None
+    # Peak frame RMS over the detector score window — calibration/diagnostic
+    # data logged with every detection.
+    window_rms: float = 0.0
     timestamp: float = field(default_factory=time.time)
