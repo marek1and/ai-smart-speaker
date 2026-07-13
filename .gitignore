@@ -10,3 +10,5 @@ config.openhab.yml
 typings
 models/
 .claude/
+
+yocto/
