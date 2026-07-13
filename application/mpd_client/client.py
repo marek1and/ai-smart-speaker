@@ -423,9 +423,10 @@ class MPDClientWrapper:
             logger.info(
                 "Restoring volume to %d%% (fade, playing)", self._restore_volume
             )
-            await self._fade_to(
-                self._restore_volume, self.config.volume_fade_in_seconds
-            )
+            # Fire-and-forget: callers (e.g. the orchestrator state machine in
+            # _finish_turn) must not block on the fade nor absorb its cancellation
+            # when a barge-in duck() kills it mid-flight.
+            self._start_fade(self._restore_volume, self.config.volume_fade_in_seconds)
         else:
             # Not playing — restore volume directly so hardware level is correct.
             logger.info(
@@ -439,28 +440,36 @@ class MPDClientWrapper:
         self._notify(volume=self._restore_volume)
         logger.debug("unduck() finished.")
 
-    async def _fade_to(self, target_volume: int, duration: float):
-        """Smoothly transitions the volume to a target level."""
-        logger.debug(
-            f"fade_to(target={target_volume}, duration={duration:.2f}) called."
-        )
+    def _start_fade(self, target_volume: int, duration: float) -> asyncio.Task:
+        """Start a background fade to target_volume, replacing any ongoing fade."""
         if self._fade_task and not self._fade_task.done():
             logger.debug("Cancelling previous fade task.")
             self._fade_task.cancel()
-            try:
-                await self._fade_task
-            except asyncio.CancelledError:
-                pass  # Expected
-
         self._fade_task = asyncio.create_task(
             self._fade_volume_async(target_volume, duration)
         )
+        return self._fade_task
+
+    async def _fade_to(self, target_volume: int, duration: float):
+        """Smoothly transitions the volume to a target level and waits for it.
+
+        A concurrent duck()/fade may cancel the fade task; that cancellation must
+        not propagate to the awaiting task (it once killed the orchestrator state
+        machine mid _finish_turn) — only re-raise when the caller itself is being
+        cancelled.
+        """
+        logger.debug(
+            f"fade_to(target={target_volume}, duration={duration:.2f}) called."
+        )
+        fade_task = self._start_fade(target_volume, duration)
         try:
-            await self._fade_task
+            await fade_task
         except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                fade_task.cancel()
+                raise
             logger.info("Fade task was cancelled.")
-            self._fade_task.cancel()
-            raise
 
     async def _fade_volume_async(self, target_volume: int, duration: float):
         """Asynchronous coroutine for volume fading."""
