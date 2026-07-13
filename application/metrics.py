@@ -42,6 +42,16 @@ STATE_ACTIVE = Gauge(
     ['state'],
 )
 
+# AEC health: median mic/reference level ratio while our own audio plays
+# (reference = XVF3800 far-end channel). Lower = better echo cancellation;
+# a rising trend means AEC degradation (e.g. SYS_DELAY drift, gain changes).
+# Double-talk (user speaking over playback) inflates single frames — the
+# median over the rolling window keeps the trend robust.
+AEC_RESIDUAL_DB = Gauge(
+    'speaker_aec_residual_db',
+    'Median mic-to-reference level ratio during own playback (dB, lower = better AEC)',
+)
+
 # Sessions
 SESSIONS_OPENED = Counter('speaker_sessions_opened_total', 'API sessions opened')
 SESSIONS_CLOSED = Counter(

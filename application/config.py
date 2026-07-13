@@ -82,12 +82,12 @@ class WakeWordConfig:
     # only 2-3 approved frames (measured), while the strict value is tuned to
     # kill ambient transients in IDLE and rejects those valid calls.
     relaxed_min_activation_frames: Optional[int] = None
-    # Fallback: skip the verifier entirely in relaxed mode (a verifier trained
-    # on clean audio rejects valid wake words over music residue); the stricter
-    # relaxed_bypass_threshold on the main model applies instead. Unused since
-    # the verifier was retrained on radio/TV positives (2026-07-08).
-    relaxed_bypass_verifier: bool = False
-    relaxed_bypass_threshold: float = 0.9
+    # Dump the detector input ring buffer to recordings/trigger_*.wav on every
+    # trigger. Session recordings start only at API session open (~0.7s after
+    # the trigger), so their preroll usually misses the audio that triggered —
+    # these clips are the ground truth for verifier retraining.
+    save_trigger_clips: bool = False
+    trigger_clip_seconds: float = 3.0
 
     # STT post-trigger verification (reduces false positives via faster-whisper)
     verify_with_stt: bool = False
@@ -114,6 +114,13 @@ class VADConfig:
     # Temporal smoothing (for HybridVAD)
     speech_frames_required: int = 3  # Consecutive speech frames to start
     silence_frames_required: int = 15  # Consecutive silence frames to end (~500ms)
+
+    # Ignore VAD verdicts until this long after our own sound effect finishes
+    # playing. On the XVF ASR path (no post-processor) the beep residue after
+    # linear AEC reads as speech: the 0.36s follow-up beep tripped Silero
+    # ~0.31s in, flipping FOLLOW_UP into LISTENING with nobody speaking — and
+    # that path has no initial-silence timeout, so the session hung (2026-07-13).
+    sound_guard_tail_seconds: float = 0.2
 
 
 @dataclass
@@ -296,6 +303,14 @@ class MetricsConfig:
 
     enabled: bool = True
     port: int = 9090
+
+    # AEC health gauge (speaker_aec_residual_db) — computed only on frames
+    # where the far-end reference (right input channel, XVF3800 mux 5 0)
+    # carries signal above this RMS floor, i.e. our own audio is playing.
+    aec_ref_min_rms: float = 200.0
+    # Rolling window of qualifying frames for the median (32 ms each;
+    # 1000 ≈ 32 s of playback).
+    aec_window_frames: int = 1000
 
 
 def _dataclass_from(cls_, data: dict, section: str):

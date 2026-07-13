@@ -21,7 +21,7 @@ import numpy as np
 
 from audio.input import AudioInput
 from audio.output import AudioOutput
-from audio.recorder import SessionRecorder
+from audio.recorder import SessionRecorder, save_clip
 from audio.sounds import SoundEvent, SoundPlayer
 from audio.vad import HybridVAD, create_hybrid_vad
 from audio.verifier import WakeWordVerifier
@@ -107,6 +107,27 @@ class AudioOrchestrator:
             / self.audio_cfg.input_chunk
         )
         self._preroll_buffer: Deque[bytes] = deque(maxlen=max(preroll_frames, 5))
+
+        # Detector input ring buffer, dumped to a WAV at trigger time. The
+        # preroll buffer can't serve this purpose: it is flushed at session
+        # open (~0.7s after the trigger), by which point it has rolled past
+        # most of the triggering audio.
+        self._trigger_clip_buffer: Optional[Deque[bytes]] = None
+        self._clip_channels: int = 1
+        if self.wake_cfg.save_trigger_clips:
+            clip_frames = int(
+                self.wake_cfg.trigger_clip_seconds
+                * self.audio_cfg.input_sample_rate
+                / self.audio_cfg.input_chunk
+            )
+            self._trigger_clip_buffer = deque(maxlen=max(clip_frames, 5))
+
+        # AEC health metric: mic/reference ratios from playback frames
+        # (see _update_aec_metric).
+        self._aec_ratio_window: Deque[float] = deque(
+            maxlen=max(config.metrics.aec_window_frames, 1)
+        )
+        self._aec_frame_counter: int = 0
 
         # Events for coordination
         self._wake_event = asyncio.Event()
@@ -445,7 +466,8 @@ class AudioOrchestrator:
                     continue
 
                 # Extract mono channel (mic might be stereo)
-                if raw_audio.ndim == 2 and raw_audio.shape[1] > 1:
+                stereo = raw_audio.ndim == 2 and raw_audio.shape[1] > 1
+                if stereo:
                     mono = raw_audio[:, 0]
                 else:
                     mono = raw_audio.flatten()
@@ -456,6 +478,17 @@ class AudioOrchestrator:
                 self._current_audio_frame = mono
                 mono_bytes = mono.tobytes()
                 self._preroll_buffer.append(mono_bytes)
+                if self._trigger_clip_buffer is not None:
+                    # Full frame, not just mono: with the XVF3800 right channel
+                    # muxed to the far-end reference (5 0), a stereo clip
+                    # self-labels whether our own audio was playing and what it
+                    # was. Downstream prepare_recordings.py scores channel 0.
+                    self._clip_channels = raw_audio.shape[1] if stereo else 1
+                    self._trigger_clip_buffer.append(
+                        raw_audio.tobytes() if stereo else mono_bytes
+                    )
+                if stereo:
+                    self._update_aec_metric(raw_audio)
                 self._frames_since_reset += 1
 
                 wake_result = await self._detect_wake_word_async(loop, mono)
@@ -474,6 +507,29 @@ class AudioOrchestrator:
                 # mid-conversation (FIRST_EXCEPTION in _main_loop).
                 logger.exception("Audio capture error")
                 await asyncio.sleep(0.1)
+
+    def _update_aec_metric(self, raw_audio: np.ndarray) -> None:
+        """Track echo-cancellation health from the far-end reference channel.
+
+        Right input channel carries the XVF3800 far-end reference with system
+        delay (mux 5 0), time-aligned with the mic channel. On frames where
+        the reference has signal (our audio is playing), the mic channel of a
+        healthy AEC holds only residue — the median mic/ref ratio over a
+        rolling window is exported in dB as speaker_aec_residual_db. Median
+        (not mean) so double-talk frames don't dominate the trend.
+        """
+        ref = raw_audio[:, 1].astype(np.float32)
+        ref_rms = float(np.sqrt(np.mean(ref**2)))
+        if ref_rms < self.config.metrics.aec_ref_min_rms:
+            return
+        mic = raw_audio[:, 0].astype(np.float32)
+        mic_rms = float(np.sqrt(np.mean(mic**2)))
+        self._aec_ratio_window.append(mic_rms / ref_rms)
+        self._aec_frame_counter += 1
+        # Refresh the gauge ~1×/s (31 frames × 32 ms), not every frame.
+        if self._aec_frame_counter % 31 == 0:
+            median_ratio = float(np.median(self._aec_ratio_window))
+            metrics.AEC_RESIDUAL_DB.set(20.0 * np.log10(max(median_ratio, 1e-6)))
 
     async def _process_listening_audio(
         self, mono: np.ndarray, mono_bytes: bytes
@@ -502,6 +558,16 @@ class AudioOrchestrator:
         self, mono: np.ndarray, mono_bytes: bytes
     ) -> None:
         """Process audio in FOLLOW_UP state - detect speech to continue conversation."""
+        # Skip frames while our own sound effect plays (+ tail): the follow-up
+        # beep residue reads as speech on the ASR path and instantly flipped
+        # this state into LISTENING — which has no initial-silence timeout on
+        # the follow-up path, so a false entry hangs the session. Skipping
+        # (not feeding) the VAD delays a genuine fast answer by only the
+        # guard window; the speech edge fires right after it.
+        if self._sound_player and time.monotonic() < (
+            self._sound_player.busy_until + self.vad_cfg.sound_guard_tail_seconds
+        ):
+            return
         if not self._hybrid_vad:
             # Fallback to RMS-based detection
             rms = float(np.sqrt(np.mean(np.square(mono.astype(np.float32)))))
@@ -539,15 +605,14 @@ class AudioOrchestrator:
         # Relax gating whenever THIS speaker produces output — radio playing OR
         # our own TTS during RESPONDING (barge-in). Voice spoken over that output
         # scores lower on every gate (post-AEC residue + postfilter artefacts),
-        # so the detector adapts per config (verifier bypass or relaxed threshold,
+        # so the detector adapts per config (relaxed verifier threshold,
         # relaxed VAD gate). Without covering RESPONDING, barge-in fails: the
         # strict IDLE verifier rejects wake word spoken over the residue of
         # speaker own voice. is_playing() hits the local cache, which the MPD
         # watcher refreshes every state_poll_interval; RESPONDING short-circuits
         # it so we skip the await.
         relaxation_configured = (
-            self.wake_cfg.relaxed_bypass_verifier
-            or self.wake_cfg.relaxed_verifier_threshold is not None
+            self.wake_cfg.relaxed_verifier_threshold is not None
             or self.wake_cfg.relaxed_vad_threshold is not None
             or self.wake_cfg.relaxed_min_activation_frames is not None
         )
@@ -582,6 +647,7 @@ class AudioOrchestrator:
             max_score=max_score,
             vad_score=vad_score,
             verifier_score=self._wake_detector.last_verifier_score,
+            window_rms=self._wake_detector.last_window_rms,
         )
 
     async def _handle_wake_word_result(self, result: WakeWordResult) -> None:
@@ -598,13 +664,32 @@ class AudioOrchestrator:
             print()  # New line after status
         if result.verifier_score is not None:
             logger.info(
-                "Wake word detected! (score=%.3f, verifier=%.3f)",
+                "Wake word detected! (score=%.3f, verifier=%.3f, rms=%.0f)",
                 result.score,
                 result.verifier_score,
+                result.window_rms,
             )
         else:
-            logger.info("Wake word detected! (score=%.3f)", result.score)
+            logger.info(
+                "Wake word detected! (score=%.3f, rms=%.0f)",
+                result.score,
+                result.window_rms,
+            )
         self._last_barge_in_time = now
+
+        if self._trigger_clip_buffer is not None:
+            # Snapshot before more frames roll the deque; write off-loop.
+            clip_frames = list(self._trigger_clip_buffer)
+            asyncio.get_running_loop().run_in_executor(
+                self._executor,
+                save_clip,
+                clip_frames,
+                self.audio_cfg.input_sample_rate,
+                "trigger",
+                result.score,
+                result.verifier_score,
+                self._clip_channels,
+            )
 
         _wake_context = (
             "barge_in"

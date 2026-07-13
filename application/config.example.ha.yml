@@ -48,9 +48,12 @@ wake_word:
   # relaxed_verifier_threshold: 0.6   # verifier stays active, relaxed threshold
   # relaxed_vad_threshold: 0          # 0 = VAD gate off (Silero still fed, stays warm)
   # relaxed_min_activation_frames: 3  # voice-over-music sustains fewer approved frames
-  # Fallback: skip the verifier entirely; a stricter main-model threshold applies.
-  # relaxed_bypass_verifier: true
-  # relaxed_bypass_threshold: 0.9
+  # Dump the last trigger_clip_seconds of detector input to recordings/trigger_*.wav
+  # on every trigger — ground truth for wake word retraining (session recordings
+  # start at API session open and usually miss the triggering audio). With a
+  # stereo capture device the right channel (far-end reference) is included.
+  save_trigger_clips: true
+  trigger_clip_seconds: 3.0
   # STT post-trigger verification via faster-whisper (reduces false positives).
   # Runs in parallel with session open — no added latency for valid triggers.
   # Requires: pip install faster-whisper
@@ -72,6 +75,10 @@ vad:
   # Temporal smoothing
   speech_frames_required: 3
   silence_frames_required: 15
+  # Ignore VAD verdicts until this long after our own sound effect stops
+  # playing — the beep residue after AEC reads as speech and can flip
+  # FOLLOW_UP into LISTENING with nobody speaking.
+  sound_guard_tail_seconds: 0.2
 
 live:
   # AI provider selection. Options: "gemini" or "openai"

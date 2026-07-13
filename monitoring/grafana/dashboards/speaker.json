@@ -25,7 +25,7 @@
       }
     ]
   },
-  "description": "AI Smart Speaker \u2014 real-time operational metrics",
+  "description": "AI Smart Speaker — real-time operational metrics",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -1001,7 +1001,7 @@
             "uid": "${datasource}"
           },
           "expr": "speaker_cpu_temp_celsius",
-          "legendFormat": "\u00b0C",
+          "legendFormat": "°C",
           "refId": "A"
         }
       ]
@@ -1487,6 +1487,95 @@
       ]
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "unit": "dB"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "initial_silence"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stt_rejection"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "dark-red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 211,
+      "options": {
+        "legend": {
+          "calcs": [
+            "sum"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "title": "AEC Residual (echo leakage)",
+      "description": "Mediana stosunku mic/referencja podczas własnego odtwarzania (dB). Nizej = lepsze tlumienie echa. Trend rosnacy = degradacja AEC (dryf SYS_DELAY, zmiana gainow). Puste = nic nie gralo.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "speaker_aec_residual_db",
+          "legendFormat": "residual dB",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -1880,7 +1969,7 @@
         }
       },
       "title": "State Transitions",
-      "description": "Rate of state machine transitions \u2014 useful for spotting unexpected cycling or stuck states",
+      "description": "Rate of state machine transitions — useful for spotting unexpected cycling or stuck states",
       "type": "timeseries",
       "targets": [
         {
@@ -1889,7 +1978,7 @@
             "uid": "${datasource}"
           },
           "expr": "increase(speaker_state_transitions_total[$__rate_interval])",
-          "legendFormat": "{{from_state}} \u2192 {{to_state}}",
+          "legendFormat": "{{from_state}} → {{to_state}}",
           "refId": "A",
           "interval": "5m"
         }
@@ -2980,7 +3069,7 @@
         "textMode": "auto"
       },
       "title": "MPD Reconnections",
-      "description": "Error-triggered reconnects to the MPD server \u2014 elevated count indicates network instability",
+      "description": "Error-triggered reconnects to the MPD server — elevated count indicates network instability",
       "type": "stat",
       "targets": [
         {
@@ -3936,7 +4025,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "RT60 \u00d7 10 (s)"
+              "options": "RT60 × 10 (s)"
             },
             "properties": [
               {
@@ -3990,7 +4079,7 @@
             "uid": "${datasource}"
           },
           "expr": "speaker_respeaker_rt60_seconds * 10",
-          "legendFormat": "RT60 \u00d7 10 (s)",
+          "legendFormat": "RT60 × 10 (s)",
           "refId": "B"
         }
       ]
@@ -4038,7 +4127,7 @@
               }
             ]
           },
-          "unit": "\u00b5s",
+          "unit": "µs",
           "min": 0
         },
         "overrides": [
