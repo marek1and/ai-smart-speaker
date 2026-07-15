@@ -54,6 +54,11 @@ wake_word:
   # stereo capture device the right channel (far-end reference) is included.
   save_trigger_clips: true
   trigger_clip_seconds: 3.0
+  # Also dump near-misses (score >= candidate_threshold but no trigger) to
+  # recordings/candidate_*.wav — voices the model undershoots live here;
+  # rate-limited by cooldown_seconds.
+  save_candidate_clips: true
+  candidate_threshold: 0.5
   # STT post-trigger verification via faster-whisper (reduces false positives).
   # Runs in parallel with session open — no added latency for valid triggers.
   # Requires: pip install faster-whisper

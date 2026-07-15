@@ -114,7 +114,8 @@ class AudioOrchestrator:
         # most of the triggering audio.
         self._trigger_clip_buffer: Optional[Deque[bytes]] = None
         self._clip_channels: int = 1
-        if self.wake_cfg.save_trigger_clips:
+        self._last_candidate_time: float = 0.0
+        if self.wake_cfg.save_trigger_clips or self.wake_cfg.save_candidate_clips:
             clip_frames = int(
                 self.wake_cfg.trigger_clip_seconds
                 * self.audio_cfg.input_sample_rate
@@ -508,6 +509,45 @@ class AudioOrchestrator:
                 logger.exception("Audio capture error")
                 await asyncio.sleep(0.1)
 
+    def _maybe_save_candidate_clip(self, result: WakeWordResult) -> None:
+        """Dump a near-miss (hot score, no trigger) for offline review.
+
+        Captures the band invisible to trigger clips: voices the model
+        undershoots (household members) and borderline noises. Rate-limited
+        by cooldown_seconds against both hot streaks of the same event and
+        the hot tail that follows a real trigger.
+        """
+        if (
+            not self.wake_cfg.save_candidate_clips
+            or self._trigger_clip_buffer is None
+            or result.score < self.wake_cfg.candidate_threshold
+        ):
+            return
+        now = time.time()
+        if (
+            now - self._last_candidate_time < self.wake_cfg.cooldown_seconds
+            or now - self._last_barge_in_time < self.wake_cfg.cooldown_seconds
+        ):
+            return
+        self._last_candidate_time = now
+        clip_frames = list(self._trigger_clip_buffer)
+        logger.info(
+            "Near-miss candidate (score=%.3f, verifier=%s, rms=%.0f) — saving clip",
+            result.score,
+            f"{result.verifier_score:.3f}" if result.verifier_score is not None else "n/a",
+            result.window_rms,
+        )
+        asyncio.get_running_loop().run_in_executor(
+            self._executor,
+            save_clip,
+            clip_frames,
+            self.audio_cfg.input_sample_rate,
+            "candidate",
+            result.score,
+            result.verifier_score,
+            self._clip_channels,
+        )
+
     def _update_aec_metric(self, raw_audio: np.ndarray) -> None:
         """Track echo-cancellation health from the far-end reference channel.
 
@@ -653,6 +693,7 @@ class AudioOrchestrator:
     async def _handle_wake_word_result(self, result: WakeWordResult) -> None:
         """Handle wake word detection result based on current state."""
         if not result.triggered:
+            self._maybe_save_candidate_clip(result)
             self._print_status(result)
             return
 

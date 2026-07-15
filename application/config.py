@@ -89,6 +89,15 @@ class WakeWordConfig:
     save_trigger_clips: bool = False
     trigger_clip_seconds: float = 3.0
 
+    # Also dump NEAR-MISSES: frames whose model score reaches
+    # candidate_threshold but that never fire (below main threshold, rejected
+    # by the verifier, or too few consecutive frames) — e.g. another
+    # household member whose voice the model undershoots. Saved as
+    # recordings/candidate_*.wav from the same ring buffer; cooldown_seconds
+    # rate-limits both a hot streak and the tail of a real trigger.
+    save_candidate_clips: bool = False
+    candidate_threshold: float = 0.5
+
     # STT post-trigger verification (reduces false positives via faster-whisper)
     verify_with_stt: bool = False
     stt_model: str = "tiny.en"  # faster-whisper model: tiny.en, base.en, small.en

@@ -42,7 +42,7 @@ def save_clip(
         wav_file.setsampwidth(2)
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(b"".join(frames))
-    logger.info("Trigger clip saved: %s", path)
+    logger.info("Clip saved: %s", path)
     return path
 
 
