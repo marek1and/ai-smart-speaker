@@ -77,9 +77,17 @@ class MQTTBridge:
                         tg.create_task(self._command_loop(client, radio))
             except Exception as e:
                 metrics.MQTT_CONNECTED.set(0)
+                # An ExceptionGroup from the TaskGroup says nothing useful on its
+                # own — log the leaf exceptions instead.
+                if isinstance(e, BaseExceptionGroup):
+                    detail = "; ".join(
+                        f"{type(sub).__name__} ({sub})" for sub in e.exceptions
+                    )
+                else:
+                    detail = f"{type(e).__name__} ({e})"
                 logger.warning(
-                    "MQTT error: %s (%s) — reconnecting in %.0fs",
-                    type(e).__name__, e, self._config.reconnect_interval,
+                    "MQTT error: %s — reconnecting in %.0fs",
+                    detail, self._config.reconnect_interval,
                 )
                 await asyncio.sleep(self._config.reconnect_interval)
 
