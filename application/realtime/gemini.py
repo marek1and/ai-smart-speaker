@@ -66,6 +66,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         # Output silence tracking: reset each turn via start_new_turn override below
         self._consecutive_silent_chunks: int = 0
 
+        # Set when the server announces session termination (GoAway); lets the
+        # receive task treat the subsequent connection close as a normal end of
+        # session instead of an error (no error sound, no state reset).
+        self._go_away_received: bool = False
+
     @staticmethod
     def _pcm16_rms(data: bytes) -> float:
         """Return normalised RMS [0.0, 1.0] for a 16-bit little-endian PCM buffer."""
@@ -243,6 +248,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     ) as session:
                         self._session = session
                         self._session_active = True
+                        self._go_away_received = False
                         logger.info("Session opened successfully.")
 
                         send_task = asyncio.create_task(
@@ -335,6 +341,14 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                if self._go_away_received:
+                    logger.warning(
+                        "Session closed by server after GoAway — ending turn gracefully"
+                    )
+                    self._session_active = False
+                    if self._on_turn_complete:
+                        self._on_turn_complete()
+                    break
                 logger.error("Receive from API error: %s", e)
                 traceback.print_exc()
                 self._session_active = False
@@ -352,6 +366,17 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         indefinitely by transcription updates or empty heartbeats when Gemini has
         already finished speaking but hasn't sent turn_complete yet.
         """
+        if getattr(response, "go_away", None):
+            # Server announces imminent session termination (e.g. max session
+            # duration). Mark it so the coming connection close is handled as a
+            # graceful end of session, not an API error.
+            self._go_away_received = True
+            logger.warning(
+                "API sent GoAway (time_left=%s) — session will close soon",
+                response.go_away.time_left,
+            )
+            return
+
         if hasattr(response, "server_content") and response.server_content:
             sc = response.server_content
 
