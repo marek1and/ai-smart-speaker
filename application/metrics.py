@@ -158,10 +158,11 @@ def _pre_register_labels() -> None:
     """Touch all known label combos at 0 so Prometheus scrapes them before the first inc().
     Without this, increase() misses the first event (counter created and incremented
     in the same scrape interval, so Prometheus never sees the 0 → 1 transition)."""
-    for ctx in ('idle', 'barge_in', 're_listen'):
-        WAKE_DETECTIONS.labels(context=ctx)
-    for reason in ('initial_silence', 'stt_rejection'):
-        FALSE_TRIGGERS.labels(reason=reason)
+    for mode in ('strict', 'relaxed'):
+        for ctx in ('idle', 'barge_in', 're_listen'):
+            WAKE_DETECTIONS.labels(context=ctx, mode=mode)
+        for reason in ('initial_silence', 'stt_rejection'):
+            FALSE_TRIGGERS.labels(reason=reason, mode=mode)
     for reason in ('max_turns', 'inactivity', 'false_trigger'):
         SESSIONS_CLOSED.labels(reason=reason)
     for fn in ('play_internet_radio', 'stop_radio', 'set_playback_volume',
