@@ -144,12 +144,19 @@ live:
   barge_in: true
   session_inactivity_timeout: 30.0
   max_reconnect_attempts: 3
+  # How long open_session() waits before giving up and cancelling the retry task
+  # (the background retries take far longer than a user will wait).
+  session_open_timeout: 10.0
   followup_timeout: 3.0
-  
+
   enable_manual_vad: true
   api_vad_timeout: 2.0
   turn_watchdog_timeout: 5.0
-  
+  # Warn about silent output chunks only once the run is this long (a short silent
+  # lead-in is normal), then repeat the warning every N chunks.
+  output_silence_warn_after: 5
+  output_silence_warn_every: 50
+
   # Gemini-specific settings
   model: "gemini-3.1-flash-live-preview"
   voice_name: "Zephyr" # Options: Aoede, Charon, Fenrir, Kore, Puck, Zephyr

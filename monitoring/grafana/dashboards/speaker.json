@@ -1259,8 +1259,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "increase(speaker_wake_word_detections_total[$__rate_interval])",
-          "legendFormat": "{{context}}",
+          "expr": "sum by (context, mode) (increase(speaker_wake_word_detections_total[$__rate_interval]))",
+          "legendFormat": "{{context}} / {{mode}}",
           "refId": "A",
           "interval": "5m"
         }
@@ -1349,8 +1349,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "increase(speaker_false_triggers_total[$__rate_interval])",
-          "legendFormat": "{{reason}}",
+          "expr": "sum by (reason, mode) (increase(speaker_false_triggers_total[$__rate_interval]))",
+          "legendFormat": "{{reason}} / {{mode}}",
           "refId": "A",
           "interval": "5m"
         }

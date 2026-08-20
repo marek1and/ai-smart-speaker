@@ -23,13 +23,16 @@ SYSTEM_MEMORY_USED = Gauge('speaker_system_memory_used_bytes', 'System used memo
 SYSTEM_MEMORY_TOTAL = Gauge('speaker_system_memory_total_bytes', 'System total memory in bytes')
 
 # Wake word
+# mode = which gate set fired: 'strict' (IDLE/quiet room) or 'relaxed' (our own
+# output playing — radio or TTS). Splitting detections and false triggers by mode is
+# what tells us whether the relaxed thresholds are paying for themselves.
 WAKE_DETECTIONS = Counter(
     'speaker_wake_word_detections_total', 'Wake word detections',
-    ['context'],  # idle, barge_in, re_listen
+    ['context', 'mode'],  # idle, barge_in, re_listen | strict, relaxed
 )
 FALSE_TRIGGERS = Counter(
     'speaker_false_triggers_total', 'False trigger events',
-    ['reason'],  # initial_silence, stt_rejection
+    ['reason', 'mode'],  # initial_silence, stt_rejection | strict, relaxed
 )
 
 # State machine

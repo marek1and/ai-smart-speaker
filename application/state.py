@@ -33,4 +33,8 @@ class WakeWordResult:
     # Peak frame RMS over the detector score window — calibration/diagnostic
     # data logged with every detection.
     window_rms: float = 0.0
+    # Which gate set produced this result: relaxed thresholds (our own output was
+    # playing) or the strict IDLE ones. Carried so metrics can attribute false
+    # triggers to the mode that let them through.
+    relaxed_mode: bool = False
     timestamp: float = field(default_factory=time.time)

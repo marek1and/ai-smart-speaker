@@ -167,6 +167,13 @@ class LiveConfig:
         4  # Close session after N completed turns (fresh context on next wake)
     )
     max_reconnect_attempts: int = 3
+    # How long open_session() waits for the session to come up before giving up.
+    # The background conversation task keeps retrying (max_reconnect_attempts with
+    # exponential backoff) for far longer than a user is willing to wait, so the
+    # caller stops waiting here and the task is cancelled — otherwise a session
+    # opened after the orchestrator already returned to IDLE would linger with no
+    # recorder attached and steal the next wake word ("Reusing existing session").
+    session_open_timeout: float = 10.0
 
     # Follow-up conversation
     followup_timeout: float = 5.0  # Seconds to wait for follow-up after AI response
@@ -188,6 +195,13 @@ class LiveConfig:
     # the turn watchdog — preventing Gemini from hanging the session by streaming
     # silence indefinitely instead of sending turn_complete.
     output_silence_rms_threshold: float = 0.002
+
+    # A short silent lead-in (and a gap around the middle of the utterance) is normal
+    # in Gemini's audio stream — measured on every second response, so warning about
+    # single silent chunks buried the real warnings. Warn only once the silence run
+    # is long enough to be suspicious, then repeat every N chunks while it lasts.
+    output_silence_warn_after: int = 5
+    output_silence_warn_every: int = 50
 
     # Max seconds to wait for the speaker queue to drain after turn_complete.
     # Guards against AudioOutput hanging (sounddevice underrun / device error).

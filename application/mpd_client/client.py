@@ -157,7 +157,7 @@ class MPDClientWrapper:
             try:
                 await asyncio.to_thread(self.client.close)
                 await asyncio.to_thread(self.client.disconnect)
-                logger.info("Disconnected from MPD server")
+                logger.debug("Disconnected from MPD server")
             except (MPDError, IOError) as e:
                 logger.error("Error disconnecting from MPD: %s", e)
             finally:
@@ -171,9 +171,13 @@ class MPDClientWrapper:
         Used to recover from BrokenPipeError / ConnectionResetError without
         waiting for the next caller to trigger a lazy reconnect.
         """
-        logger.info("MPD reconnecting after connection reset...")
         if error:
+            logger.info("MPD reconnecting after connection reset...")
             metrics.MPD_RECONNECTIONS.inc()
+        else:
+            # Routine hygiene (e.g. after stop()), not a failure — saying "connection
+            # reset" here sent past log reviews chasing an MPD problem that never was.
+            logger.debug("MPD reconnecting to flush the command socket...")
         await self._disconnect_unsafe()
         return await self._connect()
 

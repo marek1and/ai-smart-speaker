@@ -61,7 +61,6 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         self._client: Optional[genai.Client] = None
         self._session: Optional[AsyncSession] = None
         self._session_tasks: list[asyncio.Task] = []
-        self._conversation_task: Optional[asyncio.Task] = None
 
         # Output silence tracking: reset each turn via start_new_turn override below
         self._consecutive_silent_chunks: int = 0
@@ -70,6 +69,20 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         # receive task treat the subsequent connection close as a normal end of
         # session instead of an error (no error sound, no state reset).
         self._go_away_received: bool = False
+
+    def _silence_run_is_notable(self, run_length: int) -> bool:
+        """Is this silent-chunk run long enough to warrant a warning?
+
+        Warns once the run reaches output_silence_warn_after, then every
+        output_silence_warn_every chunks for as long as the silence continues.
+        """
+        warn_after = self.live_cfg.output_silence_warn_after
+        warn_every = self.live_cfg.output_silence_warn_every
+        if run_length < warn_after:
+            return False
+        if run_length == warn_after:
+            return True
+        return warn_every > 0 and (run_length - warn_after) % warn_every == 0
 
     @staticmethod
     def _pcm16_rms(data: bytes) -> float:
@@ -155,19 +168,12 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             self._run_conversation(), name="conversation"
         )
 
-        # Poll until the session is established (or give up after 10 s).
-        # A fixed sleep races against slow networks; polling is reliable.
-        deadline = asyncio.get_running_loop().time() + 10.0
-        while not self._session_active:
-            # Fast-fail: if the conversation task already died (bad API key,
-            # no network), don't make the user wait out the full deadline.
-            if self._conversation_task and self._conversation_task.done():
-                logger.warning("open_session: Gemini conversation task exited early")
-                break
-            if asyncio.get_running_loop().time() > deadline:
-                logger.warning("open_session: timed out waiting for Gemini session")
-                break
-            await asyncio.sleep(0.05)
+        if not await self._wait_for_session(
+            self.live_cfg.session_open_timeout, "Gemini"
+        ):
+            # Cancel the retry loop so it cannot open a session (or fire _on_error
+            # for a second error sound) after the caller has given up on us.
+            await self.close_session()
 
     async def close_session(self) -> None:
         """Close the active session by cancelling the conversation task.
@@ -414,16 +420,31 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
                                 if is_silent:
                                     self._consecutive_silent_chunks += 1
-                                    if self._consecutive_silent_chunks in (1, 5, 20, 50) or self._consecutive_silent_chunks % 100 == 0:
+                                    if self._silence_run_is_notable(
+                                        self._consecutive_silent_chunks
+                                    ):
                                         logger.warning(
                                             "Receiving SILENT audio from Gemini (chunk #%d, rms=%.5f, consecutive_silent=%d) — watchdog NOT reset",
                                             self._chunks_received,
                                             rms,
                                             self._consecutive_silent_chunks,
                                         )
+                                    else:
+                                        logger.debug(
+                                            "Silent chunk #%d (rms=%.5f, consecutive_silent=%d)",
+                                            self._chunks_received,
+                                            rms,
+                                            self._consecutive_silent_chunks,
+                                        )
                                 else:
                                     if self._consecutive_silent_chunks > 0:
-                                        logger.info(
+                                        log = (
+                                            logger.info
+                                            if self._consecutive_silent_chunks
+                                            >= self.live_cfg.output_silence_warn_after
+                                            else logger.debug
+                                        )
+                                        log(
                                             "Audio resumed after %d silent chunks (rms=%.5f)",
                                             self._consecutive_silent_chunks,
                                             rms,

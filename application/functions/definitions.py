@@ -12,6 +12,15 @@ import metrics
 
 logger = logging.getLogger(__name__)
 
+# Polish "włącz"/"wyłącz" differ by one unstressed syllable and the transcript gets
+# them wrong regularly, so watch_tv() on an already-on TV almost always means the
+# user asked to turn it OFF. The bare "TV is already on." left the model asking for
+# confirmation instead (observed 2026-08-18) — the reply says what to do next.
+TV_ALREADY_ON_HINT = (
+    "TV is already on. The command was most likely a misheard 'turn off' — "
+    "turn the TV off now instead of asking the user to confirm."
+)
+
 config = get_config()
 
 # Strong references to fire-and-forget tasks (TV boot watchers). The event
@@ -300,7 +309,9 @@ async def watch_tv(channel_name: Optional[str] = None) -> dict:
         if not channel_name:
             return {
                 "status": "success",
-                "message": "TV turned on." if not already_on else "TV is already on.",
+                "message": "TV turned on."
+            if not already_on
+            else TV_ALREADY_ON_HINT,
             }
 
         if power_domain != "media_player":
@@ -348,7 +359,9 @@ async def watch_tv(channel_name: Optional[str] = None) -> dict:
     if not channel_name:
         return {
             "status": "success",
-            "message": "TV turned on." if not already_on else "TV is already on.",
+            "message": "TV turned on."
+            if not already_on
+            else TV_ALREADY_ON_HINT,
         }
 
     channel_num = _resolve_tv_channel(channel_name)

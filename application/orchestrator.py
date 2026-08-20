@@ -51,6 +51,11 @@ logger = logging.getLogger(__name__)
 BARGE_IN_COOLDOWN: float = 0.5
 
 
+def _mode_label(relaxed: bool) -> str:
+    """Metric label for the wake-word gate set that produced a detection."""
+    return "relaxed" if relaxed else "strict"
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -196,6 +201,16 @@ class AudioOrchestrator:
     def state(self) -> SpeakerState:
         """Current state of the assistant."""
         return self._state
+
+    def _wake_mode_label(self) -> str:
+        """Gate set of the wake word that opened the current session.
+
+        Falls back to 'strict' when no detection is on record (session opened by
+        something other than a wake word), which matches the IDLE defaults.
+        """
+        return _mode_label(
+            self._last_wake_result.relaxed_mode if self._last_wake_result else False
+        )
 
     def _set_state(self, new_state: SpeakerState) -> None:
         """Transition to a new state with logging."""
@@ -688,6 +703,7 @@ class AudioOrchestrator:
             vad_score=vad_score,
             verifier_score=self._wake_detector.last_verifier_score,
             window_rms=self._wake_detector.last_window_rms,
+            relaxed_mode=relaxed_mode,
         )
 
     async def _handle_wake_word_result(self, result: WakeWordResult) -> None:
@@ -739,7 +755,9 @@ class AudioOrchestrator:
             if self._state == SpeakerState.LISTENING
             else "idle"
         )
-        metrics.WAKE_DETECTIONS.labels(context=_wake_context).inc()
+        metrics.WAKE_DETECTIONS.labels(
+            context=_wake_context, mode=_mode_label(result.relaxed_mode)
+        ).inc()
 
         await self._duck_radio_if_playing()
 
@@ -1010,7 +1028,9 @@ class AudioOrchestrator:
             activity_started = self._api_manager and self._api_manager.activity_started
             if not verified and not activity_started:
                 logger.info("STT verification failed — false trigger, aborting session")
-                metrics.FALSE_TRIGGERS.labels(reason="stt_rejection").inc()
+                metrics.FALSE_TRIGGERS.labels(
+                    reason="stt_rejection", mode=self._wake_mode_label()
+                ).inc()
                 await self._close_on_initial_silence()
                 return
 
@@ -1245,7 +1265,9 @@ class AudioOrchestrator:
         if self._api_manager:
             await self._api_manager.close_session()
         self._recorder.close_as_false_trigger()
-        metrics.FALSE_TRIGGERS.labels(reason="initial_silence").inc()
+        metrics.FALSE_TRIGGERS.labels(
+            reason="initial_silence", mode=self._wake_mode_label()
+        ).inc()
         metrics.SESSIONS_CLOSED.labels(reason="false_trigger").inc()
 
         self._reset_wake_detector(cooldown=True)
