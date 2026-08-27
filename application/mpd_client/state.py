@@ -59,9 +59,22 @@ class RadioStateManager:
     def get_current_key(self) -> Optional[str]:
         return self._current_key
 
-    def get_cached_url(self, key: str) -> Optional[str]:
+    def get_cached_url(self, key: str, max_age_s: Optional[float] = None) -> Optional[str]:
+        """Cached stream URL, or None when missing or older than max_age_s.
+
+        Entries without a resolved_at (written before the field existed) count
+        as stale so they get re-resolved once.
+        """
         entry = self._stations.get(key)
-        return entry.url if entry and entry.url else None
+        if not entry or not entry.url:
+            return None
+        if max_age_s is not None and time.time() - entry.resolved_at > max_age_s:
+            logger.info(
+                "Cached URL for '%s' is stale (%.1f h old) — re-resolving",
+                key, (time.time() - entry.resolved_at) / 3600,
+            )
+            return None
+        return entry.url
 
     def get_name_by_url(self, url: str) -> Optional[str]:
         for entry in self._stations.values():

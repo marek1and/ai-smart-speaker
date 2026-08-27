@@ -207,9 +207,21 @@ radio:
   # Country used as filter for RadioBrowser name search (fallback for unpinned stations)
   country: "Poland"
 
+  # A cached stream URL is re-resolved once it is older than this. Broadcasters
+  # move between CDNs and RadioBrowser is not always right about it, so a URL
+  # cached forever eventually points at a dead stream.
+  url_cache_ttl_hours: 168.0  # 7 days
+  # Budget for the reachability check of a freshly resolved URL. Only an explicit
+  # HTTP 4xx/5xx rejects a candidate; timeouts and odd Icecast dialects pass.
+  url_check_timeout: 5.0
+
   # Pinned stations: stable RadioBrowser UUIDs guarantee the correct station is
   # always resolved, even when stream URLs change. Resolved URLs are cached in
   # radio_state.json — subsequent plays require no RadioBrowser API call.
+  #
+  # Optional per-station `url:` hard-wires the stream and skips both the cache
+  # and RadioBrowser — the escape hatch for a station whose RadioBrowser entry
+  # is wrong (e.g. a URL that redirects to a 404 while still flagged as checked).
   #
   # Find UUIDs at https://www.radio-browser.info (station detail page).
   # Station names listed here are injected into the system prompt via {radio_stations}
@@ -221,6 +233,7 @@ radio:
     radio zet:
       uuid: "59e30dda-64bf-11ea-be63-52543be04c81"
       name: "Radio Zet"
+      # url: "http://example-cdn.net:8000/stream"  # optional: bypass RadioBrowser entirely
 
 tv:
   # Home Assistant entity used to power the TV on/off.

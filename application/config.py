@@ -256,8 +256,16 @@ class HomeAssistantConfig:
 
 @dataclass
 class StationPin:
-    uuid: str
+    """A station pinned in the config.
+
+    url — optional hard-wired stream URL. When set it wins over everything else
+    (RadioBrowser lookup and URL cache), which is the escape hatch for stations
+    whose entry in the RadioBrowser database is wrong or stale.
+    """
+
+    uuid: str = ""
     name: str = ""
+    url: str = ""
 
 
 @dataclass
@@ -265,6 +273,11 @@ class RadioConfig:
     """Internet radio configuration."""
 
     country: str = "Poland"
+    # Cached stream URLs go stale when a broadcaster switches CDN — re-resolve
+    # them once the cache entry is older than this.
+    url_cache_ttl_hours: float = 168.0  # 7 days
+    # Budget for the reachability check of a freshly resolved URL.
+    url_check_timeout: float = 5.0
     stations: dict = field(default_factory=dict)
 
 
