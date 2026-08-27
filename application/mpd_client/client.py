@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import re
 import numpy as np
 from typing import Callable, Optional, Dict, Any, List
 from mpd import MPDClient, MPDError, ConnectionError as MPDConnectionError
@@ -71,6 +72,9 @@ class MPDClientWrapper:
                 status = await self.get_status()
                 if status is None:
                     continue
+                error = status.get("error")
+                if error:
+                    await self._handle_stream_error(error)
                 state_str = "ON" if status.get("state") == "play" else "OFF"
                 if (
                     self._last_notified_state is not None
@@ -88,6 +92,42 @@ class MPDClientWrapper:
                 raise
             except Exception as e:
                 logger.error("MPD external-change watcher error: %s", e)
+
+    async def _handle_stream_error(self, error: str) -> None:
+        """Reacts to a stream failure that MPD reports in status.error.
+
+        MPD accepts any URL without complaint and reports the failure only here,
+        asynchronously — otherwise a dead stream is indistinguishable from a
+        successful start: the log says "Started playing station" while the room
+        stays silent. Timing varies (an HTTP 404 surfaces in ~0.5 s, a connect
+        timeout after ~10 s) and the failure looks the same regardless of which
+        path started playback, which is why this lives in the poller instead of
+        next to play(). The dead URL is dropped from the cache so the next
+        attempt re-resolves it rather than waiting out the cache TTL.
+        """
+        # MPD quotes the offending URL in the message, e.g.
+        # 'Failed to decode "http://host/stream"; got HTTP status 404'
+        match = re.search(r'"([^"]+)"', error)
+        url = match.group(1) if match else None
+        key = self._radio_state.get_key_by_url(url) if url else None
+        entry = self._radio_state.get_entry(key) if key else None
+        station = entry.name if entry else self._radio_state.get_current_name() or "unknown"
+
+        logger.error("Stream error from MPD (%s): %s", station, error)
+        metrics.RADIO_STREAM_ERRORS.labels(station=station).inc()
+        # Only drop a URL we actually have cached. A failure on some other URL
+        # (someone driving MPD by hand) is no reason to invalidate the current
+        # station's entry.
+        if key:
+            self._radio_state.forget_url(key)
+
+        # Clear it, or every poll would report the same failure again.
+        async with self._mpd_lock:
+            if self.is_connected:
+                try:
+                    await self._run_mpd_cmd(self.client.clearerror)
+                except (MPDError, IOError, OSError) as e:
+                    logger.warning("Could not clear MPD error state: %s", e)
 
     @property
     def radio_state(self) -> RadioStateManager:
@@ -157,7 +197,7 @@ class MPDClientWrapper:
             try:
                 await asyncio.to_thread(self.client.close)
                 await asyncio.to_thread(self.client.disconnect)
-                logger.info("Disconnected from MPD server")
+                logger.debug("Disconnected from MPD server")
             except (MPDError, IOError) as e:
                 logger.error("Error disconnecting from MPD: %s", e)
             finally:
@@ -171,9 +211,13 @@ class MPDClientWrapper:
         Used to recover from BrokenPipeError / ConnectionResetError without
         waiting for the next caller to trigger a lazy reconnect.
         """
-        logger.info("MPD reconnecting after connection reset...")
         if error:
+            logger.info("MPD reconnecting after connection reset...")
             metrics.MPD_RECONNECTIONS.inc()
+        else:
+            # Routine hygiene (e.g. after stop()), not a failure — saying "connection
+            # reset" here sent past log reviews chasing an MPD problem that never was.
+            logger.debug("MPD reconnecting to flush the command socket...")
         await self._disconnect_unsafe()
         return await self._connect()
 
@@ -231,6 +275,9 @@ class MPDClientWrapper:
             try:
                 await asyncio.to_thread(self.client.clear)
                 await asyncio.to_thread(self.client.add, url)
+                # MPD keeps the last error until it is cleared — wipe it now so
+                # the watcher can only attribute errors to THIS stream.
+                await asyncio.to_thread(self.client.clearerror)
                 await self._set_internal_volume_unsafe(0)
                 await asyncio.to_thread(self.client.play)
                 logger.info("Started playing station: %s", station_name or url)
@@ -244,6 +291,7 @@ class MPDClientWrapper:
                     try:
                         await asyncio.to_thread(self.client.clear)
                         await asyncio.to_thread(self.client.add, url)
+                        await asyncio.to_thread(self.client.clearerror)
                         await self._set_internal_volume_unsafe(0)
                         await asyncio.to_thread(self.client.play)
                         logger.info(
@@ -423,9 +471,10 @@ class MPDClientWrapper:
             logger.info(
                 "Restoring volume to %d%% (fade, playing)", self._restore_volume
             )
-            await self._fade_to(
-                self._restore_volume, self.config.volume_fade_in_seconds
-            )
+            # Fire-and-forget: callers (e.g. the orchestrator state machine in
+            # _finish_turn) must not block on the fade nor absorb its cancellation
+            # when a barge-in duck() kills it mid-flight.
+            self._start_fade(self._restore_volume, self.config.volume_fade_in_seconds)
         else:
             # Not playing — restore volume directly so hardware level is correct.
             logger.info(
@@ -439,28 +488,36 @@ class MPDClientWrapper:
         self._notify(volume=self._restore_volume)
         logger.debug("unduck() finished.")
 
-    async def _fade_to(self, target_volume: int, duration: float):
-        """Smoothly transitions the volume to a target level."""
-        logger.debug(
-            f"fade_to(target={target_volume}, duration={duration:.2f}) called."
-        )
+    def _start_fade(self, target_volume: int, duration: float) -> asyncio.Task:
+        """Start a background fade to target_volume, replacing any ongoing fade."""
         if self._fade_task and not self._fade_task.done():
             logger.debug("Cancelling previous fade task.")
             self._fade_task.cancel()
-            try:
-                await self._fade_task
-            except asyncio.CancelledError:
-                pass  # Expected
-
         self._fade_task = asyncio.create_task(
             self._fade_volume_async(target_volume, duration)
         )
+        return self._fade_task
+
+    async def _fade_to(self, target_volume: int, duration: float):
+        """Smoothly transitions the volume to a target level and waits for it.
+
+        A concurrent duck()/fade may cancel the fade task; that cancellation must
+        not propagate to the awaiting task (it once killed the orchestrator state
+        machine mid _finish_turn) — only re-raise when the caller itself is being
+        cancelled.
+        """
+        logger.debug(
+            f"fade_to(target={target_volume}, duration={duration:.2f}) called."
+        )
+        fade_task = self._start_fade(target_volume, duration)
         try:
-            await self._fade_task
+            await fade_task
         except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                fade_task.cancel()
+                raise
             logger.info("Fade task was cancelled.")
-            self._fade_task.cancel()
-            raise
 
     async def _fade_volume_async(self, target_volume: int, duration: float):
         """Asynchronous coroutine for volume fading."""

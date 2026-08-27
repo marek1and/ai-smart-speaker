@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -86,6 +87,11 @@ class SoundPlayer:
         
         # Currently playing stream (for potential cancellation)
         self._current_stream: Optional[sd.OutputStream] = None
+
+        # Monotonic timestamp when the most recent effect finishes playing.
+        # Consumers (VAD gating) compare against it to ignore our own sound
+        # residue picked up by the microphone.
+        self._busy_until: float = 0.0
         
         # Find output device
         self._device = self._find_device(self.config.output_device)
@@ -155,9 +161,10 @@ class SoundPlayer:
             return
         
         audio, sample_rate = self._sounds[event]
-        
-        logger.info("🔊 Playing sound: %s (sr=%d, len=%.2fs)", 
+
+        logger.info("🔊 Playing sound: %s (sr=%d, len=%.2fs)",
                     event.value, sample_rate, len(audio) / sample_rate)
+        self._busy_until = time.monotonic() + len(audio) / sample_rate
         
         if block:
             self._play_blocking(audio, sample_rate)
@@ -185,6 +192,11 @@ class SoundPlayer:
             except Exception as e:
                 logger.error("Error playing sound: %s", e)
     
+    @property
+    def busy_until(self) -> float:
+        """Monotonic time when the last started effect finishes playing."""
+        return self._busy_until
+
     def stop(self) -> None:
         """Stop any currently playing sound."""
         with self._lock:

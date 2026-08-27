@@ -23,13 +23,16 @@ SYSTEM_MEMORY_USED = Gauge('speaker_system_memory_used_bytes', 'System used memo
 SYSTEM_MEMORY_TOTAL = Gauge('speaker_system_memory_total_bytes', 'System total memory in bytes')
 
 # Wake word
+# mode = which gate set fired: 'strict' (IDLE/quiet room) or 'relaxed' (our own
+# output playing — radio or TTS). Splitting detections and false triggers by mode is
+# what tells us whether the relaxed thresholds are paying for themselves.
 WAKE_DETECTIONS = Counter(
     'speaker_wake_word_detections_total', 'Wake word detections',
-    ['context'],  # idle, barge_in, re_listen
+    ['context', 'mode'],  # idle, barge_in, re_listen | strict, relaxed
 )
 FALSE_TRIGGERS = Counter(
     'speaker_false_triggers_total', 'False trigger events',
-    ['reason'],  # initial_silence, stt_rejection
+    ['reason', 'mode'],  # initial_silence, stt_rejection | strict, relaxed
 )
 
 # State machine
@@ -40,6 +43,16 @@ STATE_TRANSITIONS = Counter(
 STATE_ACTIVE = Gauge(
     'speaker_state_active', 'Current FSM state (1 = active)',
     ['state'],
+)
+
+# AEC health: median mic/reference level ratio while our own audio plays
+# (reference = XVF3800 far-end channel). Lower = better echo cancellation;
+# a rising trend means AEC degradation (e.g. SYS_DELAY drift, gain changes).
+# Double-talk (user speaking over playback) inflates single frames — the
+# median over the rolling window keeps the trend robust.
+AEC_RESIDUAL_DB = Gauge(
+    'speaker_aec_residual_db',
+    'Median mic-to-reference level ratio during own playback (dB, lower = better AEC)',
 )
 
 # Sessions
@@ -82,6 +95,10 @@ RADIO_UNDUCKS = Counter('speaker_radio_unducks_total', 'Radio volume unduck even
 RADIO_PLAYING = Gauge('speaker_radio_playing', 'Radio playback state (1=playing, 0=stopped)')
 STATION_PLAY_COUNT = Gauge('speaker_station_play_count', 'Total play count per station (persisted across restarts)', ['station'])
 RADIO_VOLUME = Gauge('speaker_radio_volume_percent', 'Radio restore volume percentage')
+RADIO_STREAM_ERRORS = Counter(
+    'speaker_radio_stream_errors_total', 'Streams that failed to start (MPD reported an error)',
+    ['station'],
+)
 MPD_RECONNECTIONS = Counter('speaker_mpd_reconnections_total', 'MPD error-triggered reconnection events')
 
 # MQTT
@@ -104,7 +121,7 @@ OPENHAB_ITEM_SETS = Counter(
 # Home Assistant
 HA_REQUESTS = Counter(
     'speaker_ha_requests_total', 'Home Assistant REST API requests',
-    ['method', 'status'],  # method: get/set — status: ok/error
+    ['method', 'status'],  # method: get/set — status: ok/error/retry
 )
 HA_ENTITY_SETS = Counter(
     'speaker_ha_entity_sets_total', 'Home Assistant entity state changes',
@@ -145,10 +162,11 @@ def _pre_register_labels() -> None:
     """Touch all known label combos at 0 so Prometheus scrapes them before the first inc().
     Without this, increase() misses the first event (counter created and incremented
     in the same scrape interval, so Prometheus never sees the 0 → 1 transition)."""
-    for ctx in ('idle', 'barge_in', 're_listen'):
-        WAKE_DETECTIONS.labels(context=ctx)
-    for reason in ('initial_silence', 'stt_rejection'):
-        FALSE_TRIGGERS.labels(reason=reason)
+    for mode in ('strict', 'relaxed'):
+        for ctx in ('idle', 'barge_in', 're_listen'):
+            WAKE_DETECTIONS.labels(context=ctx, mode=mode)
+        for reason in ('initial_silence', 'stt_rejection'):
+            FALSE_TRIGGERS.labels(reason=reason, mode=mode)
     for reason in ('max_turns', 'inactivity', 'false_trigger'):
         SESSIONS_CLOSED.labels(reason=reason)
     for fn in ('play_internet_radio', 'stop_radio', 'set_playback_volume',
@@ -157,7 +175,7 @@ def _pre_register_labels() -> None:
                'set_ha_entities_state', 'get_openhab_items_state', 'set_openhab_items_state'):
         AI_TOOL_CALLS.labels(function=fn)
     for method in ('get', 'set'):
-        for status in ('ok', 'error'):
+        for status in ('ok', 'error', 'retry'):
             HA_REQUESTS.labels(method=method, status=status)
     for cmd in ('power_on', 'power_off', 'station', 'volume'):
         MQTT_COMMANDS.labels(command=cmd)

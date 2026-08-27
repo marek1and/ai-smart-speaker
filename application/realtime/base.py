@@ -7,6 +7,10 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+# How often open_session() checks whether the conversation task has established
+# the session. A fixed sleep races against slow networks; polling is reliable.
+_SESSION_POLL_INTERVAL = 0.05
+
 
 class BaseRealtimeManager(ABC):
     """
@@ -42,6 +46,7 @@ class BaseRealtimeManager(ABC):
         # State tracking
         self._running: bool = False
         self._session_active: bool = False
+        self._conversation_task: Optional[asyncio.Task] = None
         self._playback_interrupted: bool = False
         self._frames_sent: int = 0
         self._chunks_received: int = 0
@@ -105,6 +110,33 @@ class BaseRealtimeManager(ABC):
     async def send_activity_end(self) -> None:
         """Signal that user stopped speaking (manual VAD)."""
         ...
+
+    async def _wait_for_session(self, timeout: float, provider: str) -> bool:
+        """Wait for the conversation task to establish a session.
+
+        Returns True once the session is up, False if the task died early (bad API
+        key, no network) or the wait timed out. The caller MUST tear the task down
+        on False: it retries connecting for much longer than this wait, so a session
+        coming up afterwards would be invisible to the orchestrator — no recorder,
+        no SESSIONS_OPENED, and the next wake word would silently reuse it.
+        """
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not self._session_active:
+            if self._conversation_task and self._conversation_task.done():
+                logger.warning(
+                    "open_session: %s conversation task exited early", provider
+                )
+                return False
+            if asyncio.get_running_loop().time() > deadline:
+                logger.warning(
+                    "open_session: timed out waiting for %s session (%.1fs), "
+                    "abandoning the pending connection attempts",
+                    provider,
+                    timeout,
+                )
+                return False
+            await asyncio.sleep(_SESSION_POLL_INTERVAL)
+        return True
 
     # -------------------------------------------------------------------------
     # Common properties

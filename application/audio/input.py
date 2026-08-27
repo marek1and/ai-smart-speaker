@@ -145,26 +145,30 @@ class AudioInput:
         if not self._running:
             return
 
-        # Extract mono channel (indata is (frames, channels) float32 or int16)
-        # SoundDevice with dtype=np.int16 gives us int16 directly
+        # Pass the FULL frame downstream (indata is (frames, channels) int16).
+        # Consumers extract channel 0 (mic) themselves; channel 1 carries the
+        # XVF3800 far-end reference used by trigger clips and the AEC health
+        # metric — extracting mono here would silently discard it.
         if indata.ndim == 2 and indata.shape[1] > 1:
-            mono = indata[:, 0].copy()
+            frame = indata.copy()
+            mono = frame[:, 0]
         else:
-            mono = indata.flatten().copy()
+            frame = indata.flatten().copy()
+            mono = frame
 
         # Clipping detection - check if audio is near int16 limit
         self._check_clipping(mono)
 
         # Push to queue (non-blocking, drop if full)
         try:
-            self.output_queue.put_nowait(mono)
+            self.output_queue.put_nowait(frame)
         except queue.Full:
             # Drop oldest frame and try again
             self._dropped_frames += 1
             self._log_dropped_frame()
             try:
                 self.output_queue.get_nowait()
-                self.output_queue.put_nowait(mono)
+                self.output_queue.put_nowait(frame)
             except queue.Empty:
                 pass
 

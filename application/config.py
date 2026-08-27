@@ -82,12 +82,21 @@ class WakeWordConfig:
     # only 2-3 approved frames (measured), while the strict value is tuned to
     # kill ambient transients in IDLE and rejects those valid calls.
     relaxed_min_activation_frames: Optional[int] = None
-    # Fallback: skip the verifier entirely in relaxed mode (a verifier trained
-    # on clean audio rejects valid wake words over music residue); the stricter
-    # relaxed_bypass_threshold on the main model applies instead. Unused since
-    # the verifier was retrained on radio/TV positives (2026-07-08).
-    relaxed_bypass_verifier: bool = False
-    relaxed_bypass_threshold: float = 0.9
+    # Dump the detector input ring buffer to recordings/trigger_*.wav on every
+    # trigger. Session recordings start only at API session open (~0.7s after
+    # the trigger), so their preroll usually misses the audio that triggered —
+    # these clips are the ground truth for verifier retraining.
+    save_trigger_clips: bool = False
+    trigger_clip_seconds: float = 3.0
+
+    # Also dump NEAR-MISSES: frames whose model score reaches
+    # candidate_threshold but that never fire (below main threshold, rejected
+    # by the verifier, or too few consecutive frames) — e.g. another
+    # household member whose voice the model undershoots. Saved as
+    # recordings/candidate_*.wav from the same ring buffer; cooldown_seconds
+    # rate-limits both a hot streak and the tail of a real trigger.
+    save_candidate_clips: bool = False
+    candidate_threshold: float = 0.5
 
     # STT post-trigger verification (reduces false positives via faster-whisper)
     verify_with_stt: bool = False
@@ -114,6 +123,13 @@ class VADConfig:
     # Temporal smoothing (for HybridVAD)
     speech_frames_required: int = 3  # Consecutive speech frames to start
     silence_frames_required: int = 15  # Consecutive silence frames to end (~500ms)
+
+    # Ignore VAD verdicts until this long after our own sound effect finishes
+    # playing. On the XVF ASR path (no post-processor) the beep residue after
+    # linear AEC reads as speech: the 0.36s follow-up beep tripped Silero
+    # ~0.31s in, flipping FOLLOW_UP into LISTENING with nobody speaking — and
+    # that path has no initial-silence timeout, so the session hung (2026-07-13).
+    sound_guard_tail_seconds: float = 0.2
 
 
 @dataclass
@@ -151,6 +167,13 @@ class LiveConfig:
         4  # Close session after N completed turns (fresh context on next wake)
     )
     max_reconnect_attempts: int = 3
+    # How long open_session() waits for the session to come up before giving up.
+    # The background conversation task keeps retrying (max_reconnect_attempts with
+    # exponential backoff) for far longer than a user is willing to wait, so the
+    # caller stops waiting here and the task is cancelled — otherwise a session
+    # opened after the orchestrator already returned to IDLE would linger with no
+    # recorder attached and steal the next wake word ("Reusing existing session").
+    session_open_timeout: float = 10.0
 
     # Follow-up conversation
     followup_timeout: float = 5.0  # Seconds to wait for follow-up after AI response
@@ -172,6 +195,13 @@ class LiveConfig:
     # the turn watchdog — preventing Gemini from hanging the session by streaming
     # silence indefinitely instead of sending turn_complete.
     output_silence_rms_threshold: float = 0.002
+
+    # A short silent lead-in (and a gap around the middle of the utterance) is normal
+    # in Gemini's audio stream — measured on every second response, so warning about
+    # single silent chunks buried the real warnings. Warn only once the silence run
+    # is long enough to be suspicious, then repeat every N chunks while it lasts.
+    output_silence_warn_after: int = 5
+    output_silence_warn_every: int = 50
 
     # Max seconds to wait for the speaker queue to drain after turn_complete.
     # Guards against AudioOutput hanging (sounddevice underrun / device error).
@@ -226,8 +256,16 @@ class HomeAssistantConfig:
 
 @dataclass
 class StationPin:
-    uuid: str
+    """A station pinned in the config.
+
+    url — optional hard-wired stream URL. When set it wins over everything else
+    (RadioBrowser lookup and URL cache), which is the escape hatch for stations
+    whose entry in the RadioBrowser database is wrong or stale.
+    """
+
+    uuid: str = ""
     name: str = ""
+    url: str = ""
 
 
 @dataclass
@@ -235,6 +273,11 @@ class RadioConfig:
     """Internet radio configuration."""
 
     country: str = "Poland"
+    # Cached stream URLs go stale when a broadcaster switches CDN — re-resolve
+    # them once the cache entry is older than this.
+    url_cache_ttl_hours: float = 168.0  # 7 days
+    # Budget for the reachability check of a freshly resolved URL.
+    url_check_timeout: float = 5.0
     stations: dict = field(default_factory=dict)
 
 
@@ -266,7 +309,9 @@ class MPDConfig:
     port: int = 6600
     connection_timeout: int = 5
     # How often to poll MPD for state changes made outside this app
-    # (stream died, mpc, another MPD client) so MQTT/HA stay in sync.
+    # (stream died, mpc, another MPD client) so MQTT/HA stay in sync. The same
+    # poll picks up stream errors MPD reports asynchronously, so this also
+    # bounds how fast a dead stream is noticed.
     state_poll_interval: float = 2.0
     volume_fade_in_seconds: float = 2.0  # Duration of volume fade-in (resuming)
     volume_duck_percentage: int = 20  # Volume percentage during conversation
@@ -296,6 +341,14 @@ class MetricsConfig:
 
     enabled: bool = True
     port: int = 9090
+
+    # AEC health gauge (speaker_aec_residual_db) — computed only on frames
+    # where the far-end reference (right input channel, XVF3800 mux 5 0)
+    # carries signal above this RMS floor, i.e. our own audio is playing.
+    aec_ref_min_rms: float = 200.0
+    # Rolling window of qualifying frames for the median (32 ms each;
+    # 1000 ≈ 32 s of playback).
+    aec_window_frames: int = 1000
 
 
 def _dataclass_from(cls_, data: dict, section: str):

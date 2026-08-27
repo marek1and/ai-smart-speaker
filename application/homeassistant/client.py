@@ -1,3 +1,5 @@
+import time
+
 import requests
 from logging import getLogger
 
@@ -5,6 +7,17 @@ from config import HomeAssistantConfig
 import metrics
 
 logger = getLogger(__name__)
+
+# Connectivity drops to HA are rare (5 in 30 days) and short — a single packet
+# lost over WiFi is enough for a connect timeout to kill a whole voice command.
+# One retry after a short pause rescues that case; HTTP errors (4xx/5xx) are
+# NOT retried, they are not a transport problem.
+HTTP_ATTEMPTS = 2
+HTTP_RETRY_BACKOFF_S = 0.4
+_RETRYABLE_EXC = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
 
 
 class HomeAssistantClient:
@@ -16,15 +29,46 @@ class HomeAssistantClient:
             "Content-Type": "application/json",
         }
 
+    def _request(
+        self, http_method: str, url: str, metric_method: str, **kwargs
+    ) -> requests.Response:
+        """Sends a request to HA, retrying transport errors only.
+
+        Note: called from a worker thread (asyncio.to_thread), so time.sleep
+        does not block the event loop.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, HTTP_ATTEMPTS + 1):
+            try:
+                response = requests.request(
+                    http_method,
+                    url,
+                    headers=self.headers,
+                    timeout=self.timeout,
+                    **kwargs,
+                )
+                response.raise_for_status()
+                if attempt > 1:
+                    logger.info("HA %s %s — succeeded on attempt %d", http_method, url, attempt)
+                return response
+            except _RETRYABLE_EXC as e:
+                last_exc = e
+                if attempt < HTTP_ATTEMPTS:
+                    logger.warning(
+                        "HA %s %s — attempt %d/%d failed (%s), retrying",
+                        http_method, url, attempt, HTTP_ATTEMPTS, e,
+                    )
+                    metrics.HA_REQUESTS.labels(method=metric_method, status='retry').inc()
+                    time.sleep(HTTP_RETRY_BACKOFF_S)
+        assert last_exc is not None
+        raise last_exc
+
     def get_entity_state(self, entity_id: str) -> str | None:
         """Returns the state string of any HA entity."""
         try:
-            response = requests.get(
-                f"{self.base_url}/states/{entity_id}",
-                headers=self.headers,
-                timeout=self.timeout,
+            response = self._request(
+                "GET", f"{self.base_url}/states/{entity_id}", 'get'
             )
-            response.raise_for_status()
             metrics.HA_REQUESTS.labels(method='get', status='ok').inc()
             return response.json().get("state")
         except requests.exceptions.RequestException as e:
@@ -35,10 +79,7 @@ class HomeAssistantClient:
     def get_states(self, entity_ids: list[str]) -> dict[str, str]:
         """Returns {entity_id: state} for the given entities via a single HA API call."""
         try:
-            response = requests.get(
-                f"{self.base_url}/states", headers=self.headers, timeout=self.timeout
-            )
-            response.raise_for_status()
+            response = self._request("GET", f"{self.base_url}/states", 'get')
             metrics.HA_REQUESTS.labels(method='get', status='ok').inc()
         except requests.exceptions.RequestException as e:
             logger.error("Error listing entity states: %s", e)
@@ -55,13 +96,12 @@ class HomeAssistantClient:
         """Calls a HA service."""
         payload = {"entity_id": entity_id, **kwargs}
         try:
-            response = requests.post(
+            self._request(
+                "POST",
                 f"{self.base_url}/services/{domain}/{service}",
+                'set',
                 json=payload,
-                headers=self.headers,
-                timeout=self.timeout,
             )
-            response.raise_for_status()
             metrics.HA_REQUESTS.labels(method='set', status='ok').inc()
             return True
         except requests.exceptions.RequestException as e:

@@ -34,6 +34,9 @@ class WakeWordDetector:
             wake_cfg.window_seconds * audio_cfg.input_sample_rate / audio_cfg.input_chunk
         )
         self.score_window: Deque[float] = deque(maxlen=self.window_size)
+        # Peak frame RMS over the score window — calibration/diagnostic data
+        # reported with every detection (rms= in the trigger log line).
+        self._rms_window: Deque[float] = deque(maxlen=self.window_size)
         self._model_id = wake_cfg.model_id.replace(" ", "_")
         self._last_trigger_time: float = 0.0  # For cooldown
         # Counter for consecutive frames above threshold (false-positive suppression)
@@ -46,6 +49,11 @@ class WakeWordDetector:
     def last_verifier_score(self) -> Optional[float]:
         """Verifier probability from the most recent process() call, if any."""
         return self._last_verifier_score
+
+    @property
+    def last_window_rms(self) -> float:
+        """Peak frame RMS over the score window as of the last process() call."""
+        return max(self._rms_window) if self._rms_window else 0.0
 
     def _load_model(self) -> Model:
         """
@@ -118,23 +126,17 @@ class WakeWordDetector:
             relaxed_mode: True while THIS speaker produces output — radio
                 playing OR our own TTS during a response (barge-in). Voice
                 spoken over that output scores lower on every gate (post-AEC
-                residue + postfilter artefacts), so every relaxed_* config
-                knob that is set replaces its strict counterpart: verifier
-                threshold (relaxed_verifier_threshold, or full bypass via
-                relaxed_bypass_verifier with the stricter relaxed_bypass_threshold
-                on the main model), VAD gate (relaxed_vad_threshold; 0 = off,
-                Silero kept warm) and frame count (relaxed_min_activation_frames).
+                residue), so every relaxed_* config knob that is set replaces
+                its strict counterpart: verifier threshold
+                (relaxed_verifier_threshold), VAD gate (relaxed_vad_threshold;
+                0 = off, Silero kept warm) and frame count
+                (relaxed_min_activation_frames).
 
         Returns:
             Tuple of (current_score, max_window_score, vad_score, triggered)
         """
-        bypass_verifier = relaxed_mode and self.cfg.relaxed_bypass_verifier
         verifier_threshold = self.cfg.verifier_threshold
-        if (
-            relaxed_mode
-            and not bypass_verifier
-            and self.cfg.relaxed_verifier_threshold is not None
-        ):
+        if relaxed_mode and self.cfg.relaxed_verifier_threshold is not None:
             verifier_threshold = self.cfg.relaxed_verifier_threshold
 
         # Relax the internal VAD gate in relaxed mode: voice-over-output reads
@@ -165,13 +167,13 @@ class WakeWordDetector:
 
         self.score_window.append(score)
         max_score = max(self.score_window) if self.score_window else 0.0
+        self._rms_window.append(
+            float(np.sqrt(np.mean(mono.astype(np.float32) ** 2)))
+        )
 
         # Track consecutive frames where BOTH model and verifier (if loaded) approve.
         model_above = score >= self.cfg.threshold
-        if bypass_verifier and self._verifier is not None:
-            self._last_verifier_score = None
-            approved = score >= self.cfg.relaxed_bypass_threshold
-        elif model_above and self._verifier is not None:
+        if model_above and self._verifier is not None:
             n_features = self.model.model_inputs.get(self._prediction_key, 16)
             features = self.model.preprocessor.get_features(n_features)
             self._last_verifier_score = float(self._verifier.predict_proba(features)[0][-1])
@@ -224,6 +226,7 @@ class WakeWordDetector:
             self.model.vad.prediction_buffer.clear()
             self.model.vad.reset_states()
         self.score_window.clear()
+        self._rms_window.clear()
         self._consecutive_above_threshold = 0
 
     def set_cooldown(self) -> None:

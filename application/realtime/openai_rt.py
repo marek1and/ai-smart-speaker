@@ -16,6 +16,7 @@ from typing import Optional
 
 import numpy as np
 from scipy.signal import resample_poly
+from websockets.exceptions import ConnectionClosed
 
 import metrics
 from config import AppConfig
@@ -54,7 +55,6 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
         # WebSocket connection
         self._ws = None
-        self._conversation_task: Optional[asyncio.Task] = None
         self._session_tasks: list[asyncio.Task] = []
 
         # API key
@@ -99,18 +99,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             self._run_conversation(), name="openai_conversation"
         )
 
-        # Poll until the session is established (or give up after 10 s).
-        deadline = asyncio.get_running_loop().time() + 10.0
-        while not self._session_active:
-            # Fast-fail: if the conversation task already died (bad API key,
-            # no network), don't make the user wait out the full deadline.
-            if self._conversation_task and self._conversation_task.done():
-                logger.warning("open_session: OpenAI conversation task exited early")
-                break
-            if asyncio.get_running_loop().time() > deadline:
-                logger.warning("open_session: timed out waiting for OpenAI session")
-                break
-            await asyncio.sleep(0.05)
+        if not await self._wait_for_session(
+            self.live_cfg.session_open_timeout, "OpenAI"
+        ):
+            # Cancel the retry loop so it cannot open a session (or fire _on_error
+            # for a second error sound) after the caller has given up on us.
+            await self.close_session()
 
     async def close_session(self) -> None:
         """Close the active session by cancelling the conversation task."""
@@ -173,6 +167,11 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             self._activity_started = False
             self._waiting_for_turn_complete = True
             logger.info("Sent activity_end to OpenAI (commit + response.create)")
+        except ConnectionClosed as e:
+            # The session can be closed between the checks above and the send
+            # (e.g. initial-silence close racing local VAD) — normal shutdown,
+            # not a failure worth an ERROR in the log.
+            logger.debug("Session closed while sending activity_end: %s", e)
         except Exception as e:
             logger.error("Failed to send activity_end: %s", e)
 

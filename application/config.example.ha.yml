@@ -48,9 +48,17 @@ wake_word:
   # relaxed_verifier_threshold: 0.6   # verifier stays active, relaxed threshold
   # relaxed_vad_threshold: 0          # 0 = VAD gate off (Silero still fed, stays warm)
   # relaxed_min_activation_frames: 3  # voice-over-music sustains fewer approved frames
-  # Fallback: skip the verifier entirely; a stricter main-model threshold applies.
-  # relaxed_bypass_verifier: true
-  # relaxed_bypass_threshold: 0.9
+  # Dump the last trigger_clip_seconds of detector input to recordings/trigger_*.wav
+  # on every trigger — ground truth for wake word retraining (session recordings
+  # start at API session open and usually miss the triggering audio). With a
+  # stereo capture device the right channel (far-end reference) is included.
+  save_trigger_clips: true
+  trigger_clip_seconds: 3.0
+  # Also dump near-misses (score >= candidate_threshold but no trigger) to
+  # recordings/candidate_*.wav — voices the model undershoots live here;
+  # rate-limited by cooldown_seconds.
+  save_candidate_clips: true
+  candidate_threshold: 0.5
   # STT post-trigger verification via faster-whisper (reduces false positives).
   # Runs in parallel with session open — no added latency for valid triggers.
   # Requires: pip install faster-whisper
@@ -72,6 +80,10 @@ vad:
   # Temporal smoothing
   speech_frames_required: 3
   silence_frames_required: 15
+  # Ignore VAD verdicts until this long after our own sound effect stops
+  # playing — the beep residue after AEC reads as speech and can flip
+  # FOLLOW_UP into LISTENING with nobody speaking.
+  sound_guard_tail_seconds: 0.2
 
 live:
   # AI provider selection. Options: "gemini" or "openai"
@@ -101,6 +113,10 @@ live:
     For aggregate questions ("are all lights off?") or group commands ("turn off all lights in
     the living room"), call get_ha_entities_state/set_ha_entities_state ONCE with the full list of
     matching entity_id values instead of calling the single-entity tools in a loop.
+    Check the tool result before confirming an action. If `set_ha_entity_state` or
+    `set_ha_entities_state` returns a `status` of "error" or "partial", do NOT say the
+    command succeeded. Say briefly that it failed (e.g. "That didn't work — I can't reach
+    the system right now") and offer to retry. For "partial", name what could not be set.
 
     Here is the complete list of available rooms and devices with their entity_id values:
 
@@ -191,9 +207,21 @@ radio:
   # Country used as filter for RadioBrowser name search (fallback for unpinned stations)
   country: "Poland"
 
+  # A cached stream URL is re-resolved once it is older than this. Broadcasters
+  # move between CDNs and RadioBrowser is not always right about it, so a URL
+  # cached forever eventually points at a dead stream.
+  url_cache_ttl_hours: 168.0  # 7 days
+  # Budget for the reachability check of a freshly resolved URL. Only an explicit
+  # HTTP 4xx/5xx rejects a candidate; timeouts and odd Icecast dialects pass.
+  url_check_timeout: 5.0
+
   # Pinned stations: stable RadioBrowser UUIDs guarantee the correct station is
   # always resolved, even when stream URLs change. Resolved URLs are cached in
   # radio_state.json — subsequent plays require no RadioBrowser API call.
+  #
+  # Optional per-station `url:` hard-wires the stream and skips both the cache
+  # and RadioBrowser — the escape hatch for a station whose RadioBrowser entry
+  # is wrong (e.g. a URL that redirects to a 404 while still flagged as checked).
   #
   # Find UUIDs at https://www.radio-browser.info (station detail page).
   # Station names listed here are injected into the system prompt via {radio_stations}
@@ -205,6 +233,7 @@ radio:
     radio zet:
       uuid: "59e30dda-64bf-11ea-be63-52543be04c81"
       name: "Radio Zet"
+      # url: "http://example-cdn.net:8000/stream"  # optional: bypass RadioBrowser entirely
 
 tv:
   # Home Assistant entity used to power the TV on/off.

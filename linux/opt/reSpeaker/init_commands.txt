@@ -6,24 +6,20 @@
 #   /opt/reSpeaker/xvf_host SAVE_CONFIGURATION 1
 #
 # The udev rule no longer runs this automatically on device connect.
+#
+# 2026-07-13: outputs switched to the ASR path (category 7: post AEC+beamformer,
+# NO post-processor) after the A/B experiment — the PP path (6 3) both created
+# false positives (AGC pumping quiet transients to speech-like energy) and
+# chopped voice-over-radio (NLP). All PP_* tuning removed: nothing consumes the
+# PP output anymore. L = application input (ASR, auto-select beam),
+# R = far-end reference with system delay (AEC diagnostics; lets a stereo
+# recording correlate triggers with our own playback).
 
-AEC_ASROUTGAIN 4.0
-AUDIO_MGR_OP_L 6 3
-AUDIO_MGR_OP_R 6 3
+AUDIO_MGR_OP_L 7 3
+AUDIO_MGR_OP_R 5 0
 AEC_ASROUTONOFF 1
+AEC_ASROUTGAIN 4.0
 AEC_HPFONOFF 4
 AUDIO_MGR_REF_GAIN 8
 AUDIO_MGR_MIC_GAIN 90
 AUDIO_MGR_SYS_DELAY 12
-PP_AGCONOFF 1
-PP_AGCGAIN 2.0
-PP_AGCMAXGAIN 20.0
-PP_AGCDESIREDLEVEL 0.01
-PP_MIN_NN 0.15
-PP_MIN_NS 0.20
-PP_GAMMA_E 1.0
-PP_GAMMA_ENL 1.0
-PP_GAMMA_ETAIL 1.0
-PP_NLATTENONOFF 1
-PP_DTSENSITIVE 12
-PP_ECHOONOFF 1

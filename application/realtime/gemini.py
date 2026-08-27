@@ -26,6 +26,7 @@ from google.genai.types import (
     FunctionResponse,
     LiveServerMessage,
 )
+from websockets.exceptions import ConnectionClosed
 
 import metrics
 from config import AppConfig
@@ -61,10 +62,28 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         self._client: Optional[genai.Client] = None
         self._session: Optional[AsyncSession] = None
         self._session_tasks: list[asyncio.Task] = []
-        self._conversation_task: Optional[asyncio.Task] = None
 
         # Output silence tracking: reset each turn via start_new_turn override below
         self._consecutive_silent_chunks: int = 0
+
+        # Set when the server announces session termination (GoAway); lets the
+        # receive task treat the subsequent connection close as a normal end of
+        # session instead of an error (no error sound, no state reset).
+        self._go_away_received: bool = False
+
+    def _silence_run_is_notable(self, run_length: int) -> bool:
+        """Is this silent-chunk run long enough to warrant a warning?
+
+        Warns once the run reaches output_silence_warn_after, then every
+        output_silence_warn_every chunks for as long as the silence continues.
+        """
+        warn_after = self.live_cfg.output_silence_warn_after
+        warn_every = self.live_cfg.output_silence_warn_every
+        if run_length < warn_after:
+            return False
+        if run_length == warn_after:
+            return True
+        return warn_every > 0 and (run_length - warn_after) % warn_every == 0
 
     @staticmethod
     def _pcm16_rms(data: bytes) -> float:
@@ -150,19 +169,12 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             self._run_conversation(), name="conversation"
         )
 
-        # Poll until the session is established (or give up after 10 s).
-        # A fixed sleep races against slow networks; polling is reliable.
-        deadline = asyncio.get_running_loop().time() + 10.0
-        while not self._session_active:
-            # Fast-fail: if the conversation task already died (bad API key,
-            # no network), don't make the user wait out the full deadline.
-            if self._conversation_task and self._conversation_task.done():
-                logger.warning("open_session: Gemini conversation task exited early")
-                break
-            if asyncio.get_running_loop().time() > deadline:
-                logger.warning("open_session: timed out waiting for Gemini session")
-                break
-            await asyncio.sleep(0.05)
+        if not await self._wait_for_session(
+            self.live_cfg.session_open_timeout, "Gemini"
+        ):
+            # Cancel the retry loop so it cannot open a session (or fire _on_error
+            # for a second error sound) after the caller has given up on us.
+            await self.close_session()
 
     async def close_session(self) -> None:
         """Close the active session by cancelling the conversation task.
@@ -199,6 +211,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             await self._session.send_realtime_input(activity_start=ActivityStart())
             self._activity_started = True
             logger.info("Sent activity_start to API")
+        except ConnectionClosed as e:
+            # The session can be closed between the checks above and the send
+            # (e.g. initial-silence close racing local VAD) — normal shutdown,
+            # not a failure worth an ERROR in the log.
+            logger.debug("Session closed while sending activity_start: %s", e)
         except Exception as e:
             logger.error("Failed to send activity_start: %s", e)
 
@@ -220,6 +237,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             self._activity_started = False
             self._waiting_for_turn_complete = True
             logger.info("Sent activity_end to API")
+        except ConnectionClosed as e:
+            # The session can be closed between the checks above and the send
+            # (e.g. initial-silence close racing local VAD) — normal shutdown,
+            # not a failure worth an ERROR in the log.
+            logger.debug("Session closed while sending activity_end: %s", e)
         except Exception as e:
             logger.error("Failed to send activity_end: %s", e)
 
@@ -243,6 +265,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     ) as session:
                         self._session = session
                         self._session_active = True
+                        self._go_away_received = False
                         logger.info("Session opened successfully.")
 
                         send_task = asyncio.create_task(
@@ -335,6 +358,14 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                if self._go_away_received:
+                    logger.warning(
+                        "Session closed by server after GoAway — ending turn gracefully"
+                    )
+                    self._session_active = False
+                    if self._on_turn_complete:
+                        self._on_turn_complete()
+                    break
                 logger.error("Receive from API error: %s", e)
                 traceback.print_exc()
                 self._session_active = False
@@ -352,6 +383,17 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         indefinitely by transcription updates or empty heartbeats when Gemini has
         already finished speaking but hasn't sent turn_complete yet.
         """
+        if getattr(response, "go_away", None):
+            # Server announces imminent session termination (e.g. max session
+            # duration). Mark it so the coming connection close is handled as a
+            # graceful end of session, not an API error.
+            self._go_away_received = True
+            logger.warning(
+                "API sent GoAway (time_left=%s) — session will close soon",
+                response.go_away.time_left,
+            )
+            return
+
         if hasattr(response, "server_content") and response.server_content:
             sc = response.server_content
 
@@ -389,16 +431,31 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
                                 if is_silent:
                                     self._consecutive_silent_chunks += 1
-                                    if self._consecutive_silent_chunks in (1, 5, 20, 50) or self._consecutive_silent_chunks % 100 == 0:
+                                    if self._silence_run_is_notable(
+                                        self._consecutive_silent_chunks
+                                    ):
                                         logger.warning(
                                             "Receiving SILENT audio from Gemini (chunk #%d, rms=%.5f, consecutive_silent=%d) — watchdog NOT reset",
                                             self._chunks_received,
                                             rms,
                                             self._consecutive_silent_chunks,
                                         )
+                                    else:
+                                        logger.debug(
+                                            "Silent chunk #%d (rms=%.5f, consecutive_silent=%d)",
+                                            self._chunks_received,
+                                            rms,
+                                            self._consecutive_silent_chunks,
+                                        )
                                 else:
                                     if self._consecutive_silent_chunks > 0:
-                                        logger.info(
+                                        log = (
+                                            logger.info
+                                            if self._consecutive_silent_chunks
+                                            >= self.live_cfg.output_silence_warn_after
+                                            else logger.debug
+                                        )
+                                        log(
                                             "Audio resumed after %d silent chunks (rms=%.5f)",
                                             self._consecutive_silent_chunks,
                                             rms,

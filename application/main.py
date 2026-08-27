@@ -21,6 +21,11 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+# python-mpd2 logs every connect/disconnect at INFO ("Calling MPD connect(...)").
+# We reconnect after each stop() to flush the command socket, so that chatter shows up
+# as three lines per radio stop with nothing to say.
+logging.getLogger("mpd").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
