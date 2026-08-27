@@ -113,6 +113,10 @@ live:
     For aggregate questions ("are all lights off?") or group commands ("turn off all lights in
     the living room"), call get_ha_entities_state/set_ha_entities_state ONCE with the full list of
     matching entity_id values instead of calling the single-entity tools in a loop.
+    Check the tool result before confirming an action. If `set_ha_entity_state` or
+    `set_ha_entities_state` returns a `status` of "error" or "partial", do NOT say the
+    command succeeded. Say briefly that it failed (e.g. "That didn't work — I can't reach
+    the system right now") and offer to retry. For "partial", name what could not be set.
 
     Here is the complete list of available rooms and devices with their entity_id values:
 

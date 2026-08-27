@@ -500,20 +500,34 @@ async def set_ha_entity_state(
     entity_id: Optional[str] = None,
     state: Optional[str] = None,
     **kwargs,
-) -> bool:
-    """Sets the state of a Home Assistant entity via the appropriate service call."""
+) -> dict:
+    """Sets the state of a Home Assistant entity via the appropriate service call.
+
+    Returns a status dict, not a bare bool: the model used to get `{"result": "False"}`
+    and still confirm the action ("Turning off the TV") — an explicit status with a
+    message gives it an unambiguous signal that the operation failed.
+    """
     metrics.AI_TOOL_CALLS.labels(function="set_ha_entity_state").inc()
     if ha_client is None:
         logger.error("set_ha_entity_state called but Home Assistant is not configured")
-        return False
+        return {"status": "error", "message": _NO_SMARTHOME}
     if not entity_id:
         logger.warning(
             "set_ha_entity_state called without entity_id — ignoring. kwargs=%s", kwargs
         )
-        return False
+        return {"status": "error", "message": "No entity_id provided."}
     if kwargs:
         logger.debug("set_ha_entity_state: ignoring unexpected kwargs=%s", kwargs)
-    return await asyncio.to_thread(ha_client.set_entity_state, entity_id, state or "")
+    ok = await asyncio.to_thread(ha_client.set_entity_state, entity_id, state or "")
+    if ok:
+        return {"status": "success"}
+    return {
+        "status": "error",
+        "message": (
+            f"Home Assistant did not execute the command for {entity_id} "
+            "(no connectivity or unsupported state)."
+        ),
+    }
 
 
 @register_function(name="set_ha_entities_state")
@@ -538,4 +552,12 @@ async def set_ha_entities_state(
             for eid in entity_ids
         )
     )
-    return {"results": dict(zip(entity_ids, results))}
+    failed = [eid for eid, ok in zip(entity_ids, results) if not ok]
+    if not failed:
+        return {"status": "success", "results": dict(zip(entity_ids, results))}
+    return {
+        "status": "partial" if len(failed) < len(entity_ids) else "error",
+        "failed": failed,
+        "message": "Home Assistant did not execute the command for: " + ", ".join(failed),
+        "results": dict(zip(entity_ids, results)),
+    }
