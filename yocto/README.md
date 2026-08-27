@@ -72,9 +72,11 @@ On `/data`:
 - `/data/overlay-etc/` — writable `/etc` overlay (SSH host keys, NM WiFi profiles) — `overlayfs-etc` image feature
 - `/data/var/lib/{NetworkManager,bluetooth}` — bind-mounted onto `/var/lib/...`
 
-System journal: **RAM only** (`Storage=volatile`, 64 MB). For durable logs use
-the NFS share or uncomment the persistent variant in
-`recipes-core/aispeaker-system-config/files/10-journald-volatile.conf`.
+System journal: **persistent on `/data`** (`Storage=persistent`, capped at
+200 MB), bind-mounted from `/data/var/log/journal` before journald flushes. On
+Raspbian this was `volatile`, which cost the entire history on every reboot —
+here `/data` is written anyway, so the trade is worth it. See
+`recipes-core/aispeaker-log-shipping/`.
 
 ## What's in the image
 
@@ -256,6 +258,30 @@ Once on Yocto with the A/B layout of Phase 3, updates no longer need this dance
 — you flash the spare slot and switch. This tryboot installer is specifically
 the **one-time Raspbian → Yocto** migration tool.
 
+## Logs (`aispeaker-log-shipping`)
+
+Two layers, deliberately separate from the application:
+
+1. **Persistent journal on `/data`** — nothing is lost on reboot, not even the
+   last minutes before a crash.
+2. **`ship-speaker-logs.timer`** (every 5 min) copies new entries to the NFS
+   share, one file per day (`ai-speaker-RRRR-MM-DD.log`), retention 90 days.
+   The cursor lives on `/data`, not `/run`: with a persistent journal a cursor
+   lost on reboot would re-ship the whole history as duplicates. The cursor
+   only advances after a successful write, so a NAS outage costs nothing.
+
+Configure via `/etc/default/aispeaker-log-shipping` (`LOG_DEST`, `LOG_UNITS`,
+`LOG_RETENTION_DAYS`). `LOG_DEST` must sit **under the NFS mount point** from
+`local/nfs.env` — writing over NFS means the destination has to be inside the
+share the speaker mounts (on Raspbian the logs went to a separate QNAP volume
+over ssh with a forced command; that machinery is gone).
+
+**Why not log to NFS from inside the application:** a `FileHandler` writing to
+the share would block the audio event loop whenever the NAS stalls (up to the
+`soft` mount timeout), and it would miss exactly what matters most — tracebacks
+on a hard failure, OOM kills and systemd's own restart messages. The app keeps
+writing to stdout; where that ends up is an infrastructure decision.
+
 ## Recordings/logs on NFS (optional)
 
 `/data` stays mandatory regardless — it is the writable backbone (/etc overlay,
@@ -286,8 +312,7 @@ path never depends on the NAS; the NAS gets a copy when it's reachable.
 ## Roadmap
 
 - **Phase 1 (this)**: RO system image, app deployed to `/data` via rsync+venv.
-- **Phase 2**: recordings on NFS, logs shipped off-device (journald
-  `ForwardToSyslog` → remote syslog, or `systemd-journal-upload`); optionally
+- **Phase 2**: recordings on NFS (log shipping is done — see below); optionally
   bake the app + its Python deps into the image (wheel-based recipes).
 - **Phase 3**: A/B updates — second rootfs partition + RAUC/swupdate, image
   pulled from the NAS over the network. This gives "swap image on the NAS,

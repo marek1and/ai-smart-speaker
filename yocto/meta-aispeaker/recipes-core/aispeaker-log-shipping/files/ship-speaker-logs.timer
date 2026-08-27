@@ -1,0 +1,12 @@
+[Unit]
+Description=Ship speaker logs to the NAS every few minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+# catch up after the NAS (or the speaker) was down
+Persistent=true
+
+[Install]
+WantedBy=timers.target

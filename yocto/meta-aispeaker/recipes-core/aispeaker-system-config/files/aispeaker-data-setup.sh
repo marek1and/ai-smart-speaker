@@ -10,6 +10,7 @@ mkdir -p /data/mopidy
 mkdir -p /data/state
 mkdir -p /data/cache/mopidy
 mkdir -p /data/var/lib/NetworkManager
+mkdir -p /data/var/log/journal
 mkdir -p /data/var/lib/bluetooth
 
 # Mopidy merges a second config for secrets/extensions; make sure it exists so

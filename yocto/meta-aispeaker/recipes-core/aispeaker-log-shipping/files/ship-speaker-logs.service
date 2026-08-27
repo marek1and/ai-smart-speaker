@@ -1,0 +1,10 @@
+[Unit]
+Description=Ship ai-smart-speaker journal entries to the NAS
+After=network-online.target
+Documentation=man:journalctl(1)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ship-speaker-logs
+Nice=10
+IOSchedulingClass=idle

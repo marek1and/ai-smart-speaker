@@ -43,6 +43,7 @@ CORE_IMAGE_EXTRA_INSTALL = " \
     aispeaker-audio-config \
     aispeaker-mopidy \
     aispeaker-system-config \
+    aispeaker-log-shipping \
     aispeaker-app-runtime \
     aispeaker-users \
     aispeaker-wifi \

@@ -1,0 +1,14 @@
+# Where shipped logs land. This must sit UNDER the NFS mount point that
+# scripts/provision-data.sh generated from local/nfs.env (default
+# /mnt/qnap/aispeaker) — the share is an automount, so the first write mounts it.
+#
+# Note this differs from the Raspbian setup, where logs went to a separate QNAP
+# volume (/share/CACHEDEV3_DATA/logs/ai-speaker) over ssh. Writing over NFS means
+# the destination has to be inside the exported share the speaker mounts.
+LOG_DEST=/mnt/qnap/aispeaker/logs
+
+# Space-separated systemd units to ship. Add mopidy.service here if you want
+# its log on the NAS too.
+LOG_UNITS=ai-smart-speaker.service
+
+LOG_RETENTION_DAYS=90

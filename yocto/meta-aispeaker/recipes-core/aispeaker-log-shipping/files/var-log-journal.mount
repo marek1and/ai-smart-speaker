@@ -1,0 +1,18 @@
+[Unit]
+Description=Persistent journal on /data
+RequiresMountsFor=/data
+After=aispeaker-data-setup.service
+Requires=aispeaker-data-setup.service
+# journald picks up /var/log/journal when flushing from /run, so the bind mount
+# has to be in place before that happens
+Before=systemd-journal-flush.service
+
+[Mount]
+What=/data/var/log/journal
+Where=/var/log/journal
+Type=none
+Options=bind
+
+[Install]
+WantedBy=local-fs.target
+RequiredBy=systemd-journal-flush.service

@@ -1,4 +1,4 @@
-SUMMARY = "System configuration: journald in RAM, NM without WiFi powersave, /data layout"
+SUMMARY = "System configuration: persistent journald on /data, NM without WiFi powersave, /data layout"
 DESCRIPTION = "Configuration for a read-only rootfs with minimal SD card wear: \
 journal in RAM, NetworkManager/Bluetooth state bind-mounted from /data, \
 /data directory skeleton created at boot, optional generic NFS share for \
@@ -8,7 +8,7 @@ LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
 SRC_URI = " \
-    file://10-journald-volatile.conf \
+    file://10-journald-persistent.conf \
     file://10-aispeaker-nm.conf \
     file://10-aispeaker-sshd.conf \
     file://aispeaker-data-setup.sh \
@@ -31,7 +31,7 @@ SYSTEMD_AUTO_ENABLE = "enable"
 do_install() {
     # journal in RAM (no log writes to the SD card)
     install -d ${D}${sysconfdir}/systemd/journald.conf.d
-    install -m 0644 ${S}/10-journald-volatile.conf ${D}${sysconfdir}/systemd/journald.conf.d/
+    install -m 0644 ${S}/10-journald-persistent.conf ${D}${sysconfdir}/systemd/journald.conf.d/
 
     # WiFi without powersave, WiFi is the default uplink
     install -d ${D}${sysconfdir}/NetworkManager/conf.d
