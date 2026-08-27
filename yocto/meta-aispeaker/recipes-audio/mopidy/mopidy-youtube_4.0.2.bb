@@ -11,19 +11,13 @@ inherit pypi python_setuptools_build_meta
 
 RDEPENDS:${PN} += "mopidy python3-beautifulsoup4 python3-cachetools python3-pykka python3-requests python3-setuptools python3-ytmusicapi python3-yt-dlp"
 
-# walnascar ships setuptools 76 and the setuptools3 class does not pull
-# setuptools-scm; these packages need both at build time. Provide scm natively,
-# feed it the version (no git in the sdist), and relax the setuptools>=78 pin —
-# they build fine with 76 (pure-Python, declarative PEP 621 metadata).
+# The setuptools3 class does not pull setuptools-scm, which these packages need
+# at build time. Provide it natively and feed it the version — the sdist has no
+# git metadata to derive one from.
+#
+# wrynose ships setuptools 82, which satisfies the setuptools>=78 pin and
+# understands PEP 639 (SPDX license strings, license-files) natively, so the
+# pyproject.toml rewriting these recipes carried under walnascar/setuptools 76
+# is gone.
 DEPENDS += "python3-setuptools-scm-native"
 export SETUPTOOLS_SCM_PRETEND_VERSION = "${PV}"
-
-do_configure:append() {
-    if [ -f ${S}/pyproject.toml ]; then
-        sed -i -E \
-            -e 's/^license = "([^"]+)"/license = {text = "\1"}/' \
-            -e '/^license-files = /d' \
-            -e 's/"setuptools[ >=<!,0-9.]*"/"setuptools"/g' \
-            ${S}/pyproject.toml
-    fi
-}

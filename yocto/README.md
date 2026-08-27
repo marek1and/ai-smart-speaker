@@ -11,23 +11,35 @@ yocto/
 ├── kas/aispeaker.yml          # manifest: upstream layers + build configuration
 ├── meta-aispeaker/            # our layer (distro, image, recipes)
 │   ├── conf/distro/aispeaker.conf
-│   ├── wic/aispeaker.wks.in   # SD card partition layout
+│   ├── files/wic/aispeaker.wks.in   # SD card partition layout
 │   └── recipes-*/
 ├── kas.sh                     # kas-container wrapper (keeps clones+build under yocto/)
 ├── local/                     # SITE-SPECIFIC, git-ignored (keys, WiFi, NFS)
 ├── scripts/                   # SD card provisioning + in-place installer staging
 ├── build/                     # git-ignored: bitbake build dir (downloads, sstate, tmp)
-└── poky/ meta-openembedded/ meta-raspberrypi/   # git-ignored: kas-cloned upstream
+└── bitbake/ openembedded-core/ meta-yocto/ meta-openembedded/ meta-raspberrypi/
+                               # git-ignored: kas-cloned upstream
 ```
 
-Upstream layers (poky, meta-openembedded, meta-raspberrypi) are **not vendored**
-— they are fetched by [kas](https://kas.readthedocs.io) according to the
-manifest. Pin commits in `kas/aispeaker.yml` after the first successful build.
+Upstream layers are **not vendored** — they are fetched by
+[kas](https://kas.readthedocs.io) according to the manifest. Pin commits in
+`kas/aispeaker.yml` after the first successful build.
 
-Branch: **walnascar** (Yocto 5.2, Python 3.13). This is deliberate — Mopidy 4 /
-Mopidy-Spotify 5 require Python 3.13, which the LTS branch (scarthgap, 3.12)
-does not have. Trade-off: walnascar is **not LTS**, so plan a bump to a newer
-release when it goes EOL.
+Release: **wrynose** (Yocto 6.0, Python 3.14). Mopidy 4 / Mopidy-Spotify 5 need
+Python ≥3.13, which rules out the older LTS (scarthgap ships 3.12).
+
+**Upstream is no longer poky.** poky as a combined repository stopped being
+published — its last commit on any branch is from 2026-02 and it never received
+whinlatter or wrynose. The equivalent is assembled from four repositories, which
+is what the manifest tracks:
+
+| repo | branch | role |
+|---|---|---|
+| `bitbake` | 2.18 | the build tool (wrynose requires BB_MIN_VERSION 2.18.0); not a layer |
+| `openembedded-core` | wrynose | layer `meta` |
+| `meta-yocto` | wrynose | layer `meta-poky` — provides `conf/distro/poky.conf`, which our distro requires |
+| `meta-openembedded` | wrynose | meta-oe, meta-python, meta-networking, meta-multimedia, meta-filesystems |
+| `meta-raspberrypi` | wrynose | machine support |
 
 Audio/udev configs are **symlinks into `linux/`** in this repo — `linux/`
 stays the single source of truth; the layer only packages it.
@@ -43,7 +55,7 @@ Nothing personal (addresses, credentials, keys) is committed. Before building
 | `local/wifi.env` | `WIFI_SSID="..."` `WIFI_PSK="..."` | `provision-data.sh` (written to the SD card, not the image) |
 | `local/nfs.env` (optional) | `NFS_EXPORT` + `NFS_MOUNTPOINT` + `NFS_OPTIONS` | `provision-data.sh` (generates the NFS mount/automount units) |
 
-## SD card layout (wic/aispeaker.wks.in)
+## SD card layout (files/wic/aispeaker.wks.in)
 
 | Partition | Label | FS | Mount | Role |
 |---|---|---|---|---|
@@ -83,7 +95,7 @@ the NFS share or uncomment the persistent variant in
 - **Network**: NetworkManager, WiFi by default (profile written by
   `scripts/provision-data.sh`), **powersave disabled**, ethernet works when a
   cable is plugged in (DHCP); avahi (mDNS), sshd (key-only), NFS client
-- **Python 3.13** (walnascar) + venv + pip, `libstdc++`/`libgomp` (required by
+- **Python 3.14** (wrynose) + venv + pip, `libstdc++`/`libgomp` (required by
   manylinux wheels: onnxruntime, scipy, ctranslate2), portaudio, libsndfile
 - **GStreamer** (base/good/bad/ugly/libav) + pygobject — Mopidy's playback stack
 - **Appliance run model** (simpler than today's Raspbian user-session setup):
@@ -103,7 +115,7 @@ Host requirements: Docker + the `kas-container` wrapper
 (`curl -L .../siemens/kas/<tag>/kas-container`); ~60 GB disk, first build 1–3 h.
 
 Build through **`yocto/kas.sh`** — a thin wrapper that pins `KAS_WORK_DIR` to
-`yocto/` so the upstream layer clones (poky, meta-openembedded,
+`yocto/` so the upstream layer clones (openembedded-core, meta-openembedded,
 meta-raspberrypi) and the build dir land under `yocto/` instead of cluttering
 the repo root. The whole repo is still mounted in the container, so the
 recipes' symlinks into `linux/` resolve.
@@ -286,31 +298,38 @@ path never depends on the NAS; the NAS gets a copy when it's reachable.
 
 ## Build status & known iteration points
 
-**The full image builds green** on kas-container / walnascar: `bitbake
-aispeaker-image` → 7350 tasks, all succeeded → `aispeaker-image-*.wic.bz2`
-(~177 MB). The manifest confirms mopidy 4.0.1 + mopidy-mpd/spotify/youtube, the
-Python deps, pipewire, wireplumber, respeaker-xvf3800, networkmanager-wifi and
-gstreamer1.0-libav are in the image.
+**Status on wrynose (2026-08-27):** `bitbake -n aispeaker-image` resolves the
+full graph — **11122 tasks, no errors, no warnings**. A real build has not been
+run on this release yet; the last green *build* was on walnascar (7350 tasks →
+`aispeaker-image-*.wic.bz2`, ~177 MB) with mopidy 4.0.1 + mopidy-mpd/spotify/
+youtube, the Python deps, pipewire, wireplumber, respeaker-xvf3800,
+networkmanager-wifi and gstreamer1.0-libav in the image.
 
-Getting there needed these fixes (kept as notes — a Mopidy bump may re-surface
-the modern-Python-packaging ones):
+Moving walnascar → wrynose needed exactly two changes in this layer:
 
-- **walnascar's setuptools 76 predates PEP 639.** Packages with a setuptools
-  backend and a SPDX `license = "..."` / `license-files` (rich-rst, ytmusicapi,
-  mopidy*) are patched in `do_configure` (SPDX string → `{text=...}`, drop
-  license-files). hatchling/flit packages need no patch.
+- **`wic/` → `files/wic/`.** Newer oe-core refuses wks files outside `files/wic`
+  ("wic/wks files at … need to be moved to files/wic within the layer to be
+  found/used") — caught by the sanity checker, not at image time.
+- **setuptools workarounds dropped.** wrynose ships setuptools 82, which
+  understands PEP 639 natively, so the `do_configure` sed that rewrote
+  `license = "SPDX"` into `{text = …}` and dropped `license-files` is gone from
+  mopidy*, rich-rst and ytmusicapi. The `setuptools>=78` pin is now satisfied
+  for real instead of being relaxed.
+
+Earlier fixes that still apply (a Mopidy bump may re-surface the
+modern-Python-packaging ones):
+
 - **Missing build-system deps:** `python3-setuptools-scm-native` (mopidy*,
   ytmusicapi) + `SETUPTOOLS_SCM_PRETEND_VERSION=${PV}`, `python3-hatch-vcs-native`
-  (cyclopts). mopidy's `setuptools>=78` pin is relaxed by the same do_configure
-  sed (76 builds it fine).
-- **Package names:** `networkmanager-nmtui` does not exist in walnascar (removed);
-  WiFi needs the split **`networkmanager-wifi`** package (added — otherwise WiFi
-  silently doesn't work). pipewire's pulse server is the `pipewire-pulse`
+  (cyclopts).
+- **Package names:** `networkmanager-nmtui` does not exist (removed upstream);
+  WiFi needs the split **`networkmanager-wifi`** package — otherwise WiFi
+  silently doesn't work. pipewire's pulse server is the `pipewire-pulse`
   package, not a PACKAGECONFIG.
 - **Licenses/providers:** `LICENSE_FLAGS_ACCEPTED += "commercial"` (plugins-ugly),
   `PREFERRED_PROVIDER_ffmpeg = "ffmpeg"` (meta-raspberrypi ships a second one).
-- **PyPI recipes** use the underscore `PYPI_PACKAGE` form — walnascar's pypi
-  class builds the archive name from it and ignores `PYPI_ARCHIVE_NAME`.
+- **PyPI recipes** use the underscore `PYPI_PACKAGE` form — the pypi class builds
+  the archive name from it and ignores `PYPI_ARCHIVE_NAME`.
 
 Still to verify on real hardware / not covered by the build:
 

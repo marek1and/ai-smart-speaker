@@ -2,7 +2,7 @@
 # kas-container wrapper that keeps everything out of the repo root.
 #
 # By default kas-container uses the current directory as KAS_WORK_DIR, so it
-# clones the upstream layers (poky, meta-openembedded, meta-raspberrypi) and
+# clones the upstream layers (openembedded-core, bitbake, meta-*) and
 # creates the build dir right next to the project. This wrapper pins
 # KAS_WORK_DIR to yocto/ instead. The whole repo is still bind-mounted into the
 # container as /repo (kas mounts the git top-level), so the recipes' symlinks
