@@ -309,7 +309,9 @@ class MPDConfig:
     port: int = 6600
     connection_timeout: int = 5
     # How often to poll MPD for state changes made outside this app
-    # (stream died, mpc, another MPD client) so MQTT/HA stay in sync.
+    # (stream died, mpc, another MPD client) so MQTT/HA stay in sync. The same
+    # poll picks up stream errors MPD reports asynchronously, so this also
+    # bounds how fast a dead stream is noticed.
     state_poll_interval: float = 2.0
     volume_fade_in_seconds: float = 2.0  # Duration of volume fade-in (resuming)
     volume_duck_percentage: int = 20  # Volume percentage during conversation

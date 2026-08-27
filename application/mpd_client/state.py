@@ -76,6 +76,19 @@ class RadioStateManager:
             return None
         return entry.url
 
+    def forget_url(self, key: str) -> None:
+        """Drops a cached URL that turned out to be dead, keeping play counts.
+
+        The next lookup then goes back to RadioBrowser instead of serving the
+        same dead URL until the TTL expires.
+        """
+        entry = self._stations.get(key)
+        if entry and entry.url:
+            logger.info("Dropping dead cached URL for '%s': %s", key, entry.url)
+            entry.url = ""
+            entry.resolved_at = 0.0
+            self._save()
+
     def get_name_by_url(self, url: str) -> Optional[str]:
         for entry in self._stations.values():
             if entry.url == url:

@@ -95,6 +95,10 @@ RADIO_UNDUCKS = Counter('speaker_radio_unducks_total', 'Radio volume unduck even
 RADIO_PLAYING = Gauge('speaker_radio_playing', 'Radio playback state (1=playing, 0=stopped)')
 STATION_PLAY_COUNT = Gauge('speaker_station_play_count', 'Total play count per station (persisted across restarts)', ['station'])
 RADIO_VOLUME = Gauge('speaker_radio_volume_percent', 'Radio restore volume percentage')
+RADIO_STREAM_ERRORS = Counter(
+    'speaker_radio_stream_errors_total', 'Streams that failed to start (MPD reported an error)',
+    ['station'],
+)
 MPD_RECONNECTIONS = Counter('speaker_mpd_reconnections_total', 'MPD error-triggered reconnection events')
 
 # MQTT

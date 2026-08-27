@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import re
 import numpy as np
 from typing import Callable, Optional, Dict, Any, List
 from mpd import MPDClient, MPDError, ConnectionError as MPDConnectionError
@@ -71,6 +72,9 @@ class MPDClientWrapper:
                 status = await self.get_status()
                 if status is None:
                     continue
+                error = status.get("error")
+                if error:
+                    await self._handle_stream_error(error)
                 state_str = "ON" if status.get("state") == "play" else "OFF"
                 if (
                     self._last_notified_state is not None
@@ -88,6 +92,42 @@ class MPDClientWrapper:
                 raise
             except Exception as e:
                 logger.error("MPD external-change watcher error: %s", e)
+
+    async def _handle_stream_error(self, error: str) -> None:
+        """Reacts to a stream failure that MPD reports in status.error.
+
+        MPD accepts any URL without complaint and reports the failure only here,
+        asynchronously — otherwise a dead stream is indistinguishable from a
+        successful start: the log says "Started playing station" while the room
+        stays silent. Timing varies (an HTTP 404 surfaces in ~0.5 s, a connect
+        timeout after ~10 s) and the failure looks the same regardless of which
+        path started playback, which is why this lives in the poller instead of
+        next to play(). The dead URL is dropped from the cache so the next
+        attempt re-resolves it rather than waiting out the cache TTL.
+        """
+        # MPD quotes the offending URL in the message, e.g.
+        # 'Failed to decode "http://host/stream"; got HTTP status 404'
+        match = re.search(r'"([^"]+)"', error)
+        url = match.group(1) if match else None
+        key = self._radio_state.get_key_by_url(url) if url else None
+        entry = self._radio_state.get_entry(key) if key else None
+        station = entry.name if entry else self._radio_state.get_current_name() or "unknown"
+
+        logger.error("Stream error from MPD (%s): %s", station, error)
+        metrics.RADIO_STREAM_ERRORS.labels(station=station).inc()
+        # Only drop a URL we actually have cached. A failure on some other URL
+        # (someone driving MPD by hand) is no reason to invalidate the current
+        # station's entry.
+        if key:
+            self._radio_state.forget_url(key)
+
+        # Clear it, or every poll would report the same failure again.
+        async with self._mpd_lock:
+            if self.is_connected:
+                try:
+                    await self._run_mpd_cmd(self.client.clearerror)
+                except (MPDError, IOError, OSError) as e:
+                    logger.warning("Could not clear MPD error state: %s", e)
 
     @property
     def radio_state(self) -> RadioStateManager:
@@ -235,6 +275,9 @@ class MPDClientWrapper:
             try:
                 await asyncio.to_thread(self.client.clear)
                 await asyncio.to_thread(self.client.add, url)
+                # MPD keeps the last error until it is cleared — wipe it now so
+                # the watcher can only attribute errors to THIS stream.
+                await asyncio.to_thread(self.client.clearerror)
                 await self._set_internal_volume_unsafe(0)
                 await asyncio.to_thread(self.client.play)
                 logger.info("Started playing station: %s", station_name or url)
@@ -248,6 +291,7 @@ class MPDClientWrapper:
                     try:
                         await asyncio.to_thread(self.client.clear)
                         await asyncio.to_thread(self.client.add, url)
+                        await asyncio.to_thread(self.client.clearerror)
                         await self._set_internal_volume_unsafe(0)
                         await asyncio.to_thread(self.client.play)
                         logger.info(
