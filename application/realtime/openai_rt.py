@@ -16,6 +16,7 @@ from typing import Optional
 
 import numpy as np
 from scipy.signal import resample_poly
+from websockets.exceptions import ConnectionClosed
 
 import metrics
 from config import AppConfig
@@ -166,6 +167,11 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             self._activity_started = False
             self._waiting_for_turn_complete = True
             logger.info("Sent activity_end to OpenAI (commit + response.create)")
+        except ConnectionClosed as e:
+            # The session can be closed between the checks above and the send
+            # (e.g. initial-silence close racing local VAD) — normal shutdown,
+            # not a failure worth an ERROR in the log.
+            logger.debug("Session closed while sending activity_end: %s", e)
         except Exception as e:
             logger.error("Failed to send activity_end: %s", e)
 

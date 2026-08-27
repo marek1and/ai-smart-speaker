@@ -26,6 +26,7 @@ from google.genai.types import (
     FunctionResponse,
     LiveServerMessage,
 )
+from websockets.exceptions import ConnectionClosed
 
 import metrics
 from config import AppConfig
@@ -210,6 +211,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             await self._session.send_realtime_input(activity_start=ActivityStart())
             self._activity_started = True
             logger.info("Sent activity_start to API")
+        except ConnectionClosed as e:
+            # The session can be closed between the checks above and the send
+            # (e.g. initial-silence close racing local VAD) — normal shutdown,
+            # not a failure worth an ERROR in the log.
+            logger.debug("Session closed while sending activity_start: %s", e)
         except Exception as e:
             logger.error("Failed to send activity_start: %s", e)
 
@@ -231,6 +237,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             self._activity_started = False
             self._waiting_for_turn_complete = True
             logger.info("Sent activity_end to API")
+        except ConnectionClosed as e:
+            # The session can be closed between the checks above and the send
+            # (e.g. initial-silence close racing local VAD) — normal shutdown,
+            # not a failure worth an ERROR in the log.
+            logger.debug("Session closed while sending activity_end: %s", e)
         except Exception as e:
             logger.error("Failed to send activity_end: %s", e)
 
