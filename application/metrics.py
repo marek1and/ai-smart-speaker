@@ -117,7 +117,7 @@ OPENHAB_ITEM_SETS = Counter(
 # Home Assistant
 HA_REQUESTS = Counter(
     'speaker_ha_requests_total', 'Home Assistant REST API requests',
-    ['method', 'status'],  # method: get/set — status: ok/error
+    ['method', 'status'],  # method: get/set — status: ok/error/retry
 )
 HA_ENTITY_SETS = Counter(
     'speaker_ha_entity_sets_total', 'Home Assistant entity state changes',
@@ -171,7 +171,7 @@ def _pre_register_labels() -> None:
                'set_ha_entities_state', 'get_openhab_items_state', 'set_openhab_items_state'):
         AI_TOOL_CALLS.labels(function=fn)
     for method in ('get', 'set'):
-        for status in ('ok', 'error'):
+        for status in ('ok', 'error', 'retry'):
             HA_REQUESTS.labels(method=method, status=status)
     for cmd in ('power_on', 'power_off', 'station', 'volume'):
         MQTT_COMMANDS.labels(command=cmd)
