@@ -11,6 +11,10 @@ import metrics
 
 logger = logging.getLogger(__name__)
 
+# mopidy-mpd fakes a single audio output called "Mute" whose "enabled" state is
+# the mixer's mute flag — see _ensure_outputs_enabled_unsafe.
+_MOPIDY_MUTE_OUTPUT = "Mute"
+
 
 class MPDClientWrapper:
     """Single shared instance is created by AudioOrchestrator and distributed
@@ -239,12 +243,33 @@ class MPDClientWrapper:
             return False
 
     async def _ensure_outputs_enabled_unsafe(self):
-        """Checks and enables any disabled MPD outputs. Must be called within a lock."""
+        """Makes sure audio can actually leave the server. Must be called within a lock.
+
+        On MPD this means enabling any disabled output. Mopidy has no real outputs
+        and reuses the command for its mixer instead, with INVERTED meaning — from
+        mopidy_mpd/protocol/audio_output.py:
+
+            outputs   -> [("outputid", 0), ("outputname", "Mute"),
+                          ("outputenabled", 1 if muted else 0)]
+            enableoutput 0 -> core.mixer.set_mute(True)
+
+        So "enabling" that output mutes the server. Taken literally, this method
+        silenced every playback on Mopidy while the logs cheerfully reported
+        "Enabling MPD output: Mute".
+        """
         try:
             outputs = await asyncio.to_thread(self.client.outputs)
             for output in outputs:
-                if output.get("outputenabled") == "0":
-                    logger.info(f"Enabling MPD output: {output.get('outputname')}")
+                name = output.get("outputname")
+                enabled = output.get("outputenabled") == "1"
+                if name == _MOPIDY_MUTE_OUTPUT:
+                    if enabled:
+                        logger.info("Unmuting Mopidy (its 'Mute' output is on)")
+                        await asyncio.to_thread(
+                            self.client.disableoutput, output.get("outputid")
+                        )
+                elif not enabled:
+                    logger.info("Enabling MPD output: %s", name)
                     await asyncio.to_thread(
                         self.client.enableoutput, output.get("outputid")
                     )
