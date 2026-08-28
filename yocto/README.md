@@ -179,9 +179,24 @@ add `sudo` to the image and a wheel entry for `speaker` instead.
 
 Mopidy replaces MPD to open the door to **Spotify and YouTube Music** while
 staying a drop-in for the application. `Mopidy-MPD` exposes the MPD protocol on
-`127.0.0.1:6600`, and the app only uses `clear/add/play/status/setvol/stop/
+`127.0.0.1:6600`, and the app uses `clear/add/play/status/setvol/stop/
 outputs/enableoutput/currentsong` — all covered — so `python-mpd2` in the app
 is unchanged. Internet radio keeps working via `Mopidy-Stream`.
+
+**Two protocol gaps the app already handles** (fixed before the migration, so
+the same code runs on both servers):
+
+- `clearerror` raises `MpdNotImplementedError` in mopidy-mpd. The app calls it
+  before every `play` to make MPD's sticky error attributable to the current
+  stream; on Mopidy the call is tolerated and ignored. Left unhandled it would
+  abort `play_station` and the radio would never start.
+- **`status` never contains `error`** in mopidy-mpd — the field is documented
+  but never filled. Dead-stream detection therefore has a second signal:
+  playback that stops on its own within `stream_start_grace` seconds of the
+  start (config, default 15) and without the app asking for it counts as a
+  failed stream. A stop after that window is treated as a person pressing stop.
+  Whichever detector fires first wins; a failure is reported once per playback
+  attempt.
 
 Audio path: Mopidy → GStreamer → `pulsesink` → `pipewire-pulse` → PipeWire →
 XVF3800 (the same sink MPD used via PulseAudio today).

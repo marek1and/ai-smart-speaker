@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import re
+import time
 import numpy as np
 from typing import Callable, Optional, Dict, Any, List
 from mpd import MPDClient, MPDError, ConnectionError as MPDConnectionError
@@ -21,6 +22,16 @@ class MPDClientWrapper:
         self.client.timeout = config.connection_timeout
         self.is_connected = False
         self._fade_task: Optional[asyncio.Task] = None
+
+        # Stream-failure detection. MPD reports a dead stream in status.error,
+        # but Mopidy (mopidy-mpd) never sets that field, so a second signal is
+        # needed: playback that stops on its own shortly after we started it.
+        self._playback_started_at: Optional[float] = None
+        self._expecting_stop = False
+        # One failure per playback attempt: MPD often flips to "stop" seconds
+        # before it fills in status.error, so both detectors can see the same
+        # death and would otherwise report it twice.
+        self._stream_failure_reported = False
         self._mpd_lock = asyncio.Lock()
 
         # Volume state
@@ -80,6 +91,8 @@ class MPDClientWrapper:
                     self._last_notified_state is not None
                     and state_str != self._last_notified_state
                 ):
+                    if state_str == "OFF" and not error:
+                        self._report_silent_stop()
                     logger.info(
                         "External MPD state change detected: %s -> %s",
                         self._last_notified_state, state_str,
@@ -92,6 +105,52 @@ class MPDClientWrapper:
                 raise
             except Exception as e:
                 logger.error("MPD external-change watcher error: %s", e)
+
+    async def _clear_error_unsafe(self) -> None:
+        """Clears MPD's sticky error, tolerating servers that lack the command.
+
+        MPD keeps the last error until cleared, so wiping it before play() is
+        what lets the watcher attribute an error to THIS stream. mopidy-mpd
+        answers `clearerror` with MpdNotImplementedError — harmless there,
+        because Mopidy never sets status.error in the first place.
+        """
+        try:
+            await asyncio.to_thread(self.client.clearerror)
+        except (MPDError, IOError, OSError) as e:
+            logger.debug("clearerror not available (%s) — continuing", e)
+
+    def _report_silent_stop(self) -> None:
+        """Flags playback that died on its own, without MPD reporting an error.
+
+        Mopidy (mopidy-mpd) never sets status.error, so on that backend a dead
+        stream shows up only as playback quietly reverting to "stop" — which
+        looks exactly like someone pressing stop. The discriminator is timing:
+        a stream that fails does so within seconds of the start, while a manual
+        stop comes after listening. Anything past the grace window is treated as
+        a legitimate stop and left alone.
+        """
+        if (
+            self._expecting_stop
+            or self._playback_started_at is None
+            or self._stream_failure_reported
+        ):
+            return
+        played_for = time.monotonic() - self._playback_started_at
+        if played_for > self.config.stream_start_grace:
+            return
+
+        key = self._radio_state.get_current_key()
+        entry = self._radio_state.get_entry(key) if key else None
+        station = entry.name if entry else "unknown"
+        logger.error(
+            "Playback stopped %.1fs after starting %s and MPD reported no error "
+            "— treating the stream as dead", played_for, station,
+        )
+        metrics.RADIO_STREAM_ERRORS.labels(station=station).inc()
+        if key:
+            self._radio_state.forget_url(key)
+        self._stream_failure_reported = True
+        self._playback_started_at = None
 
     async def _handle_stream_error(self, error: str) -> None:
         """Reacts to a stream failure that MPD reports in status.error.
@@ -113,13 +172,20 @@ class MPDClientWrapper:
         entry = self._radio_state.get_entry(key) if key else None
         station = entry.name if entry else self._radio_state.get_current_name() or "unknown"
 
-        logger.error("Stream error from MPD (%s): %s", station, error)
-        metrics.RADIO_STREAM_ERRORS.labels(station=station).inc()
-        # Only drop a URL we actually have cached. A failure on some other URL
-        # (someone driving MPD by hand) is no reason to invalidate the current
-        # station's entry.
-        if key:
-            self._radio_state.forget_url(key)
+        if self._stream_failure_reported:
+            # The silent-stop path already accounted for this death; MPD just
+            # took a few more seconds to name it. Still clear the error below.
+            logger.debug("MPD named an already-reported failure: %s", error)
+        else:
+            logger.error("Stream error from MPD (%s): %s", station, error)
+            metrics.RADIO_STREAM_ERRORS.labels(station=station).inc()
+            # Only drop a URL we actually have cached. A failure on some other
+            # URL (someone driving MPD by hand) is no reason to invalidate the
+            # current station's entry.
+            if key:
+                self._radio_state.forget_url(key)
+            self._stream_failure_reported = True
+            self._playback_started_at = None
 
         # Clear it, or every poll would report the same failure again.
         async with self._mpd_lock:
@@ -275,9 +341,7 @@ class MPDClientWrapper:
             try:
                 await asyncio.to_thread(self.client.clear)
                 await asyncio.to_thread(self.client.add, url)
-                # MPD keeps the last error until it is cleared — wipe it now so
-                # the watcher can only attribute errors to THIS stream.
-                await asyncio.to_thread(self.client.clearerror)
+                await self._clear_error_unsafe()
                 await self._set_internal_volume_unsafe(0)
                 await asyncio.to_thread(self.client.play)
                 logger.info("Started playing station: %s", station_name or url)
@@ -291,7 +355,7 @@ class MPDClientWrapper:
                     try:
                         await asyncio.to_thread(self.client.clear)
                         await asyncio.to_thread(self.client.add, url)
-                        await asyncio.to_thread(self.client.clearerror)
+                        await self._clear_error_unsafe()
                         await self._set_internal_volume_unsafe(0)
                         await asyncio.to_thread(self.client.play)
                         logger.info(
@@ -311,6 +375,10 @@ class MPDClientWrapper:
                 logger.error("Error playing station: %s", e)
                 await self._disconnect_unsafe()
                 return
+
+        self._playback_started_at = time.monotonic()
+        self._expecting_stop = False
+        self._stream_failure_reported = False
 
         effective_key = (
             key
@@ -614,9 +682,11 @@ class MPDClientWrapper:
             if not await self._connect():
                 return
             try:
+                self._expecting_stop = True
                 await self._run_mpd_cmd(self.client.stop)
                 logger.info("Stopped MPD playback.")
                 self._is_playing = False
+                self._playback_started_at = None
                 # Reconnect to flush any unsolicited MPD notifications (e.g. state-change
                 # events) that land in the socket buffer after stop and would corrupt the
                 # protocol state for the next command.
@@ -725,6 +795,9 @@ class MPDClientWrapper:
                 await asyncio.to_thread(self.client.play)
                 logger.info("Playback started.")
                 self._is_playing = True
+                self._playback_started_at = time.monotonic()
+                self._expecting_stop = False
+                self._stream_failure_reported = False
             except (MPDError, IOError, MPDConnectionError) as e:
                 logger.error("Error starting playback: %s", e)
                 await self._disconnect_unsafe()
