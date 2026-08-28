@@ -14,15 +14,23 @@ models/
 *.bak
 *.bak_*
 *.orig
-# yocto: build dir (holds downloads + sstate-cache) and kas-cloned upstream layers
+# yocto: build dir (holds downloads + sstate-cache) and kas-cloned upstream
+# repos. poky is gone since the move to wrynose — bitbake, openembedded-core
+# and meta-yocto replaced it; the entry stays so stale clones are ignored too.
 yocto/build/
 yocto/local/
+yocto/bitbake/
+yocto/openembedded-core/
+yocto/meta-yocto/
 yocto/poky/
 yocto/meta-openembedded/
 yocto/meta-raspberrypi/
 # safety net: a plain `kas-container build` (without yocto/kas.sh) drops these
 # at the repo root — always prefer the wrapper, but never let them reach git
 /build/
+/bitbake/
+/openembedded-core/
+/meta-yocto/
 /poky/
 /meta-openembedded/
 /meta-raspberrypi/
