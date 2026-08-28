@@ -19,7 +19,8 @@ SRC_URI = " \
 # gst-plugins-rs 0.13.x is the series matching the plugin version above; pin an
 # exact SRCREV after picking a release tag.
 SRCREV = "${AUTOREV}"
-S = "${UNPACKDIR}/git"
+# S deliberately unset — bitbake.conf derives it from the git checkout
+# (destsuffix=git above); assigning it is an error in current oe-core.
 
 inherit cargo pkgconfig
 

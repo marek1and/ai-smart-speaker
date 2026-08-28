@@ -17,9 +17,11 @@ SRC_URI = " \
 # master @ 2026-07 (repo has no release tags)
 SRCREV = "9bb8533342b8c00bcdee228e97ad0ae6cd6894fc"
 
-PV = "1.0+git${SRCPV}"
+# SRCPV is an empty stub since scarthgap; bitbake appends the revision itself.
+PV = "1.0+git"
 
-S = "${UNPACKDIR}/git"
+# S is not set here on purpose: bitbake.conf points it at the unpacked git
+# checkout, and assigning it again is an error in current oe-core.
 XVF_DIR = "${S}/host_control/rpi_64bit"
 
 # prebuilt aarch64 binaries: no stripping, skip ldflags/rdeps QA
