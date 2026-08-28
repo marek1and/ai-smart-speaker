@@ -70,7 +70,7 @@ On `/data`:
 - `/data/mopidy/mopidy.conf` — site-specific Mopidy overrides (Spotify/YouTube credentials) — never in git
 - `/data/cache` — pip / huggingface / Mopidy caches (`XDG_CACHE_HOME`)
 - `/data/overlay-etc/` — writable `/etc` overlay (SSH host keys, NM WiFi profiles) — `overlayfs-etc` image feature
-- `/data/var/lib/{NetworkManager,bluetooth}` — bind-mounted onto `/var/lib/...`
+- `/data/var/lib/NetworkManager` — bind-mounted onto `/var/lib/...`
 
 System journal: **persistent on `/data`** (`Storage=persistent`, capped at
 200 MB), bind-mounted from `/data/var/log/journal` before journald flushes. On
@@ -300,20 +300,21 @@ writing to stdout; where that ends up is an infrastructure decision.
 ## Recordings/logs on NFS (optional)
 
 `/data` stays mandatory regardless — it is the writable backbone (/etc overlay,
-venvs, NM/BT state, caches, Mopidy state). NFS only **offloads** bulky/shareable
+venvs, NM state, caches, Mopidy state). NFS only **offloads** bulky/shareable
 data (recordings) to the NAS; it can't replace `/data` (network isn't up in
 early boot, and a RO rootfs needs a local writable partition to come up at all).
 
 1. Export a share on the NAS (NFSv4) for the speaker's IP.
 2. Set in `local/nfs.env`: `NFS_EXPORT` (server:export), `NFS_MOUNTPOINT`
-   (default `/mnt/qnap/aispeaker`), `NFS_OPTIONS`. `provision-data.sh` then
+   (default `/mnt/nas` — generic on purpose: the speaker should not care which
+   box exports the share), `NFS_OPTIONS`. `provision-data.sh` then
    **generates** the `<mountpoint>.mount` + `.automount` units (name derived via
    `systemd-escape`) into the `/etc` overlay and enables the automount. Nothing
    NFS is baked into the image.
    > QNAP with NFSv4 uses a pseudo-root, so the export path is `/<share>`
    > (e.g. `192.168.1.15:/aispeaker`), not the `/share/...` v3 path.
 3. Point the recordings dir at the share, e.g.
-   `ln -sfn /mnt/qnap/aispeaker /data/opt/ai-smart-speaker/recordings`.
+   `ln -sfn /mnt/nas/recordings /data/opt/ai-smart-speaker/recordings`.
 
 `soft,timeo=50` + automount = an absent NAS never hangs boot or the app (the
 mount is attempted lazily on first access and fails fast).

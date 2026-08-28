@@ -12,7 +12,7 @@ set -u
 CONF=/etc/default/aispeaker-log-shipping
 [ -f "$CONF" ] && . "$CONF"
 
-DEST="${LOG_DEST:-/mnt/qnap/aispeaker/logs}"
+DEST="${LOG_DEST:-/mnt/nas/logs}"
 UNITS="${LOG_UNITS:-ai-smart-speaker.service}"
 RETENTION_DAYS="${LOG_RETENTION_DAYS:-90}"
 CURSOR=/data/state/speaker-log.cursor

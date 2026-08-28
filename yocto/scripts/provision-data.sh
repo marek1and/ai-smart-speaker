@@ -69,9 +69,9 @@ if [ -f "$LOCAL_DIR/nfs.env" ]; then
     # shellcheck source=/dev/null
     . "$LOCAL_DIR/nfs.env"
     if [ -n "${NFS_EXPORT:-}" ]; then
-        MP="${NFS_MOUNTPOINT:-/mnt/qnap/aispeaker}"
+        MP="${NFS_MOUNTPOINT:-/mnt/nas}"
         OPTS="${NFS_OPTIONS:-vers=4,soft,timeo=50,retrans=2,noatime,_netdev}"
-        base=$(systemd-escape -p "$MP")           # /mnt/qnap/aispeaker -> mnt-qnap-aispeaker
+        base=$(systemd-escape -p "$MP")           # /mnt/nas -> mnt-nas
         SYSD="$UPPER/systemd/system"
         mkdir -p "$SYSD/multi-user.target.wants"
 
