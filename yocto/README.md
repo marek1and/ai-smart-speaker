@@ -339,12 +339,29 @@ path never depends on the NAS; the NAS gets a copy when it's reachable.
 
 ## Build status & known iteration points
 
-**Status on wrynose (2026-08-27):** `bitbake -n aispeaker-image` resolves the
-full graph — **11122 tasks, no errors, no warnings**. A real build has not been
-run on this release yet; the last green *build* was on walnascar (7350 tasks →
-`aispeaker-image-*.wic.bz2`, ~177 MB) with mopidy 4.0.1 + mopidy-mpd/spotify/
-youtube, the Python deps, pipewire, wireplumber, respeaker-xvf3800,
-networkmanager-wifi and gstreamer1.0-libav in the image.
+**Status on wrynose: builds green (2026-08-28).** `bitbake aispeaker-image` →
+**181 MB** `aispeaker-image-*.wic.bz2`, 518 MB rootfs, 2641 packages, 8904
+tasks. The manifest confirms mopidy 4.0.1 + mopidy-mpd/spotify/youtube, the
+Python deps, pipewire, wireplumber, respeaker-xvf3800, networkmanager-wifi and
+gstreamer1.0-libav.
+
+For comparison the first wrynose image, before the trimming below, was 202 MB /
+592 MB / 2669 packages / 10987 tasks; the last walnascar one was ~177 MB.
+
+What the trimming removed (see `conf/distro/aispeaker.conf`):
+
+- **Mesa userspace and Vulkan** (~30 MB) — nothing renders on a headless box.
+  `vc4graphics` stays in MACHINE_FEATURES so an HDMI console remains available.
+- **ICU** (32 MB) — arrived through libsoup → libpsl5 → libicudata; a bbappend
+  switches libpsl to the libidn2 backend (now 133 KB, souphttpsrc unaffected).
+- **SBOM generation** — wrynose moved `create-spdx` into `INHERIT_DISTRO`, so it
+  is on by default; it produced a 32 MB spdx.json and 16% of all build tasks.
+- **bluetooth** — removed from both DISTRO_FEATURES and MACHINE_FEATURES.
+
+Python is the largest remaining item at 171 MB (yt_dlp 25 MB, chardet 24 MB,
+pip 12 MB). Another ~40 MB is reachable — chardet comes in via python3-requests,
+and the rich/docutils/pygments chain via Mopidy's CLI — but both need verifying
+by running Mopidy, not by a build.
 
 Moving walnascar → wrynose needed exactly two changes in this layer:
 

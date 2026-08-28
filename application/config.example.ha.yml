@@ -260,6 +260,11 @@ mpd:
   port: 6600
   connection_timeout: 5
   state_poll_interval: 2.0  # How often to detect external MPD state changes (stream died, mpc)
+  # A stream that stops on its own within this many seconds of starting, without
+  # the app asking for it, counts as a failed stream rather than someone pressing
+  # stop. Only used when the server reports no status.error (Mopidy); MPD names
+  # the failure outright.
+  stream_start_grace: 15.0
   volume_fade_in_seconds: 1.0  # Duration of volume fade-in (resuming)
   volume_duck_percentage: 20   # Volume percentage during conversation
   default_playback_volume: 70  # Default playback volume if no previous volume is known

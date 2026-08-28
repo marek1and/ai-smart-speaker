@@ -269,6 +269,13 @@ The assistant can play internet radio stations using the **Music Player Daemon (
 
 MPD is used as a dedicated and stable service to handle the audio playback of internet radio streams. This separates the playback from the main application logic, improving reliability.
 
+**Any MPD-protocol server works.** The application speaks the protocol through `python-mpd2` and
+uses only `clear/add/play/status/setvol/stop/outputs/enableoutput/currentsong/clearerror`. The Yocto
+image swaps MPD for **Mopidy** (via `Mopidy-MPD`) to gain Spotify and YouTube Music, so the client
+tolerates the two places where Mopidy differs: `clearerror` is not implemented there, and its
+`status` never carries an `error` field — hence the timing-based fallback described above. See
+`yocto/README.md` for the details.
+
 **Installation (Debian/Raspberry Pi OS):**
 
 ```bash
@@ -295,10 +302,22 @@ Once MPD is running, you can ask the assistant to play radio stations.
 1. **User Command:** You ask the assistant to play a radio station (e.g., "Play RMF FM").
 2. **Function Calling:** The LLM uses the `play_internet_radio` tool with the station name.
 3. **Station Resolution:** The system resolves the stream URL using this priority chain:
-   - **URL cache** in `radio_state.json` — instant, no network call.
-   - **Pinned station UUID** — looked up via RadioBrowser API, URL cached for next time.
-   - **RadioBrowser name search** — fallback for unpinned stations, result cached too.
+   - **Pinned URL** from the config — wins over everything, no network call. The escape hatch
+     for a station whose RadioBrowser entry is wrong.
+   - **URL cache** in `radio_state.json` — instant, but only while the entry is younger than
+     `url_cache_ttl_hours`; a stale one is re-resolved.
+   - **Pinned station UUID** — looked up via RadioBrowser, the result is probed before caching.
+   - **RadioBrowser name search** — fallback for unpinned stations; candidates are probed in
+     turn and the first one that answers is cached.
+
+   Probing is fail-open: only an explicit HTTP 4xx/5xx rejects a URL, because Icecast servers
+   speak enough dialects that treating every hiccup as dead would discard working stations.
 4. **MPD Control:** The orchestrator tells MPD to load and play the resolved stream URL.
+5. **Failure detection:** MPD accepts any URL without complaint and reports a dead stream only
+   later, in `status.error`. The state poller reads that field and, on servers that never set it
+   (Mopidy), falls back on timing — playback that stops on its own within `stream_start_grace`
+   seconds of the start counts as a failed stream. Either way the dead URL is dropped from the
+   cache, so the next attempt re-resolves instead of serving the same corpse.
 
 **Basic Configuration:**
 
@@ -309,7 +328,11 @@ radio:
 
 **Pinned Stations:**
 
-For popular stations, pin them by their stable [RadioBrowser](https://www.radio-browser.info) UUID. This avoids ambiguous search results and automatically refreshes the stream URL when a station migrates CDN.
+For popular stations, pin them by their stable [RadioBrowser](https://www.radio-browser.info) UUID. This avoids ambiguous search results and lets the URL be refreshed when a station migrates CDN.
+
+A UUID is not always enough: RadioBrowser can hold a URL that is plainly dead and still flag it as
+checked (measured on Radio Eska in 08.2026 — the entry redirected to a 404 for weeks). For those
+cases add a `url:` to the station; it bypasses both the cache and RadioBrowser entirely.
 
 ```yaml
 radio:
@@ -321,6 +344,10 @@ radio:
     radio zet:
       uuid: "59e30dda-64bf-11ea-be63-52543be04c81"
       name: "Radio Zet"
+    eska:
+      uuid: "b58c54a9-ec79-4e89-8099-3a54d7a78581"
+      name: "Radio Eska"
+      url: "http://ic1.smcdn.pl/2170-1.mp3"   # optional: bypass cache + RadioBrowser
 ```
 
 The `name` field is what the assistant says aloud and what the LLM receives in the system prompt. The key (`rmf fm`) is matched case-insensitively against the user's query — both `"rmf fm"` and `"RMF FM"` resolve to the same pin. Matching also works by official name, so `"Radio Zet"` and `"radio zet"` both find the pin.
