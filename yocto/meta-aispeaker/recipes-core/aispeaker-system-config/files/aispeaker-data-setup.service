@@ -2,8 +2,8 @@
 Description=Create writable data layout on /data
 RequiresMountsFor=/data
 After=local-fs.target
-Before=var-lib-NetworkManager.mount var-lib-bluetooth.mount var-log-journal.mount
-Before=NetworkManager.service bluetooth.service
+Before=var-lib-NetworkManager.mount var-log-journal.mount
+Before=NetworkManager.service
 
 [Service]
 Type=oneshot

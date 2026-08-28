@@ -14,7 +14,6 @@ SRC_URI = " \
     file://aispeaker-data-setup.sh \
     file://aispeaker-data-setup.service \
     file://var-lib-NetworkManager.mount \
-    file://var-lib-bluetooth.mount \
 "
 
 S = "${UNPACKDIR}"
@@ -24,7 +23,6 @@ inherit systemd
 SYSTEMD_SERVICE:${PN} = " \
     aispeaker-data-setup.service \
     var-lib-NetworkManager.mount \
-    var-lib-bluetooth.mount \
 "
 SYSTEMD_AUTO_ENABLE = "enable"
 
@@ -52,7 +50,6 @@ do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${S}/aispeaker-data-setup.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${S}/var-lib-NetworkManager.mount ${D}${systemd_system_unitdir}/
-    install -m 0644 ${S}/var-lib-bluetooth.mount ${D}${systemd_system_unitdir}/
     # NFS mount/automount units are NOT baked here — scripts/provision-data.sh
     # generates them from yocto/local/nfs.env (server, mount point, options are
     # all site-specific) into the /etc overlay on /data.
