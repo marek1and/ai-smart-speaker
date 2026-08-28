@@ -20,6 +20,8 @@ S = "${UNPACKDIR}"
 
 inherit systemd
 
+# Only the timer and the mount are enabled; the service is what the timer
+# triggers, so it must not be enabled on its own (it has no [Install] section).
 SYSTEMD_SERVICE:${PN} = "ship-speaker-logs.timer var-log-journal.mount"
 SYSTEMD_AUTO_ENABLE = "enable"
 
@@ -37,7 +39,12 @@ do_install() {
     install -m 0644 ${S}/var-log-journal.mount ${D}${systemd_system_unitdir}/
 }
 
-FILES:${PN} += "${sysconfdir}/default/aispeaker-log-shipping"
+# The systemd class only adds the units listed in SYSTEMD_SERVICE to FILES, so
+# ship-speaker-logs.service would otherwise be installed but unpackaged.
+FILES:${PN} += " \
+    ${sysconfdir}/default/aispeaker-log-shipping \
+    ${systemd_system_unitdir}/ship-speaker-logs.service \
+"
 
 # nfs-utils-client provides the mount helper for the share the timer writes to
 RDEPENDS:${PN} = "aispeaker-system-config nfs-utils-client"
