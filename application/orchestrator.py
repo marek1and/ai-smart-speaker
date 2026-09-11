@@ -287,7 +287,7 @@ class AudioOrchestrator:
         self._sound_player = SoundPlayer(self.sound_cfg)
 
         if self.config.mqtt.enabled:
-            from mqtt.bridge import MQTTBridge
+            from mqtt_bridge.bridge import MQTTBridge
 
             self._mqtt_bridge = MQTTBridge(
                 self.config.mqtt,

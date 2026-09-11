@@ -26,12 +26,6 @@ logging.basicConfig(
 # as three lines per radio stop with nothing to say.
 logging.getLogger("mpd").setLevel(logging.WARNING)
 
-# aiomqtt pins the "mqtt" logger to WARNING on import (aiomqtt/client.py), and our
-# own package is called mqtt too — so mqtt.bridge inherited WARNING and every INFO
-# line from the bridge ("MQTT connected", "MQTT back up after ...") was dropped:
-# not one has ever reached the journal. aiomqtt stays quiet; the bridge follows root.
-logging.getLogger("mqtt.bridge").setLevel(logging.getLogger().level)
-
 logger = logging.getLogger(__name__)
 
 
