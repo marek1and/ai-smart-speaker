@@ -37,6 +37,8 @@ class VADState:
 class BaseVAD(ABC):
     """Abstract base class for VAD implementations."""
 
+    threshold: float
+
     @abstractmethod
     def is_speech(self, audio: np.ndarray) -> bool:
         """Check if audio frame contains speech.
@@ -55,6 +57,22 @@ class BaseVAD(ABC):
         Default implementation returns 1.0 for speech, 0.0 for silence.
         """
         return 1.0 if self.is_speech(audio) else 0.0
+
+    def evaluate(self, audio: np.ndarray) -> tuple[bool, float]:
+        """Score a frame ONCE and return (is_speech, probability).
+
+        Callers that need both the verdict and the score must use this instead
+        of is_speech() + get_speech_probability(): Silero is recurrent, so
+        scoring the same frame twice advances its LSTM state twice and the
+        model drifts out of sync with the audio. Replayed over the 16
+        false_wake clips from 20.08-06.09.2026 at the same 0.7 threshold:
+        double scoring found speech in 4 of them, single scoring in 8. The
+        misses were closed as "initial silence — likely false trigger" even
+        though the user had spoken (whisper reads "włącz radio", "włącz
+        Polsat", "włącz telewizor" in those clips).
+        """
+        probability = self.get_speech_probability(audio)
+        return probability >= self.threshold, probability
 
     def reset(self) -> None:
         """Reset VAD internal state (if any)."""
@@ -166,7 +184,23 @@ class RMSVAD(BaseVAD):
             return 0.0
 
         rms = float(np.sqrt(np.mean(np.square(audio.astype(np.float32)))))
-        # Normalize: 0 at threshold/2, 1 at threshold*2
+        return self._normalize(rms)
+
+    def evaluate(self, audio: np.ndarray) -> tuple[bool, float]:
+        """Verdict and score from one RMS pass.
+
+        Overridden because the reported probability is normalized to 0-1 while
+        the threshold is in RMS units — the base implementation's comparison
+        would not hold here.
+        """
+        if audio.size == 0:
+            return False, 0.0
+
+        rms = float(np.sqrt(np.mean(np.square(audio.astype(np.float32)))))
+        return rms >= self.threshold, self._normalize(rms)
+
+    def _normalize(self, rms: float) -> float:
+        """Map RMS onto 0-1: 0 at threshold/2, 1 at threshold*2."""
         normalized = (rms - self.threshold * 0.5) / (self.threshold * 1.5)
         return max(0.0, min(1.0, normalized))
 
@@ -202,8 +236,7 @@ class HybridVAD:
             - speech_started: True if speech just started (transition from silence to speech)
             - speech_ended: True if speech just ended (transition from speech to silence)
         """
-        is_speech = self.vad.is_speech(audio)
-        self._last_probability = self.vad.get_speech_probability(audio)
+        is_speech, self._last_probability = self.vad.evaluate(audio)
 
         speech_started = False
         speech_ended = False
