@@ -964,7 +964,34 @@ class AudioOrchestrator:
             except Exception:
                 # Broad by design — see _audio_capture_task.
                 logger.exception("State machine error")
+                follow_up_start = None
+                await self._recover_from_state_error()
                 await asyncio.sleep(1.0)
+
+    async def _recover_from_state_error(self) -> None:
+        """Return to IDLE after a handler blew up mid-turn.
+
+        Logging the exception and looping is not enough: the state is unchanged,
+        so RESPONDING keeps waiting for a turn_complete that already fired and
+        the speaker goes deaf until the API drops the session on its own. That
+        happened on every radio command under Mopidy (04.09.2026: crash 20:36:43,
+        stuck until Gemini closed the socket at 20:39:13). The error sound tells
+        the user the command failed instead of leaving them with silence.
+        """
+        if self._state == SpeakerState.IDLE:
+            return
+        try:
+            if self._sound_player:
+                self._sound_player.play(SoundEvent.ERROR)
+            # Drop to IDLE before the cleanup, not after: _finish_turn bails out
+            # early when it finds LISTENING (its barge-in guard), which on this
+            # path would skip the cleanup and leave the state stuck again.
+            self._set_state(SpeakerState.IDLE)
+            await self._finish_turn(play_end_sound=False)
+        except Exception:
+            # Recovery itself must never take the state machine down.
+            logger.exception("State recovery failed — forcing IDLE")
+            self._set_state(SpeakerState.IDLE)
 
     async def _handle_idle_state(self) -> None:
         """Handle IDLE state: wait for wake word."""
