@@ -89,6 +89,10 @@ class AudioOrchestrator:
         self._running = False
         self._last_activity_time: float = 0.0
         self._last_barge_in_time: float = 0.0
+        # True from the moment a wake word fires until the state leaves IDLE.
+        # The session is opened during that window while the state is still
+        # IDLE, so the inactivity monitor must not treat it as an idle session.
+        self._wake_in_progress = False
 
         # Flags
         self._playback_interrupted = False
@@ -1001,7 +1005,14 @@ class AudioOrchestrator:
             return
 
         self._wake_event.clear()
+        self._wake_in_progress = True
+        try:
+            await self._open_session_and_listen()
+        finally:
+            self._wake_in_progress = False
 
+    async def _open_session_and_listen(self) -> None:
+        """Open (or reuse) the API session for a fresh wake word and start listening."""
         if not self._api_manager.session_active:
             await self._api_manager.open_session()
             if not self._api_manager.session_active:
@@ -1334,6 +1345,13 @@ class AudioOrchestrator:
             if not self._api_manager.session_active:
                 continue
             if self._state != SpeakerState.IDLE:
+                continue
+            # A wake word is mid-flight: the session it just opened is still
+            # paired with an IDLE state, and _last_activity_time still measures
+            # the gap before the wake word. Closing here kills the session the
+            # user is about to talk into (seen 2026-09-10: "inactive for 58732s"
+            # one second after "Session opened successfully").
+            if self._wake_in_progress:
                 continue
 
             elapsed = time.time() - self._last_activity_time
