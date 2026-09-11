@@ -1,9 +1,17 @@
 [Unit]
 Description=Create writable data layout on /data
+# Early-boot service. The bind mounts that need this layout are local mounts, so
+# systemd orders them Before=local-fs.target, and the journal one must also beat
+# systemd-journal-flush. With default dependencies this unit would sit after
+# basic.target, i.e. after local-fs.target, and close an ordering cycle that
+# systemd breaks by dropping sysinit jobs (systemd-tmpfiles-setup, ldconfig, ...).
+# /data being mounted is the only ordering it actually needs.
+DefaultDependencies=no
 RequiresMountsFor=/data
-After=local-fs.target
 Before=var-lib-NetworkManager.mount var-log-journal.mount
 Before=NetworkManager.service
+Conflicts=shutdown.target
+Before=shutdown.target
 
 [Service]
 Type=oneshot
