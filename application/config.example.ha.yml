@@ -289,6 +289,11 @@ mqtt:
   # username: ~
   # password: ~
   reconnect_interval: 5.0
+  # Reconnects back off exponentially from reconnect_interval up to this cap.
+  reconnect_interval_max: 60.0
+  # During an outage the retry log is repeated at most this often (and escalated
+  # to ERROR after the first repeat), instead of one WARNING per attempt.
+  reconnect_log_interval: 300.0
   # Topics published (retain=true):
   #   {topic_prefix}/radio/availability → online / offline (LWT; HA availability_topic)
   #   {topic_prefix}/radio/state    → ON / OFF

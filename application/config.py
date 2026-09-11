@@ -337,6 +337,14 @@ class MQTTConfig:
     username: Optional[str] = None
     password: Optional[str] = None
     reconnect_interval: float = 5.0
+    # Ceiling for the exponential backoff between reconnect attempts. A broker
+    # that has been unreachable for minutes does not come back any sooner for
+    # being retried every 5 s, and every attempt costs a log line.
+    reconnect_interval_max: float = 60.0
+    # While an outage lasts, repeat the log at most this often. The 2026-09-09
+    # outage (28.5 h, one line per attempt) wrote 15 900 warnings / 1.8 MB a day
+    # into the journal and onto the NAS, and still never escalated past WARNING.
+    reconnect_log_interval: float = 300.0
 
 
 @dataclass

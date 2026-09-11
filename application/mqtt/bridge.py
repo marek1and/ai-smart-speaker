@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Optional
 
 import aiomqtt
@@ -51,6 +52,12 @@ class MQTTBridge:
             retain=True,
             qos=1,
         )
+        # Backoff state: `delay` grows while the broker stays unreachable and
+        # resets on every successful connect; `outage_since`/`last_logged` keep a
+        # long outage down to one line per reconnect_log_interval.
+        delay = self._config.reconnect_interval
+        outage_since: Optional[float] = None
+        last_logged = 0.0
         while True:
             try:
                 async with aiomqtt.Client(
@@ -66,6 +73,13 @@ class MQTTBridge:
                     clean_session=False,
                 ) as client:
                     await client.subscribe(f"{radio}/command/#", qos=1)
+                    if outage_since is not None:
+                        logger.info(
+                            "MQTT back up after %.0fs of outage",
+                            time.monotonic() - outage_since,
+                        )
+                        outage_since = None
+                    delay = self._config.reconnect_interval
                     logger.info(
                         "MQTT connected to %s:%d, subscribed to %s/command/#",
                         self._config.broker, self._config.port, radio,
@@ -85,11 +99,24 @@ class MQTTBridge:
                     )
                 else:
                     detail = f"{type(e).__name__} ({e})"
-                logger.warning(
-                    "MQTT error: %s — reconnecting in %.0fs",
-                    detail, self._config.reconnect_interval,
-                )
-                await asyncio.sleep(self._config.reconnect_interval)
+                now = time.monotonic()
+                if outage_since is None:
+                    outage_since = now
+                    last_logged = now
+                    logger.warning(
+                        "MQTT error: %s — reconnecting in %.0fs", detail, delay
+                    )
+                elif now - last_logged >= self._config.reconnect_log_interval:
+                    last_logged = now
+                    # Past the first repeat this is no longer a blink: radio
+                    # control from HA/KNX is down and nobody has noticed, so say
+                    # so at ERROR — still only once per interval.
+                    logger.error(
+                        "MQTT still down after %.0fs: %s — retrying every %.0fs",
+                        now - outage_since, detail, delay,
+                    )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, self._config.reconnect_interval_max)
 
     async def _publish_initial_state(self, client: aiomqtt.Client, radio: str) -> None:
         """Publishes current radio state on (re)connect so the broker retain is fresh."""
