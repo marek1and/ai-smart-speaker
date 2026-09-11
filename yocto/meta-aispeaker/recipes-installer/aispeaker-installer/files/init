@@ -47,10 +47,24 @@ if [ -z "$SRC" ]; then
 fi
 
 echo "Found image: $SRC"
+echo "Checking image integrity (the card is not touched yet)..."
+if ! bunzip2 -t "$SRC"; then
+    echo "ERROR: $SRC is corrupt or truncated — card left untouched."
+    echo "Copy the image onto the USB stick again and reboot to retry."
+    exec sh
+fi
+
 echo "Writing to $TARGET in 5s — DO NOT power off. Ctrl-C to abort."
 sleep 5
 
-if bunzip2 -c "$SRC" | dd of="$TARGET" bs=4M conv=fsync; then
+# A POSIX sh pipeline reports only dd's status, and dd writes whatever short
+# stream it gets and exits 0 — a truncated image used to end in "Flash complete".
+# The integrity test above catches a bad file; the marker catches a read error
+# from the stick during the write itself.
+FAIL=/unpack.failed
+rm -f "$FAIL"
+if { bunzip2 -c "$SRC" || touch "$FAIL"; } | dd of="$TARGET" bs=4M conv=fsync \
+        && [ ! -e "$FAIL" ]; then
     sync
     echo "Flash complete. Rebooting into the new system in 5s..."
     sleep 5
