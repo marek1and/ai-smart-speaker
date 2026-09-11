@@ -117,10 +117,20 @@ class MPDClientWrapper:
         what lets the watcher attribute an error to THIS stream. mopidy-mpd
         answers `clearerror` with MpdNotImplementedError — harmless there,
         because Mopidy never sets status.error in the first place.
+
+        ValueError is in the list because that refusal never reaches us as an
+        MPDError: Mopidy answers `ACK [0@0] {clearerror} Not implemented`, and
+        python-mpd2 builds CommandError by running the errno through
+        FailureResponseCode, which has no member 0 — so constructing the
+        exception raises ValueError instead. Uncaught, it took down the whole
+        state machine mid-turn: between 28.08 and 06.09.2026 play_station never
+        once completed on Mopidy (8 crashes, 0 "Started playing station"), and
+        the orchestrator was left stuck in RESPONDING until Gemini dropped the
+        idle websocket ~2.5 min later with a 1008.
         """
         try:
             await asyncio.to_thread(self.client.clearerror)
-        except (MPDError, IOError, OSError) as e:
+        except (MPDError, IOError, OSError, ValueError) as e:
             logger.debug("clearerror not available (%s) — continuing", e)
 
     def _report_silent_stop(self) -> None:
