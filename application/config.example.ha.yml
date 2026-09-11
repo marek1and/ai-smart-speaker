@@ -70,8 +70,13 @@ vad:
   # VAD mode: "silero" (recommended) or "rms"
   mode: "silero"
 
-  # Silero VAD settings
-  silero_threshold: 0.6
+  # Silero VAD settings.
+  # 0.5, not the library default 0.7: measured on a far-field mic, real commands
+  # spoken from 2-3 m sit well below 0.9 and a 0.7 gate loses them — the session
+  # then dies on initial_silence_timeout as a "false trigger". A false speech_started
+  # only keeps the session open until the inactivity timeout, so the gate is cheap
+  # to lose and expensive to win.
+  silero_threshold: 0.5
   silero_frame_size: 512
 
   # RMS VAD settings
@@ -187,7 +192,13 @@ live:
 
   enable_manual_vad: true
   api_vad_timeout: 2.0
-  turn_watchdog_timeout: 5.0
+  # Close the session when nobody speaks after the wake word. Keep it clear of the
+  # tail of how long people take to start talking (measured p50 1s, tail 4-7s) —
+  # too tight and genuine calls are discarded as false triggers.
+  initial_silence_timeout: 7.0
+  # Give the API room past its own latency tail (measured 7s and 13s outliers).
+  # When this fires first, the turn is closed before the answer arrives.
+  turn_watchdog_timeout: 10.0
 
   # Gemini-specific settings
   model: "gemini-3.1-flash-live-preview"
