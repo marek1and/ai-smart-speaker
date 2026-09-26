@@ -208,7 +208,7 @@ class LiveConfig:
     speaker_drain_timeout: float = 10.0
 
     # --- Gemini-specific settings ---
-    model: str = "gemini-3.1-flash-live-preview"
+    model: str = "gemini-3.8-live"
     voice_name: str = (
         "Zephyr"  # Gemini voice (Aoede, Charon, Fenrir, Kore, Puck, Zephyr)
     )

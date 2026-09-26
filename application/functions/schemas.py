@@ -1,4 +1,4 @@
-from google.genai.types import FunctionDeclaration, Schema, Tool, Type
+from google.genai.types import Behavior, FunctionDeclaration, Schema, Tool, Type
 
 from functions.definitions import ACTIVE_SMARTHOME_BACKEND as _BACKEND
 
@@ -280,7 +280,18 @@ _ALL_DECLARATIONS = _COMMON_DECLARATIONS + (
 # Provider-specific tool lists (generated from declarations above)
 # ---------------------------------------------------------------------------
 
-GEMINI_TOOLS = [Tool(function_declarations=_ALL_DECLARATIONS)]
+# gemini-3.8-live runs function calls NON_BLOCKING by default: the model keeps
+# talking while the tool runs. The orchestrator relies on the tool result
+# arriving before the spoken answer (deferred radio/volume actions, honest HA
+# status), so every declaration is pinned to BLOCKING.
+GEMINI_TOOLS = [
+    Tool(
+        function_declarations=[
+            d.model_copy(update={"behavior": Behavior.BLOCKING})
+            for d in _ALL_DECLARATIONS
+        ]
+    )
+]
 
 _GENAI_TYPE_MAP = {
     Type.OBJECT: "object",
