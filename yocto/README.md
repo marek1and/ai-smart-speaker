@@ -71,6 +71,8 @@ On `/data`:
 - `/data/cache` — pip / huggingface / Mopidy caches (`XDG_CACHE_HOME`)
 - `/data/overlay-etc/` — writable `/etc` overlay (SSH host keys, NM WiFi profiles) — `overlayfs-etc` image feature
 - `/data/var/lib/NetworkManager` — bind-mounted onto `/var/lib/...`
+- `/data/var/log/journal` — bind-mounted onto `/var/log/journal` (persistent journal)
+- `/data/state` — small service state, e.g. the log-shipping cursor
 
 System journal: **persistent on `/data`** (`Storage=persistent`, capped at
 200 MB), bind-mounted from `/data/var/log/journal` before journald flushes. On
@@ -145,7 +147,7 @@ First boot: `ssh speaker@aispeaker.local`, then from the repo
 ## Boot time
 
 The image is built to boot fast: no initramfs, no apt machinery, no user
-session, journald in RAM, `NetworkManager-wait-online` masked (nothing blocks
+session, `NetworkManager-wait-online` masked (nothing blocks
 on the network — the app reconnects on its own), `disable_splash=1` +
 `boot_delay=0` in config.txt. What remains:
 
@@ -179,12 +181,13 @@ add `sudo` to the image and a wheel entry for `speaker` instead.
 
 Mopidy replaces MPD to open the door to **Spotify and YouTube Music** while
 staying a drop-in for the application. `Mopidy-MPD` exposes the MPD protocol on
-`127.0.0.1:6600`, and the app uses `clear/add/play/status/setvol/stop/
-outputs/enableoutput/currentsong` — all covered — so `python-mpd2` in the app
-is unchanged. Internet radio keeps working via `Mopidy-Stream`.
+`127.0.0.1:6600`, and the app uses `clear/add/play/stop/status/setvol/
+currentsong/playlistinfo/outputs/enableoutput/disableoutput/clearerror` — so
+`python-mpd2` in the app is unchanged. Internet radio keeps working via
+`Mopidy-Stream`.
 
-**Two protocol gaps the app already handles** (fixed before the migration, so
-the same code runs on both servers):
+**Three protocol gaps the app already handles** (the same code runs on both
+servers):
 
 - `clearerror` raises `MpdNotImplementedError` in mopidy-mpd. The app calls it
   before every `play` to make MPD's sticky error attributable to the current
@@ -197,6 +200,13 @@ the same code runs on both servers):
   failed stream. A stop after that window is treated as a person pressing stop.
   Whichever detector fires first wins; a failure is reported once per playback
   attempt.
+- **Outputs are the mixer's mute switch.** mopidy-mpd reports a single fake
+  output named `Mute` whose `outputenabled` is 1 when muted; `enableoutput`
+  mutes and `disableoutput` unmutes. The app's "make sure every output is
+  enabled" step special-cases that output and unmutes instead — taken
+  literally it silenced every playback.
+- **The queue does not survive a restart.** Resuming on an empty queue reloads
+  the last station from `radio_state.json` instead of calling a bare `play`.
 
 Audio path: Mopidy → GStreamer → `pulsesink` → `pipewire-pulse` → PipeWire →
 XVF3800 (the same sink MPD used via PulseAudio today).
@@ -229,8 +239,7 @@ So out of the box you get MPD-protocol + radio + YouTube (Music); Spotify is one
 `cargo bitbake` + rebuild away.
 
 > Smoke-test after the swap: confirm `mpc -h 127.0.0.1 status`, adding a radio
-> stream URL, and `enableoutput` all behave — Mopidy-MPD covers the protocol
-> but a couple of commands map onto Mopidy's single output.
+> stream URL, and that `mpc outputs` shows `Mute` disabled while playing.
 
 ## In-place install — no card removal, no case opening
 
@@ -258,6 +267,12 @@ yocto/kas.sh build --target aispeaker-installer-initramfs yocto/kas/aispeaker.ym
        aispeaker-installer-initramfs*.cpio.gz} pi@aispeaker:/tmp/inst/
    ssh pi@aispeaker 'sudo /path/to/stage-inplace-install.sh /tmp/inst'
    ```
+
+   The script puts kernel, initramfs, dtbs, overlays and a copy of
+   `cmdline.txt` into `/boot/firmware/aispeaker-installer/` and writes a
+   `tryboot.txt` that selects it via `os_prefix`. With the tryboot flag the
+   firmware reads `tryboot.txt` *instead of* `config.txt`; nothing the current
+   system boots from is overwritten, so a power-cycle really returns to it.
 
 3. Plug the USB stick into the speaker, then `ssh pi@aispeaker 'sudo reboot
    "0 tryboot"'`. The installer flashes the card and reboots into Yocto.
@@ -328,7 +343,7 @@ path never depends on the NAS; the NAS gets a copy when it's reachable.
 ## Roadmap
 
 - **Phase 1 (this)**: RO system image, app deployed to `/data` via rsync+venv.
-- **Phase 2**: recordings on NFS (log shipping is done — see below); optionally
+- **Phase 2**: recordings on NFS (log shipping is done — see above); optionally
   bake the app + its Python deps into the image (wheel-based recipes).
 - **Phase 3**: A/B updates — second rootfs partition + RAUC/swupdate, image
   pulled from the NAS over the network. This gives "swap image on the NAS,
@@ -392,13 +407,14 @@ modern-Python-packaging ones):
 Still to verify on real hardware / not covered by the build:
 
 - Mopidy over the MPD protocol: smoke-test the app's commands (see the Mopidy
-  section) — `outputs`/`enableoutput` map onto Mopidy's single output.
+  section).
 - Spotify: `gstreamer1.0-plugins-spotify` is a scaffold — generate its crate
   manifest with `cargo bitbake` before enabling (see the Mopidy section).
 - `overlayfs-etc` preinit hook on the kernel cmdline — verify the generated
   cmdline / that `/etc` is writable after first boot.
-- the in-place installer initramfs (USB module names, tryboot.txt dtb handling
-  on RPi5) — validate on the spare Pi before using it on the speaker.
+- the in-place installer initramfs (USB module names, `os_prefix` lookup of
+  the dtb/overlays/cmdline.txt on RPi5) — validate on the spare Pi before using
+  it on the speaker.
 - audio actually reaching the XVF3800, and Python runtime module deps of the
   baked-in packages (yt-dlp etc.) — a boot + `mpc status` smoke test.
 - system update = reflash / in-place installer / dd until Phase 3 lands.

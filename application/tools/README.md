@@ -12,7 +12,7 @@ Script for automatic system delay (AUDIO_MGR_SYS_DELAY) tuning on ReSpeaker XVF3
 
 ### Standalone usage
 
-From the project root, after installing dependencies (`pip install -r requirements.txt`):
+From the `application/` directory, after installing dependencies (`pip install -r requirements.txt`):
 
 ```bash
 python -m tools.respeaker_delay_tune [options]

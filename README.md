@@ -247,7 +247,7 @@ The application supports two backends for smart home control, selected by which 
 | Domain | Format | Example |
 | --- | --- | --- |
 | `light.*` | `"ON"/"OFF"`, brightness `"0"-"100"`, HSB `"H,S,B"` | `"50"`, `"0,100,100"` |
-| `switch.*`, `fan.*` | `"ON"/"OFF"` | `"ON"` |
+| `switch.*`, `input_boolean.*`, `fan.*` | `"ON"/"OFF"` | `"ON"` |
 | `cover.*` | position `"0"-"100"` (0=closed, 100=open) | `"50"` |
 | `media_player.*` | `"ON"/"OFF"`, volume `"0"-"100"`, `"MUTE"/"UNMUTE"` | `"30"` |
 
@@ -286,5 +286,5 @@ There is no implicit fallback — if a backend section is incomplete, it is igno
 
 ## Future Improvements
 
-- **Music Streaming:** Integrating music streaming services (Spotify, YouTube Music).
-- **Custom Linux Distribution:** Building a minimal Linux distribution using the [Yocto Project](https://www.yoctoproject.org/) to optimize boot time and performance.
+- **Custom Linux Distribution:** A minimal [Yocto Project](https://www.yoctoproject.org/) distribution (read-only rootfs, mutable state on `/data`) lives in [`yocto/`](./yocto/README.md). The image builds; running it on the speaker is still to be validated.
+- **Music Streaming:** The Yocto image replaces MPD with Mopidy, which brings YouTube Music out of the box; Spotify still needs its GStreamer plugin built (see `yocto/README.md`).

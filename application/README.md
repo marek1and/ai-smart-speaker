@@ -8,15 +8,20 @@ The project is organized into the following directories:
 
 - `audio/`: Contains modules for audio input/output, VAD, and wake-word detection.
 - `functions/`: Handles the definition and registration of tools (functions) that the AI can call, such as controlling smart home devices.
+- `homeassistant/`: Contains the client for the Home Assistant REST API.
 - `openhab/`: Contains the client for interacting with the OpenHAB REST API.
+- `mpd_client/`: MPD-protocol client (MPD or Mopidy) with volume ducking, stream-failure detection and the persisted radio state (`radio_state.json`).
+- `radio/`: Resolves station names to stream URLs (config pins, URL cache, RadioBrowser).
+- `mqtt_bridge/`: Exposes the radio over MQTT (power/station/volume commands and state) for Home Assistant/KNX.
 - `realtime/`: Manages the real-time communication with the selected API (Gemini or OpenAI).
 - `sounds/`: Stores sound effects for different events (e.g., wake word, end of conversation).
 - `tools/`: Includes utility scripts for tasks like tuning audio delay.
 - `config.py`: Defines the data classes for the application's configuration.
+- `metrics.py`: Prometheus metric definitions.
 - `main.py`: The main entry point for the application.
 - `orchestrator.py`: The core module that orchestrates the different components of the application.
 - `state.py`: Defines the different states of the application.
-- `config.yml`: A user-configurable file for customizing the application's behavior.
+- `config.yml`: A user-configurable file for customizing the application's behavior (git-ignored; start from `config.example.ha.yml` or `config.example.openhab.yml`).
 
 ## Setup
 
@@ -36,7 +41,7 @@ The project is organized into the following directories:
     *Note: On some systems, you might need to install `openwakeword` with `--no-deps`.*
 
 3. **Configure the application:**
-    Create a `config.yml` file in the root of the project and add your API keys and other custom configurations. See the `Configuration` section below for more details.
+    Create a `config.yml` file in this `application/` directory (next to `config.py`) and add your API keys and other custom configurations. See the `Configuration` section below for more details.
 
 ## Running the Application
 
@@ -56,15 +61,15 @@ The `sync-to-rpi.sh` script provides a convenient way to synchronize the applica
 ./sync-to-rpi.sh [hostname]
 ```
 
-- `[hostname]` (optional): The hostname or IP address of your Raspberry Pi. Defaults to `raspberrypi`.
+- `[hostname]` (optional): The hostname or IP address of your Raspberry Pi. Defaults to `aispeaker`.
 
-The script will sync the contents of the `application` directory to `~/ai-voice-speaker/` on the remote device.
+The script will sync the contents of the `application` directory to `/opt/ai-smart-speaker/` on the remote device (`radio_state.json` and `recordings/` are left alone).
 
 ## Configuration
 
 The application is configured using the `config.yml` file. If this file does not exist, the application will use the default values defined in `config.py`.
 
-To create a custom configuration, create a `config.yml` file in the root of the project and add the desired configuration values.
+To create a custom configuration, create a `config.yml` file in the `application/` directory and add the desired configuration values. It is looked up next to `config.py`, not in the current working directory.
 
 ### API Keys
 
@@ -127,9 +132,9 @@ The most critical step is telling the LLM which devices are available to control
 
 The `live.system_instruction` in your `config.yml` is where you provide this context. You should create a clear, structured list of your rooms and devices, including the exact `Item ID` that the function needs to use.
 
-A detailed example of how to structure this prompt is provided in `config.yml.example`. It is highly recommended that you follow this template for best results.
+A detailed example of how to structure this prompt is provided in `config.example.openhab.yml` (and `config.example.ha.yml` for Home Assistant). It is highly recommended that you follow this template for best results.
 
-**Example Snippet from `config.yml.example`:**
+**Example Snippet from `config.example.openhab.yml`:**
 
 ```yaml
 live:
@@ -217,11 +222,13 @@ metrics:
 | **Wake Word** | Detection count by context (idle / barge-in / re-listen), false trigger count by reason (initial silence / STT rejection) |
 | **Sessions** | Sessions opened/closed (with close reason: max_turns / inactivity / false_trigger), turns completed, API errors |
 | **Conversation** | Barge-ins, follow-ups started, follow-up timeouts, state machine transitions |
-| **Radio** | Play events by source (AI new station / AI resume / MQTT power / MQTT station), stops, volume changes, duck/unduck events, current volume, MPD reconnections |
+| **Radio** | Play events by source (AI new station / AI resume / MQTT power / MQTT station), stops, volume changes, duck/unduck events, current volume, per-station play counts, streams that failed to start, MPD reconnections |
 | **MQTT** | Connection state, command counts by type (power_on / power_off / station / volume) |
 | **OpenHAB** | HTTP requests by method and status, per-item state change counts |
+| **Home Assistant** | REST requests by method (get / set) and status (ok / error / retry), per-entity state change counts |
 | **TV** | Power-on and channel-switch command counts |
-| **AI Tools** | Per-function call counts (play_internet_radio, stop_radio, watch_tv, set_openhab_item_state, set_playback_volume) |
+| **AI Tools** | Per-function call counts for the radio, TV and smart-home tools |
+| **reSpeaker** | Device availability, AEC convergence and headroom, speech energy, AGC gain, direction of arrival |
 
 ### Setting Up Grafana
 
@@ -270,11 +277,12 @@ The assistant can play internet radio stations using the **Music Player Daemon (
 MPD is used as a dedicated and stable service to handle the audio playback of internet radio streams. This separates the playback from the main application logic, improving reliability.
 
 **Any MPD-protocol server works.** The application speaks the protocol through `python-mpd2` and
-uses only `clear/add/play/status/setvol/stop/outputs/enableoutput/currentsong/clearerror`. The Yocto
-image swaps MPD for **Mopidy** (via `Mopidy-MPD`) to gain Spotify and YouTube Music, so the client
-tolerates the two places where Mopidy differs: `clearerror` is not implemented there, and its
-`status` never carries an `error` field — hence the timing-based fallback described above. See
-`yocto/README.md` for the details.
+uses only `clear/add/play/stop/status/setvol/currentsong/playlistinfo/outputs/enableoutput/disableoutput/clearerror`.
+The Yocto image swaps MPD for **Mopidy** (via `Mopidy-MPD`) to gain Spotify and YouTube Music, so
+the client tolerates the places where Mopidy differs: `clearerror` is not implemented there, its
+`status` never carries an `error` field (hence the timing-based fallback described below), its only
+"output" is the mixer's mute switch with inverted meaning, and its queue does not survive a restart
+(resume reloads the last station). See `yocto/README.md` for the details.
 
 **Installation (Debian/Raspberry Pi OS):**
 
@@ -309,6 +317,9 @@ Once MPD is running, you can ask the assistant to play radio stations.
    - **Pinned station UUID** — looked up via RadioBrowser, the result is probed before caching.
    - **RadioBrowser name search** — fallback for unpinned stations; candidates are probed in
      turn and the first one that answers is cached.
+   - **Expired cache entry** — only when every online lookup failed (e.g. RadioBrowser is down);
+     an old URL is a better bet than silence. URLs that actually failed to play are dropped from
+     the cache, so they never come back this way.
 
    Probing is fail-open: only an explicit HTTP 4xx/5xx rejects a URL, because Icecast servers
    speak enough dialects that treating every hiccup as dead would discard working stations.
