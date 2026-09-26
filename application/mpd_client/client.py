@@ -36,6 +36,9 @@ class MPDClientWrapper:
         # before it fills in status.error, so both detectors can see the same
         # death and would otherwise report it twice.
         self._stream_failure_reported = False
+        # Mopidy reports "stop" for a moment after play while it buffers the
+        # stream, so a stop seen before the first "play" is not a verdict yet.
+        self._seen_play_since_start = False
         self._mpd_lock = asyncio.Lock()
 
         # Volume state
@@ -91,6 +94,13 @@ class MPDClientWrapper:
                 if error:
                     await self._handle_stream_error(error)
                 state_str = "ON" if status.get("state") == "play" else "OFF"
+                if state_str == "ON":
+                    self._seen_play_since_start = True
+                elif not error and self._still_starting():
+                    # Still buffering — judge it on a later poll. Notifying now
+                    # flickered HA to OFF and back, and reported a live stream
+                    # as dead (26.09.2026: stop seen 0.0s after play, playing 2s later).
+                    continue
                 if (
                     self._last_notified_state is not None
                     and state_str != self._last_notified_state
@@ -133,6 +143,17 @@ class MPDClientWrapper:
         except (MPDError, IOError, OSError, ValueError) as e:
             logger.debug("clearerror not available (%s) — continuing", e)
 
+    def _still_starting(self) -> bool:
+        """True while a start we issued has not reached "play" yet and the
+        grace window is still open."""
+        return (
+            self._playback_started_at is not None
+            and not self._expecting_stop
+            and not self._seen_play_since_start
+            and time.monotonic() - self._playback_started_at
+            <= self.config.stream_start_grace
+        )
+
     def _report_silent_stop(self) -> None:
         """Flags playback that died on its own, without MPD reporting an error.
 
@@ -150,7 +171,7 @@ class MPDClientWrapper:
         ):
             return
         played_for = time.monotonic() - self._playback_started_at
-        if played_for > self.config.stream_start_grace:
+        if played_for > self.config.stream_start_grace and self._seen_play_since_start:
             return
 
         key = self._radio_state.get_current_key()
@@ -414,6 +435,7 @@ class MPDClientWrapper:
         self._playback_started_at = time.monotonic()
         self._expecting_stop = False
         self._stream_failure_reported = False
+        self._seen_play_since_start = False
 
         effective_key = (
             key
@@ -866,6 +888,7 @@ class MPDClientWrapper:
                 self._playback_started_at = time.monotonic()
                 self._expecting_stop = False
                 self._stream_failure_reported = False
+                self._seen_play_since_start = False
             except (MPDError, IOError, MPDConnectionError) as e:
                 logger.error("Error starting playback: %s", e)
                 await self._disconnect_unsafe()
