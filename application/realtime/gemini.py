@@ -13,7 +13,6 @@ from google.genai.types import (
     AudioTranscriptionConfig,
     AutomaticActivityDetection,
     EndSensitivity,
-    GenerationConfig,
     GoogleSearch,
     LiveConnectConfig,
     PrebuiltVoiceConfig,
@@ -124,9 +123,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         return LiveConnectConfig(
             response_modalities=list(self.live_cfg.response_modalities),
             system_instruction=self.live_cfg.system_instruction,
-            generation_config=GenerationConfig(
-                temperature=self.live_cfg.temperature,
-            ),
+            temperature=self.live_cfg.temperature,
             realtime_input_config=RealtimeInputConfig(
                 automatic_activity_detection=AutomaticActivityDetection(
                     # When manual VAD is enabled, we MUST disable server-side VAD.
