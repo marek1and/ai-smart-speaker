@@ -18,6 +18,12 @@ _RETRYABLE_EXC = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
 )
+# Writes are retried only when the request never reached HA. A ReadTimeout on a
+# service call means HA got the command and is still executing it (a TV power-on
+# easily outlasts request_timeout) — sending it again would repeat the action,
+# and on toggle-style entities undo it. ConnectTimeout is a ConnectionError, so
+# a lost SYN is still retried.
+_RETRYABLE_WRITE_EXC = (requests.exceptions.ConnectionError,)
 
 
 class HomeAssistantClient:
@@ -37,6 +43,7 @@ class HomeAssistantClient:
         Note: called from a worker thread (asyncio.to_thread), so time.sleep
         does not block the event loop.
         """
+        retryable = _RETRYABLE_EXC if http_method == "GET" else _RETRYABLE_WRITE_EXC
         last_exc: Exception | None = None
         for attempt in range(1, HTTP_ATTEMPTS + 1):
             try:
@@ -51,7 +58,7 @@ class HomeAssistantClient:
                 if attempt > 1:
                     logger.info("HA %s %s — succeeded on attempt %d", http_method, url, attempt)
                 return response
-            except _RETRYABLE_EXC as e:
+            except retryable as e:
                 last_exc = e
                 if attempt < HTTP_ATTEMPTS:
                     logger.warning(
