@@ -2,9 +2,10 @@
 # Stage the tryboot in-place installer on a RUNNING Raspberry Pi (the speaker,
 # or a spare Pi for testing) — no SD card removal, no case opening.
 #
-# It copies the installer kernel + initramfs to the boot partition and writes
-# tryboot.txt. You then insert a USB stick holding aispeaker-image*.wic.bz2 and
-# run `sudo reboot '0 tryboot'`. The firmware boots the installer ONCE (tryboot
+# It copies the installer kernel + initramfs into a separate directory on the
+# boot partition (selected via os_prefix) and writes tryboot.txt. You then
+# insert a USB stick holding aispeaker-image*.wic.bz2 and run
+# `sudo reboot '0 tryboot'`. The firmware boots the installer ONCE (tryboot
 # is one-shot: a power-cycle without a successful flash returns to the current
 # system), the installer flashes the SD card from USB and reboots into Yocto.
 #
@@ -29,20 +30,45 @@ INITRD="$(ls "$SRC"/*initramfs*.cpio.gz 2>/dev/null | head -n1)"
 echo "Kernel:    $KERNEL"
 echo "Initramfs: $INITRD"
 
-install -m 0644 "$KERNEL" "$BOOT/tryboot-kernel.img"
-install -m 0644 "$INITRD" "$BOOT/tryboot-initramfs.img"
-# device tree + overlays: reuse whatever the current firmware already loads;
-# tryboot.txt only overrides kernel/initramfs, the rest stays as-is
-[ -d "$SRC/overlays" ] && cp -r "$SRC/overlays" "$BOOT/" || true
+# Everything the installer boots from goes into its own directory, selected by
+# os_prefix below. Nothing of the running system is overwritten: copying the
+# Yocto overlays over $BOOT/overlays used to leave the current OS booting its
+# own kernel with another kernel's overlays after an aborted flash, which broke
+# the "power-cycle returns to the current system" promise.
+PREFIX=aispeaker-installer
+DEST="$BOOT/$PREFIX"
+rm -rf "$DEST"
+mkdir -p "$DEST"
 
+install -m 0644 "$KERNEL" "$DEST/kernel.img"
+install -m 0644 "$INITRD" "$DEST/initramfs.img"
+# os_prefix also applies to the device tree, overlays and cmdline.txt, so each
+# of them has to exist under $DEST: the build's own when provided, otherwise a
+# copy of what the current system boots with.
+if ls "$SRC"/*.dtb >/dev/null 2>&1; then
+    install -m 0644 "$SRC"/*.dtb "$DEST/"
+else
+    install -m 0644 "$BOOT"/*.dtb "$DEST/"
+fi
+if [ -d "$SRC/overlays" ]; then
+    cp -r "$SRC/overlays" "$DEST/"
+elif [ -d "$BOOT/overlays" ]; then
+    cp -r "$BOOT/overlays" "$DEST/"
+fi
+[ -f "$BOOT/cmdline.txt" ] && install -m 0644 "$BOOT/cmdline.txt" "$DEST/cmdline.txt"
+
+# With the tryboot flag set the firmware reads tryboot.txt INSTEAD of
+# config.txt (not on top of it), so this file is the entire boot config for
+# the installer run; config.txt stays untouched for the normal boot.
 cat > "$BOOT/tryboot.txt" <<EOF
 # One-shot in-place installer boot (RPi5 tryboot). Written by
-# stage-inplace-install.sh; ignored on a normal boot.
+# stage-inplace-install.sh; read instead of config.txt only on a tryboot.
 [all]
 arm_64bit=1
 enable_uart=1
-kernel=tryboot-kernel.img
-initramfs tryboot-initramfs.img followkernel
+os_prefix=$PREFIX/
+kernel=kernel.img
+initramfs initramfs.img followkernel
 EOF
 
 sync
