@@ -1,7 +1,7 @@
 [Unit]
 Description=AI Smart Speaker Service
-After=network.target pipewire.service wireplumber.service mpd.service
-Requires=pipewire.service wireplumber.service mpd.service
+After=network.target pipewire.service wireplumber.service mopidy.service
+Requires=pipewire.service wireplumber.service mopidy.service
 
 [Service]
 Type=simple
@@ -12,7 +12,7 @@ ExecStart=/opt/ai-smart-speaker/.venv/bin/python main.py
 Restart=on-failure
 RestartSec=5
 
-# Logs landing in journalctl (np. journalctl --user-unit ai-smart-speaker -f)
+# Logs landing in journalctl (np. journalctl --user -u ai-smart-speaker -f)
 StandardOutput=journal
 StandardError=journal
 
