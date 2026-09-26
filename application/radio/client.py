@@ -81,6 +81,7 @@ class RadioClient:
           2. URL cache in RadioStateManager, unless older than url_cache_ttl_hours
           3. Pinned station → UUID resolution via RadioBrowser → verify → cache
           4. RadioBrowser name search → verify candidates → cache
+          5. Expired cache entry, when every online lookup failed
         state_key is always the canonical config keyword when the station is
         pinned, otherwise the lowercased query.
         """
@@ -107,6 +108,30 @@ class RadioClient:
                 logger.info("Cache hit for '%s': %s", station_name, cached_url)
                 return cached_url, name, key
 
+        result = await self._resolve_online(station_name, key, pin)
+        if result:
+            return result
+
+        # 5. Every online lookup failed (RadioBrowser down, all candidates dead):
+        # an expired cache entry is still a better bet than silence. forget_url()
+        # empties the entry of a URL that actually failed to play, so this never
+        # hands back a stream known to be dead.
+        if self._state:
+            stale_url = self._state.get_cached_url(key)
+            if stale_url:
+                entry = self._state.get_entry(key)
+                name = entry.name if entry else station_name
+                logger.warning(
+                    "Online lookup for '%s' failed — falling back to expired cached URL %s",
+                    station_name, stale_url,
+                )
+                return stale_url, name, key
+        return None
+
+    async def _resolve_online(
+        self, station_name: str, key: str, pin
+    ) -> tuple[str, str, str] | None:
+        """Steps 3-4 of search_station: RadioBrowser UUID lookup, then name search."""
         # 3. Pinned station — resolve its UUID via RadioBrowser
         if pin is not None and pin.uuid:
             logger.info("Resolving pinned '%s' uuid=%s", station_name, pin.uuid)
