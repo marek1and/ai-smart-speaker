@@ -3,7 +3,7 @@ import asyncio
 import re
 import time
 import numpy as np
-from typing import Callable, Optional, Dict, Any, List
+from typing import Awaitable, Callable, Optional, Dict, Any, List
 from mpd import MPDClient, MPDError, ConnectionError as MPDConnectionError
 from config import MPDConfig
 from mpd_client.state import RadioStateManager
@@ -815,6 +815,39 @@ class MPDClientWrapper:
                 logger.error("Error getting playlist info: %s", e)
                 await self._disconnect_unsafe()
                 return []
+
+    async def resume(
+        self,
+        resolve_station: Callable[[str], Awaitable[Optional[tuple[str, str, str]]]],
+    ) -> None:
+        """Resumes playback, reloading the last station when the queue is empty.
+
+        Mopidy does not persist its queue across restarts, while the current
+        station survives in radio_state.json. A bare play() on the empty queue
+        starts and stops within ~2s and reads as a dead stream — after the
+        power cuts of 21.09.2026 every "turn on the radio" went silent that way.
+        resolve_station maps a station key to (url, official_name, key).
+        """
+        status = await self.get_status() or {}
+        try:
+            queue_length = int(status.get("playlistlength", 0))
+        except (TypeError, ValueError):
+            queue_length = 0
+        if queue_length > 0:
+            await self.play()
+            return
+
+        key = self._radio_state.get_current_key()
+        if not key:
+            logger.warning("Resume requested but the queue is empty and no station is known")
+            return
+        result = await resolve_station(key)
+        if not result:
+            logger.error("Resume: could not resolve last station '%s'", key)
+            return
+        url, official_name, key = result
+        logger.info("Empty queue on resume — reloading last station '%s'", official_name)
+        await self.play_station(url, official_name, key=key)
 
     async def play(self):
         """Plays the current playlist and fades the volume in."""

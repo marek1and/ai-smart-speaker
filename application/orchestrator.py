@@ -1178,7 +1178,7 @@ class AudioOrchestrator:
                     logger.info(
                         "Executing deferred action: play_internet_radio (resume)"
                     )
-                    await self.mpd_client.play()
+                    await self.mpd_client.resume(get_radio_client().search_station)
                     station = self.mpd_client.get_current_station_name() or "unknown"
                     metrics.RADIO_PLAYS.labels(
                         source="ai_resume", station=station

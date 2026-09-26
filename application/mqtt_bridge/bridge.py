@@ -165,7 +165,7 @@ class MQTTBridge:
             station = self._mpd.get_current_station_name() or 'unknown'
             metrics.RADIO_PLAYS.labels(source='mqtt_power', station=station).inc()
             self._confirm()
-            await self._mpd.play()
+            await self._mpd.resume(self._radio.search_station)
         elif payload.upper() == "OFF":
             metrics.MQTT_COMMANDS.labels(command='power_off').inc()
             metrics.RADIO_STOPS.labels(source='mqtt').inc()
