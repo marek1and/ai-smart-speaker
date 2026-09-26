@@ -497,7 +497,7 @@ class MPDClientWrapper:
         logger.debug(f"set_volume(volume={volume}) called.")
         linear_volume = max(0, min(100, volume))
         self._restore_volume = linear_volume
-        logger.info(f"User set new restore volume to {self._restore_volume}%%")
+        logger.info(f"User set new restore volume to {self._restore_volume}%")
 
         # Publish new volume to MQTT immediately so automation system see state=ON before the fade completes.
         self._notify(volume=linear_volume)
