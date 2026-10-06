@@ -304,8 +304,12 @@ class AudioOrchestrator:
             )
 
         # Watch for MPD state changes made outside this app (stream died, mpc,
-        # another client) so MQTT/HA stay in sync. Also acts as the keepalive.
-        self._spawn(self.mpd_client.watch_external_changes(), name="mpd_watcher")
+        # another client) so MQTT/HA stay in sync, and restart streams that froze
+        # mid-play. Also acts as the keepalive.
+        self._spawn(
+            self.mpd_client.watch_external_changes(get_radio_client().search_station),
+            name="mpd_watcher",
+        )
 
         # Initialize audio I/O (SoundDevice)
         self._audio_input = AudioInput(self.audio_cfg, self._mic_queue)

@@ -39,6 +39,13 @@ class MPDClientWrapper:
         # Mopidy reports "stop" for a moment after play while it buffers the
         # stream, so a stop seen before the first "play" is not a verdict yet.
         self._seen_play_since_start = False
+        # Mid-stream stall detection. When a stream breaks after it started,
+        # Mopidy shuts its GStreamer pipeline down but keeps reporting "play"
+        # with elapsed frozen at 0 (core only mirrors PAUSED from the audio
+        # layer) — 03-05.10.2026 the radio sat silent for 37 h that way.
+        self._last_elapsed: Optional[float] = None
+        self._position_stalled_since: Optional[float] = None
+        self._stall_restarts = 0
         self._mpd_lock = asyncio.Lock()
 
         # Volume state
@@ -76,12 +83,19 @@ class MPDClientWrapper:
             except Exception as e:
                 logger.error("State listener error: %s", e)
 
-    async def watch_external_changes(self) -> None:
+    async def watch_external_changes(
+        self,
+        resolve_station: Optional[
+            Callable[[str], Awaitable[Optional[tuple[str, str, str]]]]
+        ] = None,
+    ) -> None:
         """Detect play/stop changes made outside this app (stream died, mpc,
         another MPD client) and notify listeners so MQTT/HA stay in sync.
 
         Also serves as the connection keepalive and keeps the _is_playing
-        cache fresh (every status poll updates it).
+        cache fresh (every status poll updates it). With resolve_station it
+        also restarts a stream whose position froze while the server still
+        reports "play" (see _track_position).
         """
         interval = self.config.state_poll_interval
         while True:
@@ -94,6 +108,13 @@ class MPDClientWrapper:
                 if error:
                     await self._handle_stream_error(error)
                 state_str = "ON" if status.get("state") == "play" else "OFF"
+                self._track_position(status)
+                if (
+                    resolve_station is not None
+                    and self._stall_duration() >= self.config.stream_stall_timeout
+                ):
+                    await self._recover_stalled_stream(resolve_station)
+                    continue
                 if state_str == "ON":
                     self._seen_play_since_start = True
                 elif not error and self._still_starting():
@@ -119,6 +140,75 @@ class MPDClientWrapper:
                 raise
             except Exception as e:
                 logger.error("MPD external-change watcher error: %s", e)
+
+    def _track_position(self, status: Dict[str, Any]) -> None:
+        """Follows status.elapsed across polls to spot a frozen stream.
+
+        Not judged while a start we issued is still inside stream_start_grace:
+        Mopidy reports "play" with elapsed 0 for as long as it buffers.
+        """
+        starting = (
+            self._playback_started_at is not None
+            and time.monotonic() - self._playback_started_at
+            <= self.config.stream_start_grace
+        )
+        try:
+            elapsed = float(status.get("elapsed"))
+        except (TypeError, ValueError):
+            elapsed = None
+        if status.get("state") != "play" or starting or elapsed is None:
+            self._last_elapsed = None
+            self._position_stalled_since = None
+            return
+        if self._last_elapsed is None or elapsed > self._last_elapsed:
+            if self._last_elapsed is not None:
+                self._position_stalled_since = None
+                self._stall_restarts = 0
+            self._last_elapsed = elapsed
+            return
+        if self._position_stalled_since is None:
+            self._position_stalled_since = time.monotonic()
+
+    def _stall_duration(self) -> float:
+        """Seconds the position has not moved while the server reports "play"."""
+        if self._position_stalled_since is None:
+            return 0.0
+        return time.monotonic() - self._position_stalled_since
+
+    def is_stream_stalled(self) -> bool:
+        """True when the last poll found the position frozen during "play"."""
+        return self._position_stalled_since is not None
+
+    async def _recover_stalled_stream(
+        self,
+        resolve_station: Callable[[str], Awaitable[Optional[tuple[str, str, str]]]],
+    ) -> None:
+        """Restarts a frozen stream, or stops it after repeated failed restarts
+        so HA shows the radio as off instead of a silent "playing"."""
+        if self._is_ducked:
+            # A restart fades to the restore volume — wait for the conversation to end.
+            return
+        station = self._radio_state.get_current_name() or "unknown"
+        stalled_for = self._stall_duration()
+        self._last_elapsed = None
+        self._position_stalled_since = None
+        metrics.RADIO_STREAM_ERRORS.labels(station=station).inc()
+        if self._stall_restarts >= self.config.stream_stall_max_restarts:
+            logger.error(
+                "Stream %s still frozen after %d restarts — stopping playback",
+                station, self._stall_restarts,
+            )
+            self._stall_restarts = 0
+            await self.stop()
+            return
+        self._stall_restarts += 1
+        logger.error(
+            "Playback position of %s frozen for %.0fs while the server reports "
+            "play — restarting the stream (attempt %d/%d)",
+            station, stalled_for, self._stall_restarts,
+            self.config.stream_stall_max_restarts,
+        )
+        await self._reload_current_station(resolve_station)
 
     async def _clear_error_unsafe(self) -> None:
         """Clears MPD's sticky error, tolerating servers that lack the command.
@@ -848,6 +938,8 @@ class MPDClientWrapper:
         station survives in radio_state.json. A bare play() on the empty queue
         starts and stops within ~2s and reads as a dead stream — after the
         power cuts of 21.09.2026 every "turn on the radio" went silent that way.
+        A stream frozen mid-play is reloaded the same way, since play() would
+        skip it as "already playing".
         resolve_station maps a station key to (url, official_name, key).
         """
         status = await self.get_status() or {}
@@ -855,20 +947,32 @@ class MPDClientWrapper:
             queue_length = int(status.get("playlistlength", 0))
         except (TypeError, ValueError):
             queue_length = 0
-        if queue_length > 0:
+        if queue_length == 0:
+            logger.info("Empty queue on resume — reloading the last station")
+        elif status.get("state") == "play" and self.is_stream_stalled():
+            # play() would skip it as "already playing" and leave the room silent.
+            logger.warning(
+                "Resume: server reports play but the position is frozen — reloading the station"
+            )
+        else:
             await self.play()
             return
+        await self._reload_current_station(resolve_station)
 
+    async def _reload_current_station(
+        self,
+        resolve_station: Callable[[str], Awaitable[Optional[tuple[str, str, str]]]],
+    ) -> None:
+        """Resolves the current station afresh and starts it from scratch."""
         key = self._radio_state.get_current_key()
         if not key:
-            logger.warning("Resume requested but the queue is empty and no station is known")
+            logger.warning("Cannot reload the station: no current station is known")
             return
         result = await resolve_station(key)
         if not result:
-            logger.error("Resume: could not resolve last station '%s'", key)
+            logger.error("Could not resolve the current station '%s'", key)
             return
         url, official_name, key = result
-        logger.info("Empty queue on resume — reloading last station '%s'", official_name)
         await self.play_station(url, official_name, key=key)
 
     async def play(self):

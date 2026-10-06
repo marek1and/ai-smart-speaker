@@ -317,6 +317,12 @@ class MPDConfig:
     # rather than someone pressing stop. Only used when the server reports no
     # status.error (Mopidy); MPD names the failure outright.
     stream_start_grace: float = 15.0
+    # How long the playback position may stay frozen while the server reports
+    # "play" before the stream is restarted. Mopidy keeps reporting "play"
+    # after a stream breaks mid-way (GStreamer error), with elapsed stuck at 0.
+    stream_stall_timeout: float = 20.0
+    # Restarts of a frozen stream before giving up and stopping playback.
+    stream_stall_max_restarts: int = 2
     volume_fade_in_seconds: float = 2.0  # Duration of volume fade-in (resuming)
     volume_duck_percentage: int = 20  # Volume percentage during conversation
     default_playback_volume: int = (

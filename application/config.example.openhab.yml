@@ -234,6 +234,11 @@ mpd:
   # stop. Only used when the server reports no status.error (Mopidy); MPD names
   # the failure outright.
   stream_start_grace: 15.0
+  # Mopidy keeps reporting "play" after a stream breaks mid-way, with the position
+  # frozen. After this long without progress the stream is restarted; after
+  # stream_stall_max_restarts failed restarts playback is stopped.
+  stream_stall_timeout: 20.0
+  stream_stall_max_restarts: 2
   volume_fade_in_seconds: 1.0  # Duration of volume fade-in (resuming)
   volume_duck_percentage: 20   # Volume percentage during conversation
   default_playback_volume: 70  # Default playback volume if no previous volume is known

@@ -329,6 +329,11 @@ Once MPD is running, you can ask the assistant to play radio stations.
    (Mopidy), falls back on timing — playback that stops on its own within `stream_start_grace`
    seconds of the start counts as a failed stream. Either way the dead URL is dropped from the
    cache, so the next attempt re-resolves instead of serving the same corpse.
+   A stream that breaks later is caught by its position: Mopidy keeps reporting "play" with
+   `elapsed` frozen, so after `stream_stall_timeout` seconds without progress the station is
+   re-resolved and restarted, and after `stream_stall_max_restarts` failed restarts playback is
+   stopped so HA shows the radio as off. A "turn on the radio" over such a frozen stream reloads
+   the station instead of being skipped as already playing.
 
 **Basic Configuration:**
 
