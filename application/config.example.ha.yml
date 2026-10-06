@@ -14,6 +14,10 @@ home_assistant:
   # Long-lived access token: Profile → Security → Long-lived access tokens
   api_key: "YOUR_HA_LONG_LIVED_TOKEN"
   # request_timeout: 5.0  # seconds; raise if HA is slow to respond over the network
+  # Single ON/OFF commands for these domains are checked against the current state;
+  # one that would change nothing is not sent and the model is told "no_change"
+  # (a misheard turn on/off). Leave out domains with an unreliable state (TV).
+  # power_guard_domains: ["light", "switch", "fan"]
 
 audio:
   # Input settings (microphone)
@@ -123,6 +127,7 @@ live:
     command succeeded. Say briefly that it failed (e.g. "That didn't work — I can't reach
     the system right now") and offer to retry. For "partial", name what could not be set.
     Only announce actions you actually called a tool for in this turn and that its result confirms; if the result says nothing will change, say so.
+    If `set_ha_entity_state` returns `status` "no_change", the device is already in the requested state and nothing was sent — you misheard "turn on"/"turn off". Do not confirm; call it again with the state opposite to `current_state` and confirm what you actually did.
 
     Here is the complete list of available rooms and devices with their entity_id values:
 

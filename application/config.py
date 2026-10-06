@@ -252,6 +252,14 @@ class HomeAssistantConfig:
     url: str = "http://localhost:8123"
     api_key: Optional[str] = None
     request_timeout: float = 5.0  # seconds, for the HA REST client
+    # Domains whose single ON/OFF command is checked against the current state
+    # first. A command that would change nothing is not sent; the model gets
+    # "no_change" instead, the sign of a misheard verb (28.09.2026: a clear
+    # "zgaś światło w łazience" went out as ON to a light that was on). Only
+    # for domains with a trustworthy state — a TV's media_player is not one.
+    power_guard_domains: list[str] = field(
+        default_factory=lambda: ["light", "switch", "fan"]
+    )
 
 
 @dataclass

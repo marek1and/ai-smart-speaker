@@ -115,7 +115,9 @@ SET_HA_ENTITY_STATE_FUNC = FunctionDeclaration(
         "light — 'ON'/'OFF', brightness '0'-'100', color 'H,S,B' (hue 0-360, sat 0-100, bri 0-100). "
         "switch/fan/input_boolean — 'ON'/'OFF'. "
         "cover — position '0'-'100' (0=closed, 100=open). "
-        "media_player — 'ON'/'OFF', volume '0'-'100', 'MUTE'/'UNMUTE'."
+        "media_player — 'ON'/'OFF', volume '0'-'100', 'MUTE'/'UNMUTE'. "
+        "status 'no_change' (with current_state) means the light/switch is already in the "
+        "requested ON/OFF state and nothing was sent."
     ),
     parameters=Schema(
         type=Type.OBJECT,

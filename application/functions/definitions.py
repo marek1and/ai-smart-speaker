@@ -538,6 +538,25 @@ async def set_ha_entity_state(
         return {"status": "error", "message": "No entity_id provided."}
     if kwargs:
         logger.debug("set_ha_entity_state: ignoring unexpected kwargs=%s", kwargs)
+    requested = (state or "").upper()
+    if (
+        requested in ("ON", "OFF")
+        and entity_id.split(".", 1)[0] in config.home_assistant.power_guard_domains
+    ):
+        current = await asyncio.to_thread(ha_client.get_entity_state, entity_id)
+        if current is not None and current.upper() == requested:
+            logger.info(
+                "set_ha_entity_state: %s is already %s — not sent, reporting no_change",
+                entity_id, current,
+            )
+            return {
+                "status": "no_change",
+                "current_state": current,
+                "message": (
+                    f"{entity_id} is already {current}; nothing was sent. "
+                    "The command was probably misheard."
+                ),
+            }
     ok = await asyncio.to_thread(ha_client.set_entity_state, entity_id, state or "")
     if ok:
         return {"status": "success"}
