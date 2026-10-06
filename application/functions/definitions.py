@@ -93,7 +93,21 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
     if not station_name:
         radio_status = await get_radio_status()
         if radio_status.get("is_radio_on_playlist"):
-            return {"action": "play"}
+            # The play itself is deferred, so the model would otherwise only
+            # ever hear "success" and announce "Włączam radio" while play()
+            # skips an already playing stream (04-05.10.2026). A frozen stream
+            # is not "playing": resume() reloads it.
+            already_playing = (
+                radio_status.get("playback_state") == "play"
+                and not _mpd().is_stream_stalled()
+            )
+            return {
+                "action": "play",
+                "for_model": {
+                    "already_playing": already_playing,
+                    "volume": radio_status.get("volume"),
+                },
+            }
         else:
             return {
                 "status": "error",
@@ -164,7 +178,13 @@ async def set_playback_volume(volume_percentage: int) -> dict:
     """
     metrics.AI_TOOL_CALLS.labels(function="set_playback_volume").inc()
     metrics.RADIO_VOLUME_CHANGES.labels(source="ai").inc()
-    return {"volume_percentage": volume_percentage}
+    # The previous level lets the model catch a direction mismatch, e.g.
+    # "zwiększ głośność na 5%" at 52% (03.10.2026: it went down and the model
+    # said it went up).
+    return {
+        "volume_percentage": volume_percentage,
+        "for_model": {"previous_volume": _mpd().get_restore_volume()},
+    }
 
 
 @register_function(name="request_for_user_input")

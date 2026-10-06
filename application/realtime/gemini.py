@@ -613,7 +613,9 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                             f"Deferring '{function_name}' for post-response execution. Payload: {payload}"
                         )
                         # Lie to the model, telling it the action was successful to not block conversation flow
-                        result = {"status": "success"}
+                        # Facts the function already knows (e.g. the radio is already
+                        # playing) go back with it, so the reply matches what will happen.
+                        result = {"status": "success", **payload.get("for_model", {})}
 
                 # 3. Standard execution for immediate functions
                 else:

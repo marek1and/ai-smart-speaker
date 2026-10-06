@@ -172,7 +172,11 @@ SET_HA_ENTITIES_STATE_FUNC = FunctionDeclaration(
 
 PLAY_INTERNET_RADIO_FUNC = FunctionDeclaration(
     name="play_internet_radio",
-    description="Searches for an internet radio station and plays it.",
+    description=(
+        "Searches for an internet radio station and plays it. Without station_name it resumes "
+        "the last station; then the result carries already_playing (true = the radio was "
+        "already playing and nothing changes) and volume (current level in %)."
+    ),
     parameters=Schema(
         type=Type.OBJECT,
         properties={
@@ -194,7 +198,10 @@ STOP_RADIO_FUNC = FunctionDeclaration(
 
 SET_PLAYBACK_VOLUME_FUNC = FunctionDeclaration(
     name="set_playback_volume",
-    description="Sets the playback volume of the MPD player.",
+    description=(
+        "Sets the playback volume of the MPD player. The result carries previous_volume "
+        "(the level in % before this change)."
+    ),
     parameters=Schema(
         type=Type.OBJECT,
         properties={
