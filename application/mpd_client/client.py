@@ -39,6 +39,9 @@ class MPDClientWrapper:
         # Mopidy reports "stop" for a moment after play while it buffers the
         # stream, so a stop seen before the first "play" is not a verdict yet.
         self._seen_play_since_start = False
+        # Station of the last start; a stream that dies is blamed on it, not on
+        # whatever station became current meanwhile.
+        self._started_key: Optional[str] = None
         # Mid-stream stall detection. When a stream breaks after it started,
         # Mopidy shuts its GStreamer pipeline down but keeps reporting "play"
         # with elapsed frozen at 0 (core only mirrors PAUSED from the audio
@@ -264,7 +267,7 @@ class MPDClientWrapper:
         if played_for > self.config.stream_start_grace and self._seen_play_since_start:
             return
 
-        key = self._radio_state.get_current_key()
+        key = self._started_key
         entry = self._radio_state.get_entry(key) if key else None
         station = entry.name if entry else "unknown"
         logger.error(
@@ -532,6 +535,7 @@ class MPDClientWrapper:
             or self._radio_state.get_key_by_url(url)
             or (station_name.lower() if station_name else None)
         )
+        self._started_key = effective_key
         if effective_key:
             self._radio_state.set_current_and_play(effective_key)
             entry = self._radio_state.get_entry(effective_key)
@@ -956,8 +960,12 @@ class MPDClientWrapper:
             queue_length = int(status.get("playlistlength", 0))
         except (TypeError, ValueError):
             queue_length = 0
+        key = self._radio_state.get_current_key()
         if queue_length == 0:
             logger.info("Empty queue on resume — reloading the last station")
+        elif status.get("state") != "play" and key and not self._radio_state.get_cached_url(key):
+            # Its URL was dropped as dead; the queue still holds it.
+            logger.info("No live URL cached for '%s' on resume — reloading the station", key)
         elif status.get("state") == "play" and self.is_stream_stalled():
             # play() would skip it as "already playing" and leave the room silent.
             logger.warning(
@@ -1008,6 +1016,7 @@ class MPDClientWrapper:
                 return
 
         current_key = self._radio_state.get_current_key()
+        self._started_key = current_key
         if current_key:
             self._radio_state.record_play(current_key)
             entry = self._radio_state.get_entry(current_key)

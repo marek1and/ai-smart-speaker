@@ -88,8 +88,9 @@ class RadioClient:
         key = station_name.lower().strip()
         pin, key = self._resolve_pin(key)
 
-        # 1. Hard-wired URL from the config — no network lookup, no cache.
-        if pin is not None and pin.url:
+        # 1. Hard-wired URL from the config — no lookup, no cache. A dead one
+        # falls through to the online lookup.
+        if pin is not None and pin.url and await self._url_is_alive(pin.url):
             name = pin.name or station_name
             if self._state:
                 # Mirror it into the state so URL→name lookups keep working when
@@ -98,10 +99,14 @@ class RadioClient:
             logger.info("Using pinned URL for '%s': %s", name, pin.url)
             return pin.url, name, key
 
-        # 2. URL cache hit — no network call needed
+        # 2. URL cache hit — checked first, so an expired link is re-resolved
+        # instead of handed to the player.
         ttl_s = self.config.url_cache_ttl_hours * 3600
         if self._state:
             cached_url = self._state.get_cached_url(key, max_age_s=ttl_s)
+            if cached_url and not await self._url_is_alive(cached_url):
+                self._state.forget_url(key)
+                cached_url = None
             if cached_url:
                 entry = self._state.get_entry(key)
                 name = entry.name if entry else station_name
