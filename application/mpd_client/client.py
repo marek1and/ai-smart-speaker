@@ -420,19 +420,14 @@ class MPDClientWrapper:
                 self.client = MPDClient()
                 self.client.timeout = self.config.connection_timeout or 5
 
-    async def _reconnect_unsafe(self, error: bool = False) -> bool:
+    async def _reconnect_unsafe(self) -> bool:
         """Disconnect and immediately reconnect. Must be called within a lock.
 
         Used to recover from BrokenPipeError / ConnectionResetError without
         waiting for the next caller to trigger a lazy reconnect.
         """
-        if error:
-            logger.info("MPD reconnecting after connection reset...")
-            metrics.MPD_RECONNECTIONS.inc()
-        else:
-            # Routine hygiene (e.g. after stop()), not a failure — saying "connection
-            # reset" here sent past log reviews chasing an MPD problem that never was.
-            logger.debug("MPD reconnecting to flush the command socket...")
+        logger.info("MPD reconnecting after connection reset...")
+        metrics.MPD_RECONNECTIONS.inc()
         await self._disconnect_unsafe()
         return await self._connect()
 
@@ -454,7 +449,7 @@ class MPDClientWrapper:
                     "MPD connection reset during load_station (%s), reconnecting...",
                     type(e).__name__,
                 )
-                if await self._reconnect_unsafe(error=True):
+                if await self._reconnect_unsafe():
                     try:
                         await asyncio.to_thread(self.client.clear)
                         await asyncio.to_thread(self.client.add, url)
@@ -500,7 +495,7 @@ class MPDClientWrapper:
                     "MPD connection reset during play_station (%s), reconnecting...",
                     type(e).__name__,
                 )
-                if await self._reconnect_unsafe(error=True):
+                if await self._reconnect_unsafe():
                     try:
                         await asyncio.to_thread(self.client.clear)
                         await asyncio.to_thread(self.client.add, url)
@@ -847,10 +842,6 @@ class MPDClientWrapper:
                 logger.info("Stopped MPD playback.")
                 self._is_playing = False
                 self._playback_started_at = None
-                # Reconnect to flush any unsolicited MPD notifications (e.g. state-change
-                # events) that land in the socket buffer after stop and would corrupt the
-                # protocol state for the next command.
-                await self._reconnect_unsafe()
             except asyncio.TimeoutError:
                 # Command timed out — assume stopped to avoid a stale True cache
                 # causing duck/unduck to behave as if music is still playing.
@@ -902,7 +893,7 @@ class MPDClientWrapper:
                 "MPD connection reset during status check (%s), reconnecting...",
                 type(e).__name__,
             )
-            if await self._reconnect_unsafe(error=True):
+            if await self._reconnect_unsafe():
                 try:
                     result = await self._run_mpd_cmd(self.client.status)
                     if result:
