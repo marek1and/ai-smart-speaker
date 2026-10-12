@@ -514,6 +514,38 @@ async def get_ha_entities_state(entity_ids: Optional[list[str]] = None) -> dict:
     return {"states": states}
 
 
+async def _no_change_off(entity_id: str, current: str) -> dict:
+    """no_change for OFF: lists the lights of the same room that are still on.
+
+    Room = light entity_id without its last "_" part (light.hall_upper_main → light.hall_upper_).
+    """
+    domain, object_id = entity_id.split(".", 1)
+    room = object_id.rsplit("_", 1)[0]
+    states = (
+        await asyncio.to_thread(ha_client.get_states_by_prefix, f"{domain}.{room}_")  # type: ignore[union-attr]
+        if domain == "light" and "_" in object_id
+        else {}
+    )
+    still_on = sorted(e for e, s in states.items() if e != entity_id and s == "on")
+    if still_on:
+        message = (
+            f"{entity_id} is already {current}; nothing was sent. In the same room "
+            f"these are on: {', '.join(still_on)}. The user most likely meant them — "
+            "turn them off now. Never turn anything on."
+        )
+    else:
+        message = (
+            f"{entity_id} is already {current}; nothing was sent and nothing else in "
+            "this room is on. Tell the user it is already off. Never turn anything on."
+        )
+    return {
+        "status": "no_change",
+        "current_state": current,
+        "on_in_same_room": still_on,
+        "message": message,
+    }
+
+
 @register_function(name="set_ha_entity_state")
 async def set_ha_entity_state(
     entity_id: Optional[str] = None,
@@ -548,6 +580,8 @@ async def set_ha_entity_state(
                 "set_ha_entity_state: %s is already %s — not sent, reporting no_change",
                 entity_id, current,
             )
+            if requested == "OFF":
+                return await _no_change_off(entity_id, current)
             return {
                 "status": "no_change",
                 "current_state": current,

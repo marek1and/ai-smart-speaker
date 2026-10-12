@@ -117,7 +117,8 @@ SET_HA_ENTITY_STATE_FUNC = FunctionDeclaration(
         "cover — position '0'-'100' (0=closed, 100=open). "
         "media_player — 'ON'/'OFF', volume '0'-'100', 'MUTE'/'UNMUTE'. "
         "status 'no_change' (with current_state) means the light/switch is already in the "
-        "requested ON/OFF state and nothing was sent."
+        "requested ON/OFF state and nothing was sent; for OFF, on_in_same_room lists the "
+        "lights of that room that are still on."
     ),
     parameters=Schema(
         type=Type.OBJECT,

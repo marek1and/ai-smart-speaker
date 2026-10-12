@@ -83,20 +83,31 @@ class HomeAssistantClient:
             metrics.HA_REQUESTS.labels(method='get', status='error').inc()
             return None
 
-    def get_states(self, entity_ids: list[str]) -> dict[str, str]:
-        """Returns {entity_id: state} for the given entities via a single HA API call."""
+    def _all_states(self) -> list[dict]:
         try:
             response = self._request("GET", f"{self.base_url}/states", 'get')
             metrics.HA_REQUESTS.labels(method='get', status='ok').inc()
         except requests.exceptions.RequestException as e:
             logger.error("Error listing entity states: %s", e)
             metrics.HA_REQUESTS.labels(method='get', status='error').inc()
-            return {}
+            return []
+        return response.json()
+
+    def get_states(self, entity_ids: list[str]) -> dict[str, str]:
+        """Returns {entity_id: state} for the given entities via a single HA API call."""
         wanted = set(entity_ids)
         return {
             s["entity_id"]: s["state"]
-            for s in response.json()
+            for s in self._all_states()
             if s["entity_id"] in wanted
+        }
+
+    def get_states_by_prefix(self, prefix: str) -> dict[str, str]:
+        """Returns {entity_id: state} for every entity whose id starts with prefix."""
+        return {
+            s["entity_id"]: s["state"]
+            for s in self._all_states()
+            if s["entity_id"].startswith(prefix)
         }
 
     def call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> bool:
