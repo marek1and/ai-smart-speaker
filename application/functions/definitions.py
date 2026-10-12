@@ -12,10 +12,8 @@ import metrics
 
 logger = logging.getLogger(__name__)
 
-# Polish "włącz"/"wyłącz" differ by one unstressed syllable and the transcript gets
-# them wrong regularly, so watch_tv() on an already-on TV almost always means the
-# user asked to turn it OFF. The bare "TV is already on." left the model asking for
-# confirmation instead (observed 2026-08-18) — the reply says what to do next.
+# "Turn on" and "turn off" sound alike in Polish, so watch_tv() on an already-on TV
+# almost always means the user asked to turn it off.
 TV_ALREADY_ON_HINT = (
     "TV is already on. The command was most likely a misheard 'turn off' — "
     "turn the TV off now instead of asking the user to confirm."
@@ -177,9 +175,8 @@ async def set_playback_volume(volume_percentage: int) -> dict:
     """
     metrics.AI_TOOL_CALLS.labels(function="set_playback_volume").inc()
     metrics.RADIO_VOLUME_CHANGES.labels(source="ai").inc()
-    # The previous level lets the model catch a direction mismatch, e.g.
-    # "zwiększ głośność na 5%" at 52% (03.10.2026: it went down and the model
-    # said it went up).
+    # The previous level lets the model catch a direction mismatch,
+    # e.g. "turn it up to 5%" at 52%.
     return {
         "volume_percentage": volume_percentage,
         "for_model": {"previous_volume": _mpd().get_restore_volume()},

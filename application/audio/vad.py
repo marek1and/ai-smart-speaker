@@ -64,12 +64,7 @@ class BaseVAD(ABC):
         Callers that need both the verdict and the score must use this instead
         of is_speech() + get_speech_probability(): Silero is recurrent, so
         scoring the same frame twice advances its LSTM state twice and the
-        model drifts out of sync with the audio. Replayed over the 16
-        false_wake clips from 20.08-06.09.2026 at the same 0.7 threshold:
-        double scoring found speech in 4 of them, single scoring in 8. The
-        misses were closed as "initial silence — likely false trigger" even
-        though the user had spoken (whisper reads "włącz radio", "włącz
-        Polsat", "włącz telewizor" in those clips).
+        model drifts out of sync with the audio and misses real speech.
         """
         probability = self.get_speech_probability(audio)
         return probability >= self.threshold, probability

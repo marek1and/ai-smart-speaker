@@ -743,12 +743,8 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                     else func(**args)
                 )
                 if isinstance(payload, dict) and payload.get("status") == "error":
-                    # The lookup already ran and failed (unknown station, no
-                    # stream URL), so there is nothing left to defer and
-                    # nothing that could still turn into a success. Hand the
-                    # model the real error instead of a fake one, or it
-                    # announces "Włączam Radio Eska" over silence — seen
-                    # 2026-09-09 19:27 for station_name="ESKA TV".
+                    # The lookup already failed: nothing to defer. Hand the model the
+                    # real error, or it announces a station that never starts.
                     logger.warning(
                         f"'{function_name}' failed before deferral: {payload.get('details')}"
                     )

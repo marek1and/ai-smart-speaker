@@ -8,11 +8,10 @@ Type=simple
 WorkingDirectory=/opt/ai-smart-speaker
 ExecStart=/opt/ai-smart-speaker/.venv/bin/python main.py
 
-# Automatyczny restart w przypadku błędu
 Restart=on-failure
 RestartSec=5
 
-# Logs landing in journalctl (np. journalctl --user -u ai-smart-speaker -f)
+# Logs landing in journalctl (e.g. journalctl --user -u ai-smart-speaker -f)
 StandardOutput=journal
 StandardError=journal
 
