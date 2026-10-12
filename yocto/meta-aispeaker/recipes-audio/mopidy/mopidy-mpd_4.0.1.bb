@@ -5,7 +5,7 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=3b83ef96387f14655fc854ddc3c6bd57"
 
 PYPI_PACKAGE = "mopidy_mpd"
 
-SRC_URI[sha256sum] = "0f118b1c46665c005575d13ad32906a0e477b698478ef6e950a7720a61e16ac8"
+SRC_URI[sha256sum] = "89630424725139e537614fa89655a278019058e218488f9115641bdc0184dcdc"
 
 inherit pypi python_setuptools_build_meta
 
