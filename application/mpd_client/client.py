@@ -608,6 +608,15 @@ class MPDClientWrapper:
         """
         logger.debug(f"set_volume(volume={volume}) called.")
         linear_volume = max(0, min(100, volume))
+        if linear_volume == 0:
+            # 0 means off: never leave a silent stream playing. Restore volume is kept.
+            logger.info(
+                "Volume 0 requested — stopping playback, restore volume stays %d%%",
+                self._restore_volume,
+            )
+            self._notify(volume=0)
+            await self.stop()
+            return
         self._restore_volume = linear_volume
         logger.info(f"User set new restore volume to {self._restore_volume}%")
 

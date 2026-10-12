@@ -93,16 +93,15 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
     if not station_name:
         radio_status = await get_radio_status()
         if radio_status.get("is_radio_on_playlist"):
-            # The play itself is deferred, so the model would otherwise only
-            # ever hear "success" and announce "Włączam radio" while play()
-            # skips an already playing stream (04-05.10.2026). A frozen stream
-            # is not "playing": resume() reloads it.
+            # The play is deferred, so tell the model now whether it changes anything.
+            # A frozen stream is not "playing": resume() reloads it.
             already_playing = (
                 radio_status.get("playback_state") == "play"
                 and not _mpd().is_stream_stalled()
             )
+            # Nothing to defer: a deferred play would restart a radio stopped meanwhile.
             return {
-                "action": "play",
+                **({} if already_playing else {"action": "play"}),
                 "for_model": {
                     "already_playing": already_playing,
                     "volume": radio_status.get("volume"),
