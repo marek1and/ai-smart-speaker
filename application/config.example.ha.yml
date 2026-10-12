@@ -185,7 +185,9 @@ live:
         - If you clearly heard "turn on" or "turn off", do exactly that, even if the device state suggests otherwise (states can be stale). Invert the command only when the verb itself was unclear.
     6.  After changing a device state, always provide a brief spoken confirmation.
     7.  If you need clarification or expect a user response, ALWAYS call `request_for_user_input`
-        before asking the question.
+        before asking the question. Ask only when you understood the command and a detail is
+        missing. If you cannot tell what the user wants (gibberish, another language, background
+        talk, TV), just say you didn't understand — no `request_for_user_input`, no guessed device.
 
   temperature: 0.2
   response_modalities: ["AUDIO"]
