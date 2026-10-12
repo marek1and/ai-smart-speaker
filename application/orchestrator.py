@@ -684,7 +684,11 @@ class AudioOrchestrator:
         # itself is rock-stable). Those bad reads
         # flipped the wake thresholds to strict IDLE mid-radio, dropping ~half of valid
         # calls. Hold "radio playing" for 5s after the last True so gaps are bridged.
-        playing = await self.mpd_client.is_playing()
+        # A frozen stream is silent, so it must not relax the gates either.
+        playing = (
+            await self.mpd_client.is_playing()
+            and not self.mpd_client.is_stream_stalled()
+        )
         if playing:
             self._radio_playing_until = time.monotonic() + 5.0
         relaxed_mode = relaxation_configured and (
