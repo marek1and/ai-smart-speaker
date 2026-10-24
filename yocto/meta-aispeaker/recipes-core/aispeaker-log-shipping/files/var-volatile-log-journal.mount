@@ -6,10 +6,12 @@ Requires=aispeaker-data-setup.service
 # journald picks up /var/log/journal when flushing from /run, so the bind mount
 # has to be in place before that happens
 Before=systemd-journal-flush.service
+# /var/log is a symlink to volatile/log and systemd refuses a mount path that
+# contains one, so the unit targets the canonical path
 
 [Mount]
 What=/data/var/log/journal
-Where=/var/log/journal
+Where=/var/volatile/log/journal
 Type=none
 Options=bind
 

@@ -69,6 +69,7 @@ if [ -f "$LOCAL_DIR/nfs.env" ]; then
     # shellcheck source=/dev/null
     . "$LOCAL_DIR/nfs.env"
     if [ -n "${NFS_EXPORT:-}" ]; then
+        # the mount point must exist in the image (read-only rootfs)
         MP="${NFS_MOUNTPOINT:-/mnt/nas}"
         OPTS="${NFS_OPTIONS:-vers=4,soft,timeo=50,retrans=2,noatime,_netdev}"
         base=$(systemd-escape -p "$MP")           # /mnt/nas -> mnt-nas

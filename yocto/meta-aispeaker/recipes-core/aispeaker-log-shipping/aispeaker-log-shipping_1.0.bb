@@ -13,7 +13,7 @@ SRC_URI = " \
     file://ship-speaker-logs.service \
     file://ship-speaker-logs.timer \
     file://aispeaker-log-shipping.default \
-    file://var-log-journal.mount \
+    file://var-volatile-log-journal.mount \
 "
 
 S = "${UNPACKDIR}"
@@ -22,7 +22,7 @@ inherit systemd
 
 # Only the timer and the mount are enabled; the service is what the timer
 # triggers, so it must not be enabled on its own (it has no [Install] section).
-SYSTEMD_SERVICE:${PN} = "ship-speaker-logs.timer var-log-journal.mount"
+SYSTEMD_SERVICE:${PN} = "ship-speaker-logs.timer var-volatile-log-journal.mount"
 SYSTEMD_AUTO_ENABLE = "enable"
 
 do_install() {
@@ -36,7 +36,7 @@ do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${S}/ship-speaker-logs.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${S}/ship-speaker-logs.timer ${D}${systemd_system_unitdir}/
-    install -m 0644 ${S}/var-log-journal.mount ${D}${systemd_system_unitdir}/
+    install -m 0644 ${S}/var-volatile-log-journal.mount ${D}${systemd_system_unitdir}/
 }
 
 # The systemd class only adds the units listed in SYSTEMD_SERVICE to FILES, so

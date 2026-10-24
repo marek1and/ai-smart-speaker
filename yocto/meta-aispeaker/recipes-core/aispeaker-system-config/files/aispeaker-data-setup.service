@@ -8,7 +8,7 @@ Description=Create writable data layout on /data
 # /data being mounted is the only ordering it actually needs.
 DefaultDependencies=no
 RequiresMountsFor=/data
-Before=var-lib-NetworkManager.mount var-log-journal.mount
+Before=var-lib-NetworkManager.mount var-volatile-log-journal.mount
 Before=NetworkManager.service
 Conflicts=shutdown.target
 Before=shutdown.target

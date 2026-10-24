@@ -14,6 +14,7 @@ SRC_URI = " \
     file://aispeaker-data-setup.sh \
     file://aispeaker-data-setup.service \
     file://var-lib-NetworkManager.mount \
+    file://10-aispeaker-volatile-lib.conf \
 "
 
 S = "${UNPACKDIR}"
@@ -50,11 +51,18 @@ do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${S}/aispeaker-data-setup.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${S}/var-lib-NetworkManager.mount ${D}${systemd_system_unitdir}/
+    install -d ${D}${systemd_system_unitdir}/systemd-timesyncd.service.d
+    install -m 0644 ${S}/10-aispeaker-volatile-lib.conf \
+        ${D}${systemd_system_unitdir}/systemd-timesyncd.service.d/
+
+    # mount point for the NFS share; the rootfs is read-only, so systemd
+    # cannot create it at boot
+    install -d ${D}/mnt/nas
     # NFS mount/automount units are NOT baked here — scripts/provision-data.sh
     # generates them from yocto/local/nfs.env (server, mount point, options are
     # all site-specific) into the /etc overlay on /data.
 }
 
-FILES:${PN} = "${sysconfdir} ${sbindir} ${systemd_system_unitdir}"
+FILES:${PN} = "${sysconfdir} ${sbindir} ${systemd_system_unitdir} /mnt/nas"
 
 RDEPENDS:${PN} = "networkmanager"

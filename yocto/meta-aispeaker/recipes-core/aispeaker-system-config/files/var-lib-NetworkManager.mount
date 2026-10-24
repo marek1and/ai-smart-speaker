@@ -3,6 +3,10 @@ Description=Persist NetworkManager state on /data (leases, seen-bssids)
 RequiresMountsFor=/data
 After=aispeaker-data-setup.service
 Requires=aispeaker-data-setup.service
+# var-volatile-lib.service lays a tmpfs overlay over /var/lib; mounting before it
+# would leave this bind hidden underneath and NM writing to RAM
+After=var-volatile-lib.service
+Wants=var-volatile-lib.service
 Before=NetworkManager.service
 
 [Mount]
