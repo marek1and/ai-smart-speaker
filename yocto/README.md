@@ -141,7 +141,11 @@ First boot: `ssh speaker@aispeaker.local`, then from the repo
 `application/sync-to-rpi.sh aispeaker` and in `/opt/ai-smart-speaker`:
 `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
 (openwakeword: `--no-deps`, as noted in requirements.txt; pip caches land in
-`/data/cache` via `XDG_CACHE_HOME`). Then, as root:
+`/data/cache` via `XDG_CACHE_HOME`). The openwakeword wheel ships without its
+feature models, so fetch them once:
+`.venv/bin/python -c 'import openwakeword.utils as u; u.download_models()'`
+(the app needs `melspectrogram.onnx`, `embedding_model.onnx` and
+`silero_vad.onnx`). Then, as root:
 `systemctl start ai-smart-speaker`.
 
 ## Boot time

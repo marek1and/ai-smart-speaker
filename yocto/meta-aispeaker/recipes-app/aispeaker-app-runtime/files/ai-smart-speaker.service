@@ -8,13 +8,16 @@ ConditionPathExists=/opt/ai-smart-speaker/.venv/bin/python
 [Service]
 Type=simple
 User=speaker
-SupplementaryGroups=audio,plugdev
+SupplementaryGroups=audio plugdev
 WorkingDirectory=/opt/ai-smart-speaker
 # pipewire runs in system mode; caches (huggingface etc.) must stay off the
 # read-only rootfs
 Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
 Environment=XDG_RUNTIME_DIR=/run/pipewire
 Environment=XDG_CACHE_HOME=/data/cache
+# stdout to the journal is block-buffered otherwise; print() lines would only
+# show up when the buffer fills or the process exits
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/ai-smart-speaker/.venv/bin/python main.py
 Restart=on-failure
 RestartSec=5
