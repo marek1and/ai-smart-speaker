@@ -22,8 +22,10 @@ BOOT="${2:-/boot/firmware}"   # Raspberry Pi OS mounts the FAT boot here
 
 [ -d "$BOOT" ] || { echo "Boot partition dir not found: $BOOT"; exit 1; }
 
-KERNEL="$(ls "$SRC"/Image "$SRC"/Image-* 2>/dev/null | head -n1)"
-INITRD="$(ls "$SRC"/*initramfs*.cpio.gz 2>/dev/null | head -n1)"
+# ls exits non-zero when one of the patterns matches nothing; under pipefail
+# that would end the script silently, so the checks below report it instead
+KERNEL="$(ls "$SRC"/Image "$SRC"/Image-* 2>/dev/null | head -n1 || true)"
+INITRD="$(ls "$SRC"/*initramfs*.cpio.gz 2>/dev/null | head -n1 || true)"
 [ -n "$KERNEL" ] || { echo "No kernel Image in $SRC"; exit 1; }
 [ -n "$INITRD" ] || { echo "No *initramfs*.cpio.gz in $SRC"; exit 1; }
 

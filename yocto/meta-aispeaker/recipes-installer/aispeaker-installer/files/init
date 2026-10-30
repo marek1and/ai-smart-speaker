@@ -3,9 +3,12 @@
 #
 # Booted once via RPi5 tryboot, this runs from RAM and writes the aispeaker
 # image onto the internal SD card, reading the compressed .wic from a USB
-# stick (so the source is never the disk being overwritten). On any failure
-# it drops to a shell instead of touching the card; a plain power-cycle then
-# returns to the previous system (tryboot is one-shot).
+# stick (so the source is never the disk being overwritten). The speaker has
+# no screen and no serial console, so every step is logged to installer.log on
+# the stick and, until the write starts, to aispeaker-installer.log on the
+# card's boot partition (readable from the old system after a failed run). Any
+# failure before the write reboots: tryboot is one-shot, so the previous system
+# comes back untouched.
 
 TARGET=/dev/mmcblk0
 PATTERN='aispeaker-image*.wic.bz2'
@@ -14,62 +17,119 @@ PATTERN='aispeaker-image*.wic.bz2'
 mount -t proc     proc /proc 2>/dev/null
 mount -t sysfs    sys  /sys  2>/dev/null
 mount -t devtmpfs dev  /dev  2>/dev/null || { mdev -s; }
+# the initramfs has no /tmp; a redirect into it fails and skips the command
+mkdir -p /tmp
 exec >/dev/console 2>&1
 
-echo
-echo "=== AISpeaker in-place installer ==="
-echo "Target card: $TARGET  |  Source: USB stick with $PATTERN"
+LOG=/dev/null
+BOOTLOG=/dev/null
+START=$(date +%s)
+
+# /dev/console is only the last console= on the command line; the kernel prints
+# /dev/kmsg on every console. sync after each line so a power cut keeps the log.
+log() {
+    echo "$*"
+    echo "aispeaker-installer: $*" > /dev/kmsg 2>/dev/null
+    line="$(date '+%F %T') $*"
+    echo "$line" >> "$BOOTLOG" 2>/dev/null
+    echo "$line" >> "$LOG" 2>/dev/null
+    sync
+}
+
+# card untouched: back to the current system
+abort() {
+    log "ERROR: $*"
+    log "Card left untouched; rebooting into the current system."
+    umount /mnt/src /mnt/boot 2>/dev/null
+    sync
+    sleep 5
+    reboot -f
+}
+
+# the card's boot partition takes the log until the stick is found
+mkdir -p /mnt/boot /mnt/src
+for _try in 1 2 3 4 5; do
+    if [ -b "${TARGET}p1" ] && mount -t vfat "${TARGET}p1" /mnt/boot 2>/dev/null; then
+        BOOTLOG=/mnt/boot/aispeaker-installer.log
+        break
+    fi
+    sleep 1
+done
+
+log "=== AISpeaker in-place installer, run started ==="
 
 # best-effort module load; on the RPi5 kernel USB/mmc may be built-in
 for m in xhci_pci usb_storage uas sd_mod vfat nls_cp437 nls_iso8859_1; do
     modprobe "$m" 2>/dev/null || true
 done
 
-echo "Waiting for USB storage to enumerate..."
+log "Waiting for USB storage to enumerate..."
 SRC=""
 for _try in 1 2 3 4 5 6 7 8 9 10; do
     for part in /dev/sd[a-z]1 /dev/sd[a-z]; do
         [ -b "$part" ] || continue
-        mkdir -p /mnt/src
-        mount -o ro "$part" /mnt/src 2>/dev/null || continue
+        # read-write: the log goes onto the same stick. The type must be given:
+        # busybox mount without -t fails here without a message.
+        mounted=""
+        for fs in vfat ext4; do
+            if mount -t "$fs" "$part" /mnt/src 2>/tmp/mount.err; then
+                mounted=$fs
+                break
+            fi
+        done
+        if [ -z "$mounted" ]; then
+            log "  mount $part failed: $(cat /tmp/mount.err)"
+            continue
+        fi
         found=$(ls /mnt/src/$PATTERN 2>/dev/null | head -n1)
         if [ -n "$found" ]; then SRC="$found"; break; fi
+        log "  $part has no $PATTERN"
         umount /mnt/src 2>/dev/null
     done
     [ -n "$SRC" ] && break
     sleep 1
 done
-
 if [ -z "$SRC" ]; then
-    echo "ERROR: no $PATTERN found on any USB stick."
-    echo "Insert the USB stick and reboot to retry, or flash manually below."
-    exec sh
+    log "  block devices: $(ls /dev/sd* /dev/mmcblk* 2>/dev/null | tr '\n' ' ')"
+    abort "no $PATTERN found on any USB stick"
 fi
 
-echo "Found image: $SRC"
-echo "Checking image integrity (the card is not touched yet)..."
-if ! bunzip2 -t "$SRC"; then
-    echo "ERROR: $SRC is corrupt or truncated — card left untouched."
-    echo "Copy the image onto the USB stick again and reboot to retry."
-    exec sh
-fi
+LOG=/mnt/src/installer.log
+log "=== AISpeaker in-place installer, run started ==="
+log "Image: $SRC  ->  target: $TARGET"
 
-echo "Writing to $TARGET in 5s — DO NOT power off. Ctrl-C to abort."
+log "Checking image integrity (the card is not touched yet)..."
+bunzip2 -t "$SRC" || abort "$SRC is corrupt or truncated"
+log "Image OK after $(( $(date +%s) - START )) s"
+
+# sectors written to the card, from the block layer's counters
+progress() {
+    while sleep 30; do
+        read -r _ _ _ _ _ _ sectors _ < "/sys/block/${TARGET#/dev/}/stat"
+        log "  written $(( sectors / 2048 )) MiB"
+    done
+}
+
+log "Writing to $TARGET in 5s — DO NOT power off."
+# the boot partition is about to be overwritten; only the stick logs from here
+BOOTLOG=/dev/null
+umount /mnt/boot
 sleep 5
-
-# A POSIX sh pipeline reports only dd's status, and dd writes whatever short
-# stream it gets and exits 0 — a truncated image used to end in "Flash complete".
-# The integrity test above catches a bad file; the marker catches a read error
-# from the stick during the write itself.
-FAIL=/unpack.failed
-rm -f "$FAIL"
-if { bunzip2 -c "$SRC" || touch "$FAIL"; } | dd of="$TARGET" bs=4M conv=fsync \
-        && [ ! -e "$FAIL" ]; then
+progress &
+PROGRESS=$!
+# no dd: busybox dd here has no conv=, and with dd in a pipeline only its exit
+# status counts; a plain redirect makes bunzip2's status cover read and write
+if bunzip2 -c "$SRC" > "$TARGET" && sync; then
+    kill "$PROGRESS" 2>/dev/null
+    log "Flash complete after $(( $(date +%s) - START )) s. Rebooting into the new system."
+    umount /mnt/src
     sync
-    echo "Flash complete. Rebooting into the new system in 5s..."
     sleep 5
     reboot -f
 else
-    echo "ERROR: write failed. Card may be inconsistent — reflash before use."
+    kill "$PROGRESS" 2>/dev/null
+    log "ERROR: write failed after $(( $(date +%s) - START )) s. Card is inconsistent — reflash it before use."
+    umount /mnt/src
+    sync
     exec sh
 fi
