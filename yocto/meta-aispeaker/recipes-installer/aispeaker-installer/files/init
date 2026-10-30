@@ -151,12 +151,24 @@ progress() {
     done
 }
 
-# The run log goes onto the boot partition of the new card. The kernel still
-# has the old partition table (no blockdev here to reread it), so the partition
-# is found through the new MBR and reached through a loop device.
+# 4 bytes, little-endian, at a byte offset of the card
+le32() {
+    dd if="$TARGET" bs=1 skip="$1" count=4 2>/dev/null | hexdump -e '1/4 "%u"'
+}
+
+# The run log goes onto the first partition of the new card (boot, or bootsel
+# on the A/B layout). The kernel still has the old partition table (no
+# blockdev here to reread it), so the partition is found through the new
+# partition table and reached through a loop device.
 save_log() {
-    # first sector of partition 1: 4 bytes, little-endian, at offset 454
-    start=$(dd if="$TARGET" bs=1 skip=454 count=4 2>/dev/null | hexdump -e '1/4 "%u"')
+    # MBR entry 1: type at 450, first sector at 454. Type 0xEE is GPT's
+    # protective entry; then the first sector of GPT entry 1 is at 1024 + 32
+    # (8 bytes; the low half suffices below 2 TiB).
+    if [ "$(dd if="$TARGET" bs=1 skip=450 count=1 2>/dev/null | hexdump -e '1/1 "%u"')" = 238 ]; then
+        start=$(le32 1056)
+    else
+        start=$(le32 454)
+    fi
     if [ "${start:-0}" -gt 0 ] && losetup -o $(( start * 512 )) /dev/loop0 "$TARGET" 2>/dev/null; then
         if mount -t vfat /dev/loop0 /mnt/boot 2>/dev/null; then
             cat "$RUNLOG" >> /mnt/boot/aispeaker-installer.log
