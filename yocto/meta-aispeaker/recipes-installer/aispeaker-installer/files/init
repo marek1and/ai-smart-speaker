@@ -127,12 +127,16 @@ log "Image: $SRC  ->  target: $TARGET"
 SRC_ON_STICK=$SRC
 SRC=/image.wic.bz2
 
+# One full decompression both tests the image and gives its size (for the
+# log). In a pipeline only wc's status counts, so a bunzip2 failure shows as
+# text on stderr.
 log "Checking image integrity (the card is not touched yet)..."
-if ! bunzip2 -t "$SRC" 2>/tmp/bunzip2.err; then
+IMG_SIZE=$(bunzip2 -c "$SRC" 2>/tmp/bunzip2.err | wc -c)
+if [ -s /tmp/bunzip2.err ] || [ "${IMG_SIZE:-0}" -eq 0 ]; then
     explain
     abort "$SRC_ON_STICK failed the integrity test (corrupt file or a read error from the stick)"
 fi
-log "Image OK after $(( $(date +%s) - START )) s"
+log "Image OK after $(( $(date +%s) - START )) s ($(( IMG_SIZE / 1048576 )) MiB unpacked)"
 
 # progress from the unpacking process itself: wchar is what it has written to
 # the card, rchar how far into the image it has read (the block layer's sector
@@ -193,14 +197,32 @@ PROGRESS=$!
 wait "$UNPACK"
 UNPACK_RC=$?
 kill "$PROGRESS" 2>/dev/null
-if [ "$UNPACK_RC" -eq 0 ] && sync; then
-    log "Flash complete after $(( $(date +%s) - START )) s. Rebooting into the new system."
+# A write error during the page cache's writeback reaches neither bunzip2 nor
+# sync (busybox sync takes no file argument), so success is decided by reading
+# the card back: drop the cache, so the reads really come from the card, and
+# compare it with the image. The card is longer than the image, so a good
+# write ends in "EOF on -" (the image ran out first); busybox cmp -n takes no
+# size beyond 4 GiB, so the length cannot be passed instead.
+VERIFY_RC=1
+if [ "$UNPACK_RC" -eq 0 ]; then
+    sync
+    echo 3 > /proc/sys/vm/drop_caches
+    log "Written after $(( $(date +%s) - START )) s; verifying the card against the image..."
+    bunzip2 -c "$SRC" 2>/tmp/bunzip2.err | cmp - "$TARGET" >/tmp/cmp.out 2>&1
+    if [ "$(cat /tmp/cmp.out)" = "cmp: EOF on -" ] && [ ! -s /tmp/bunzip2.err ]; then
+        VERIFY_RC=0
+    else
+        cat /tmp/cmp.out >> /tmp/bunzip2.err
+    fi
+fi
+if [ "$VERIFY_RC" -eq 0 ]; then
+    log "Flash complete and verified after $(( $(date +%s) - START )) s. Rebooting into the new system."
     save_log
     sleep 5
     reboot -f
 else
     explain
-    log "ERROR: write failed after $(( $(date +%s) - START )) s. Card is inconsistent — reflash it before use."
+    log "ERROR: write or verification failed after $(( $(date +%s) - START )) s. Card is inconsistent — reflash it before use."
     save_log
     exec sh
 fi
