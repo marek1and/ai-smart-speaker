@@ -4,9 +4,10 @@ After=multi-user.target
 Wants=multi-user.target
 
 [Service]
-Type=oneshot
+# exec, not oneshot: a oneshot holds the boot transaction open for the whole
+# check (60 s of app uptime), so "Startup finished" reported over a minute
+Type=exec
 ExecStart=/usr/sbin/aispeaker-health-check
-TimeoutStartSec=infinity
 
 [Install]
 WantedBy=multi-user.target

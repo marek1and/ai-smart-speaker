@@ -72,8 +72,15 @@ copy of the rootfs only, and the bundle's rootfs would differ from slot A's.
 `/data` is mounted by the overlayfs-etc preinit (by label).
 
 The rest of the card is left unallocated by the image. Grow `/data` once after
-installing, online and without unmounting (on the MBR layout it is partition 3):
-`printf 'Yes\n100%%\n' | parted ---pretend-input-tty /dev/mmcblk0 resizepart 6 && resize2fs /dev/mmcblk0p6`.
+installing, online and without unmounting. The image's backup GPT header sits
+at the end of the image, not of the card, so parted first asks to move it
+(`Fix`) and then needs a second run for the resize:
+
+```bash
+printf 'Fix\n' | parted ---pretend-input-tty /dev/mmcblk0 print
+printf 'Yes\n100%%\n' | parted ---pretend-input-tty /dev/mmcblk0 resizepart 6
+resize2fs /dev/mmcblk0p6
+```
 
 On `/data`:
 
