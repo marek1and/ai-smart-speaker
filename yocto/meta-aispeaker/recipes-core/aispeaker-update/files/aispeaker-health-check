@@ -37,9 +37,14 @@ deadline=$(( $(cut -d. -f1 /proc/uptime) + TRIAL_TIMEOUT ))
 why=""
 while [ "$(cut -d. -f1 /proc/uptime)" -lt "$deadline" ]; do
     if healthy; then
-        rauc status mark-good
-        echo "slot $current confirmed"
-        exit 0
+        # a failed mark-good (bootsel not writable) would leave [all] on the
+        # old slot and roll the update back on the next reboot, silently
+        if rauc status mark-good; then
+            echo "slot $current confirmed"
+            exit 0
+        fi
+        why="rauc status mark-good failed"
+        echo "$why — retrying"
     fi
     sleep 10
 done

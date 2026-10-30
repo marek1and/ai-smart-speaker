@@ -11,12 +11,14 @@
 #                       point [all] at it, which makes the switch permanent
 #
 # Until the second step, any reboot (watchdog, rollback timer, power cut)
-# returns to [all], the previous slot. Slot states live on /data.
+# returns to [all], the previous slot. [tryboot] then points at the confirmed
+# slot too, so only set-primary arms a trial. Slot states live in /data/rauc,
+# which only root can write.
 set -eu
 
 BOOTSEL=/dev/mmcblk0p1
 MNT=/run/aispeaker-bootsel
-STATE_DIR=/data/state/rauc/slot-state
+STATE_DIR=/data/rauc/slot-state
 
 part_of() {
     case "$1" in
@@ -31,13 +33,6 @@ slot_of() {
         2) echo A ;;
         3) echo B ;;
         *) echo "unknown boot partition: $1" >&2; exit 1 ;;
-    esac
-}
-
-other_of() {
-    case "$1" in
-        A) echo B ;;
-        B) echo A ;;
     esac
 }
 
@@ -104,7 +99,9 @@ case "${1:-}" in
         echo "$state" > "$STATE_DIR/$slot.new"
         mv "$STATE_DIR/$slot.new" "$STATE_DIR/$slot"
         if [ "$state" = good ] && [ "$slot" = "$(current_slot)" ]; then
-            write_autoboot "$slot" "$(other_of "$slot")"
+            # disarm [tryboot]: a stray `reboot '0 tryboot'` must not boot the
+            # other slot, which may hold an old or half-written release
+            write_autoboot "$slot" "$slot"
         fi
         ;;
     get-current)

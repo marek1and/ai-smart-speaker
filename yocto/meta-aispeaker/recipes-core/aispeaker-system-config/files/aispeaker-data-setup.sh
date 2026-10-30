@@ -11,6 +11,11 @@ mkdir -p /data/state
 mkdir -p /data/cache/mopidy
 mkdir -p /data/var/lib/NetworkManager
 mkdir -p /data/var/log/journal
+# RAUC and its bootloader backend run as root and must not share a directory
+# speaker can rename (see /data/state below)
+mkdir -p /data/rauc
+chown root:root /data/rauc
+chmod 0700 /data/rauc
 
 # Mopidy merges a second config for secrets/extensions; make sure it exists so
 # the --config list never points at a missing file
