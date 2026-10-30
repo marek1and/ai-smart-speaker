@@ -12,6 +12,7 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 SRC_URI = " \
     file://50-fixed-clock.conf \
     file://51-lowlatency-alsa.conf \
+    file://40-default-volume.conf \
     file://pipewire.service \
     file://wireplumber.service \
     file://pipewire-pulse.service \
@@ -28,6 +29,7 @@ do_install() {
     # WirePlumber: XVF3800 always active, period 240x4
     install -d ${D}${sysconfdir}/wireplumber/wireplumber.conf.d
     install -m 0644 ${S}/51-lowlatency-alsa.conf ${D}${sysconfdir}/wireplumber/wireplumber.conf.d/
+    install -m 0644 ${S}/40-default-volume.conf ${D}${sysconfdir}/wireplumber/wireplumber.conf.d/
 
     # the pipewire stack only ships user units upstream — install system ones
     install -d ${D}${sysconfdir}/systemd/system
