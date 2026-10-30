@@ -274,5 +274,5 @@ There is no implicit fallback — if a backend section is incomplete, it is igno
 
 ## Future Improvements
 
-- **Custom Linux Distribution:** A minimal [Yocto Project](https://www.yoctoproject.org/) distribution (read-only rootfs, mutable state on `/data`) lives in [`yocto/`](./yocto/README.md). The image builds; running it on the speaker is still to be validated.
-- **Music Streaming:** The Yocto image replaces MPD with Mopidy, which brings YouTube Music out of the box; Spotify still needs its GStreamer plugin built (see `yocto/README.md`).
+- **Spotify:** Mopidy already plays radio and YouTube Music; Spotify still needs its GStreamer plugin built (see [`yocto/README.md`](./yocto/README.md)).
+- **App in the image:** the application and its venv are deployed to `/data` with `sync-to-rpi.sh`; baking them into the image would let a RAUC update carry the app too.
