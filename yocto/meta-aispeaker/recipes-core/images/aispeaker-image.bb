@@ -9,10 +9,13 @@ IMAGE_FEATURES += "ssh-server-openssh read-only-rootfs overlayfs-etc"
 OVERLAYFS_ETC_MOUNT_POINT = "/data"
 OVERLAYFS_ETC_DEVICE = "LABEL=data"
 OVERLAYFS_ETC_FSTYPE = "ext4"
+OVERLAYFS_ETC_MOUNT_OPTIONS = "defaults,noatime"
 OVERLAYFS_ETC_USE_ORIG_INIT_NAME = "1"
 
-IMAGE_FSTYPES = "wic.bz2 wic.bmap"
+# ext4: the rootfs image that goes into the RAUC bundle (aispeaker-bundle)
+IMAGE_FSTYPES = "wic.bz2 wic.bmap ext4"
 WKS_FILE = "aispeaker.wks.in"
+do_image_wic[depends] += "aispeaker-bootsel:do_deploy"
 
 CORE_IMAGE_EXTRA_INSTALL = " \
     kernel-modules \
@@ -47,6 +50,7 @@ CORE_IMAGE_EXTRA_INSTALL = " \
     aispeaker-app-runtime \
     aispeaker-users \
     aispeaker-wifi \
+    aispeaker-update \
     \
     tzdata ca-certificates curl \
     usbutils htop e2fsprogs-resize2fs parted \
@@ -55,3 +59,43 @@ CORE_IMAGE_EXTRA_INSTALL = " \
 
 # debug tools only when needed:
 # EXTRA_IMAGE_FEATURES += "tools-debug"
+
+# The boot partition files ride along in the rootfs, so an update brings the
+# kernel, dtbs and firmware that match it: RAUC's post-install handler
+# (aispeaker-update) copies them onto the boot partition paired with the new
+# slot. Same selection and naming as the wic bootimg-partition plugin.
+ROOTFS_POSTPROCESS_COMMAND += "aispeaker_copy_boot_files"
+do_rootfs[depends] += " \
+    virtual/kernel:do_deploy \
+    rpi-bootfiles:do_deploy \
+    rpi-config:do_deploy \
+    rpi-cmdline:do_deploy \
+"
+
+python aispeaker_copy_boot_files() {
+    import glob, os, shutil
+    deploy = d.getVar('DEPLOY_DIR_IMAGE')
+    dest = os.path.join(d.getVar('IMAGE_ROOTFS'), 'usr/lib/aispeaker/boot')
+    bb.utils.mkdirhier(dest)
+    for entry in d.getVar('IMAGE_BOOT_FILES').split():
+        src, _, dst = entry.partition(';')
+        matches = sorted(glob.glob(os.path.join(deploy, src)))
+        if not matches:
+            bb.fatal("IMAGE_BOOT_FILES entry %s matches nothing in %s" % (entry, deploy))
+        for m in matches:
+            if not dst:
+                target = os.path.join(dest, os.path.basename(m))
+            elif dst.endswith('/'):
+                target = os.path.join(dest, dst, os.path.basename(m))
+            else:
+                target = os.path.join(dest, dst)
+            bb.utils.mkdirhier(os.path.dirname(target))
+            if os.path.isdir(m):
+                shutil.copytree(m, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(m, target)
+}
+
+# replaced by aispeaker-health-check, which confirms a slot only once the
+# speaker works, not as soon as it boots
+BAD_RECOMMENDATIONS += "rauc-mark-good"

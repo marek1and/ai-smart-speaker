@@ -57,15 +57,23 @@ Nothing personal (addresses, credentials, keys) is committed. Before building
 
 ## SD card layout (files/wic/aispeaker.wks.in)
 
-| Partition | Label | FS | Mount | Role |
-|---|---|---|---|---|
-| p1 256 MB | boot | vfat | `/boot` (ro) | RPi firmware + kernel |
-| p2 3 GB | root | ext4 | `/` **read-only** | entire OS |
-| p3 8 GB | data | ext4 | `/data` (rw, noatime) | everything mutable |
+GPT, A/B for RAUC updates (since 2026-10-30; the speaker as migrated that day
+still has the earlier boot/root/data MBR layout until its next install):
+
+| Partition | Label | FS | Role |
+|---|---|---|---|
+| p1 32 MB | bootsel | vfat | `autoboot.txt` only — the firmware's A/B switch |
+| p2 / p3 256 MB | bootA / bootB | vfat | firmware, kernel, dtbs, `cmdline.txt` of the slot |
+| p4 / p5 3 GB | rootA / rootB | ext4, **read-only** | the OS of each slot |
+| p6 8 GB | data | ext4 (rw, noatime) | everything mutable, shared by both slots |
+
+No partition is in `/etc/fstab`: wic would write mount points into its own
+copy of the rootfs only, and the bundle's rootfs would differ from slot A's.
+`/data` is mounted by the overlayfs-etc preinit (by label).
 
 The rest of the card is left unallocated by the image. Grow `/data` once after
-installing, online and without unmounting (done on the speaker: 8.6 → 53 GB):
-`printf 'Yes\n100%%\n' | parted ---pretend-input-tty /dev/mmcblk0 resizepart 3 && resize2fs /dev/mmcblk0p3`.
+installing, online and without unmounting (on the MBR layout it is partition 3):
+`printf 'Yes\n100%%\n' | parted ---pretend-input-tty /dev/mmcblk0 resizepart 6 && resize2fs /dev/mmcblk0p6`.
 
 On `/data`:
 
@@ -257,6 +265,59 @@ So out of the box you get MPD-protocol + radio + YouTube (Music); Spotify is one
 > Smoke-test after the swap: confirm `mpc -h 127.0.0.1 status`, adding a radio
 > stream URL, and that `mpc outputs` shows `Mute` disabled while playing.
 
+## System updates (RAUC, A/B)
+
+The running system stays untouched while the other slot is written; the new
+slot then boots once and only becomes the default after it proved healthy.
+
+- **Switch:** the RPi5 firmware reads `autoboot.txt` on p1 — `[all]` names the
+  boot partition of a normal boot, `[tryboot]` the one used once after
+  `reboot '0 tryboot'`. RAUC drives it through a custom bootloader backend
+  (`recipes-core/aispeaker-update/files/rpi-tryboot-backend`): installing
+  points `[tryboot]` at the new slot, `rauc status mark-good` on the running
+  slot points `[all]` at it.
+- **Boot files ride in the rootfs** (`/usr/lib/aispeaker/boot`); RAUC's
+  post-install handler formats the new slot's boot partition, copies them and
+  sets `root=` / `rauc.slot=` in its `cmdline.txt`. The bundle holds only the
+  rootfs, so kernel and rootfs always come from the same build.
+- **Confirmation:** `aispeaker-health-check.service` marks the slot good once
+  the network is up, `sshd.socket` listens and `ai-smart-speaker` (when
+  deployed) has been active for 60 s. On a trial boot that does not get there
+  within 10 min it reboots — back to the previous slot.
+- **Rollback without touching the speaker:** a kernel that cannot mount its
+  root panics and reboots (`panic=10`); a hang is reset by the watchdog
+  (systemd `RuntimeWatchdogSec=30s`); an unhealthy system by the health check.
+  Each reboot before the confirmation lands on the previous slot.
+
+Build, publish, install:
+
+```bash
+yocto/kas.sh build yocto/kas/aispeaker.yml
+yocto/kas.sh build --target aispeaker-bundle yocto/kas/aispeaker.yml
+cp yocto/build/tmp/deploy/images/raspberrypi5/aispeaker-bundle-raspberrypi5.raucb /mnt/qnap/aispeaker/updates/
+ssh aispeaker-root aispeaker-update /mnt/nas/updates/aispeaker-bundle-raspberrypi5.raucb
+ssh aispeaker-root rauc status        # after the reboot: booted and activated slot
+```
+
+Verified on the spare Pi (2026-10-30): A→B update (70 s install, ~35 s to the
+confirmed new slot), a slot that cannot mount its root (back on the old slot
+after 37 s), a slot whose app does not come up (back after the trial window),
+and a plain reboot staying on the confirmed slot. The serial console showed
+the broken-root case in full: the firmware in `TRYBOOT_A_B_MODE` picked boot
+partition 2, the kernel panicked at 0.64 s ("Unable to mount root fs",
+`root=/dev/mmcblk0p9`), rebooted after 10 s, and the firmware took partition 3.
+`rootwait=30` only waits while the card itself is missing; a partition that
+does not exist fails at once.
+
+Signing: `yocto/local/rauc/` (git-ignored) holds the CA and the signing key and
+certificate; the image carries the CA certificate (`rauc-conf`). **Without
+these files no update can be issued** — keep a copy outside this machine. The
+signing certificate must not carry `extendedKeyUsage=codeSigning`: RAUC checks
+the S/MIME purpose by default and rejects it ("unsuitable certificate purpose").
+
+`/data` and the `/etc` overlay are shared by both slots: a change in an image's
+`/etc` is hidden by a file of the same name left in the overlay.
+
 ## In-place install — no card removal, no case opening
 
 How the speaker went from Raspberry Pi OS to Yocto on 2026-10-30, and how a new
@@ -266,7 +327,9 @@ one-shot: any failure before the write, or a power cut before it, brings the
 current system back.
 
 **The whole card is rewritten, `/data` included** — afterwards redeploy the app
-(Build section). Phase 3 (A/B) is what removes this.
+(Build section). On the A/B layout use RAUC instead (above); staging this
+installer there does not work yet — tryboot boots the `[tryboot]` slot of
+`autoboot.txt`, not the `os_prefix` directory the script sets up.
 
 1. Build the image and the installer, then bake the site configuration (WiFi,
    NFS) into a copy of the image. The speaker has no screen, no serial console
@@ -378,10 +441,10 @@ NAS by hand when they are needed for training.
   OS: 19.3 s).
 - **Phase 2**: optionally bake the app + its Python deps into the image
   (wheel-based recipes). Log shipping is done; recordings stay local (above).
-- **Phase 3**: A/B updates — two boot+root slot pairs via the RPi5 firmware's
-  `tryboot_a_b` + an update tool (RAUC, or a small script), bundle pulled from
-  the NAS. Needs a new partition layout, i.e. one more full install. Until then
-  a system update is the in-place install above, which wipes `/data`.
+- **Phase 3**: A/B updates with RAUC (above) — built and verified on the spare
+  Pi on 2026-10-30. The speaker gets the A/B layout with its next full install
+  (the in-place install above, which wipes `/data` one last time); from then on
+  system updates keep `/data`.
 
 ## Build status & known iteration points
 

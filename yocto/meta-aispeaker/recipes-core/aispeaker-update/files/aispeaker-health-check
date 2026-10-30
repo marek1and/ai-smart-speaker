@@ -1,0 +1,52 @@
+#!/bin/sh
+# Confirms the running slot once the speaker is healthy: network up, sshd
+# listening, and ai-smart-speaker active for HEALTHY_FOR seconds (when the app
+# is deployed). Confirming means `rauc status mark-good`, which makes the RAUC
+# backend point the firmware's normal boot at this slot.
+#
+# On a trial boot (the slot is not yet the firmware's normal one) that does not
+# get healthy within TRIAL_TIMEOUT, it reboots: tryboot is one-shot, so the
+# previous slot comes back. On a normal boot it only reports — a reboot loop
+# there would not help.
+set -u
+
+TRIAL_TIMEOUT="${TRIAL_TIMEOUT:-600}"
+HEALTHY_FOR="${HEALTHY_FOR:-60}"
+APP_VENV=/opt/ai-smart-speaker/.venv/bin/python
+
+BACKEND=/usr/lib/aispeaker-update/rpi-tryboot-backend
+current=$($BACKEND get-current)
+primary=$($BACKEND get-primary 2>/dev/null)
+trial=0
+[ -n "$current" ] && [ "$current" != "$primary" ] && trial=1
+echo "slot $current, normal boot slot $primary, trial=$trial"
+
+healthy() {
+    [ "$(nmcli -t -f STATE general 2>/dev/null)" = connected ] || { why="no network"; return 1; }
+    systemctl -q is-active sshd.socket || { why="sshd.socket not listening"; return 1; }
+    if [ -x "$APP_VENV" ]; then
+        systemctl -q is-active ai-smart-speaker || { why="ai-smart-speaker not active"; return 1; }
+        since=$(systemctl show -p ActiveEnterTimestampMonotonic --value ai-smart-speaker)
+        now=$(cut -d' ' -f1 /proc/uptime | cut -d. -f1)
+        [ $(( now - since / 1000000 )) -ge "$HEALTHY_FOR" ] || { why="ai-smart-speaker up for less than ${HEALTHY_FOR}s"; return 1; }
+    fi
+    return 0
+}
+
+deadline=$(( $(cut -d. -f1 /proc/uptime) + TRIAL_TIMEOUT ))
+why=""
+while [ "$(cut -d. -f1 /proc/uptime)" -lt "$deadline" ]; do
+    if healthy; then
+        rauc status mark-good
+        echo "slot $current confirmed"
+        exit 0
+    fi
+    sleep 10
+done
+
+echo "not healthy after ${TRIAL_TIMEOUT}s: $why"
+if [ "$trial" = 1 ]; then
+    echo "trial boot failed — rebooting into slot $primary"
+    systemctl reboot
+fi
+exit 1

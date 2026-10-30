@@ -1,0 +1,12 @@
+[Unit]
+Description=Confirm the running system slot once the speaker is healthy
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/aispeaker-health-check
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

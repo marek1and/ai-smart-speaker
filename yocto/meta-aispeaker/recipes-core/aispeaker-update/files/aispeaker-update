@@ -1,0 +1,12 @@
+#!/bin/sh
+# Installs a RAUC bundle into the inactive slot and boots it once (tryboot).
+# aispeaker-health-check confirms it after a healthy boot; otherwise the next
+# reboot (watchdog, its rollback timer, a power cut) returns to this slot.
+#
+# Usage: aispeaker-update <bundle.raucb>      e.g. /mnt/nas/updates/aispeaker-bundle.raucb
+set -eu
+BUNDLE="${1:?usage: aispeaker-update <bundle.raucb>}"
+
+rauc install "$BUNDLE"
+echo "Installed; booting the new slot once (tryboot)."
+systemctl reboot --reboot-argument="0 tryboot"

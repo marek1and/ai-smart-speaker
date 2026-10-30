@@ -1,0 +1,41 @@
+#!/bin/sh
+# RAUC post-install handler: fills the boot partition paired with the rootfs
+# slot that was just written, from the boot files that image carries in
+# /usr/lib/aispeaker/boot, and points its cmdline.txt at that slot.
+set -eu
+
+NEWROOT=/run/aispeaker-newroot
+NEWBOOT=/run/aispeaker-newboot
+
+for i in $RAUC_TARGET_SLOTS; do
+    eval class=\$RAUC_SLOT_CLASS_$i
+    eval device=\$RAUC_SLOT_DEVICE_$i
+    eval bootname=\$RAUC_SLOT_BOOTNAME_$i
+    [ "$class" = rootfs ] || continue
+
+    case "$bootname" in
+        A) bootdev=/dev/mmcblk0p2; rootdev=/dev/mmcblk0p4 ;;
+        B) bootdev=/dev/mmcblk0p3; rootdev=/dev/mmcblk0p5 ;;
+        *) echo "unknown bootname: $bootname" >&2; exit 1 ;;
+    esac
+    [ "$device" = "$rootdev" ] || { echo "slot $bootname is $device, expected $rootdev" >&2; exit 1; }
+
+    mkdir -p "$NEWROOT" "$NEWBOOT"
+    mount -o ro "$device" "$NEWROOT"
+    trap 'umount "$NEWBOOT" 2>/dev/null; umount "$NEWROOT" 2>/dev/null' EXIT
+    [ -f "$NEWROOT/usr/lib/aispeaker/boot/cmdline.txt" ] ||
+        { echo "the new rootfs carries no boot files" >&2; exit 1; }
+
+    mkfs.vfat -n "boot$bootname" "$bootdev" >/dev/null
+    mount -t vfat "$bootdev" "$NEWBOOT"
+    cp -r "$NEWROOT/usr/lib/aispeaker/boot/." "$NEWBOOT/"
+    sed -i -e "s#root=/dev/mmcblk0p[0-9]*#root=$rootdev#" \
+           -e "s#rauc\.slot=[AB]#rauc.slot=$bootname#" "$NEWBOOT/cmdline.txt"
+    grep -q "rauc.slot=$bootname" "$NEWBOOT/cmdline.txt" ||
+        { echo "cmdline.txt has no rauc.slot=" >&2; exit 1; }
+    sync
+    umount "$NEWBOOT"
+    umount "$NEWROOT"
+    trap - EXIT
+    echo "boot partition $bootdev filled for slot $bootname"
+done

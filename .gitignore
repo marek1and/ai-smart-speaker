@@ -25,6 +25,7 @@ yocto/meta-yocto/
 yocto/poky/
 yocto/meta-openembedded/
 yocto/meta-raspberrypi/
+yocto/meta-rauc/
 # safety net: a plain `kas-container build` (without yocto/kas.sh) drops these
 # at the repo root — always prefer the wrapper, but never let them reach git
 /build/

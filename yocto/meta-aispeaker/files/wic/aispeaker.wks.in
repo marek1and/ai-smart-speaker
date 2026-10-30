@@ -1,12 +1,24 @@
-# SD card layout for the AI speaker (RPi5):
-#  p1  boot   (FAT32, RPi firmware + kernel)         — effectively RO (mounted ro)
-#  p2  root   (ext4, read-only rootfs)               — RO, power-loss resilient
-#  p3  data   (ext4, rw) — /data: application (.venv), recordings, MPD state,
-#             /etc overlay, /var/lib/NetworkManager etc.
+# SD card layout for the AI speaker (RPi5), A/B for RAUC updates:
+#  p1  bootsel (FAT)  autoboot.txt only: the firmware picks the boot partition
+#  p2  bootA   (FAT)  RPi firmware + kernel + cmdline.txt of slot A (root p4)
+#  p3  bootB   (FAT)  the same for slot B (root p5); filled by the first update
+#  p4  rootA   (ext4, read-only rootfs)
+#  p5  rootB   (ext4, read-only rootfs)
+#  p6  data    (ext4, rw) — /data: application (.venv), recordings, Mopidy state,
+#              /etc overlay, NetworkManager state, journal. Shared by both
+#              slots, so an update keeps it. The rest of the card stays
+#              unallocated; grow /data once after installing (yocto/README.md).
 #
-# The rest of the card stays unallocated — /data can be grown after flashing
-# (parted + resize2fs) or by raising --size below.
+# The FAT partitions get the "basic data" type: the RPi bootloader reads FAT
+# from GPT partitions of that type. No mount points here: wic would write them
+# into the fstab of its own rootfs copy only, and the RAUC bundle's rootfs
+# would differ from slot A's. /data is mounted by the overlayfs-etc preinit.
 
-part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 256M --fsoptions "ro,nofail"
-part /     --source rootfs            --ondisk mmcblk0 --fstype=ext4 --label root --align 4096 --size 3G
-part /data                            --ondisk mmcblk0 --fstype=ext4 --label data --align 4096 --size 8G --fsoptions "defaults,noatime,nofail"
+bootloader --ptable gpt
+
+part --source rootfs --rootfs-dir=${DEPLOY_DIR_IMAGE}/aispeaker-bootsel --ondisk mmcblk0 --fstype=vfat --label bootsel --part-name bootsel --part-type EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 --align 4096 --fixed-size 32M
+part --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label bootA --part-name bootA --part-type EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 --align 4096 --fixed-size 256M
+part --ondisk mmcblk0 --fstype=vfat --label bootB --part-name bootB --part-type EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 --align 4096 --fixed-size 256M
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootA --part-name rootA --align 4096 --fixed-size 3G
+part --ondisk mmcblk0 --fstype=ext4 --label rootB --part-name rootB --align 4096 --fixed-size 3G
+part --ondisk mmcblk0 --fstype=ext4 --label data --part-name data --align 4096 --fixed-size 8G

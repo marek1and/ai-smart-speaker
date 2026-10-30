@@ -1,0 +1,117 @@
+#!/bin/sh
+# RAUC custom bootloader backend for the RPi5 firmware's tryboot A/B switch.
+#
+# autoboot.txt on the first partition (bootsel) names the boot partition:
+# [all] for a normal boot, [tryboot] for one boot after `reboot '0 tryboot'`.
+# Slot A boots from p2 (root p4), slot B from p3 (root p5).
+#
+#   set-primary X       point [tryboot] at X; aispeaker-update then reboots
+#                       with the tryboot flag, so X boots once
+#   set-state X good    on the slot that is running (aispeaker-health-check):
+#                       point [all] at it, which makes the switch permanent
+#
+# Until the second step, any reboot (watchdog, rollback timer, power cut)
+# returns to [all], the previous slot. Slot states live on /data.
+set -eu
+
+BOOTSEL=/dev/mmcblk0p1
+MNT=/run/aispeaker-bootsel
+STATE_DIR=/data/state/rauc/slot-state
+
+part_of() {
+    case "$1" in
+        A) echo 2 ;;
+        B) echo 3 ;;
+        *) echo "unknown slot: $1" >&2; exit 1 ;;
+    esac
+}
+
+slot_of() {
+    case "$1" in
+        2) echo A ;;
+        3) echo B ;;
+        *) echo "unknown boot partition: $1" >&2; exit 1 ;;
+    esac
+}
+
+other_of() {
+    case "$1" in
+        A) echo B ;;
+        B) echo A ;;
+    esac
+}
+
+mount_bootsel() {
+    mkdir -p "$MNT"
+    if mountpoint -q "$MNT"; then
+        mount -o remount,"$1" "$MNT"
+    else
+        mount -t vfat -o "$1" "$BOOTSEL" "$MNT"
+    fi
+}
+
+# boot_partition= of a section of autoboot.txt
+read_part() {
+    awk -v sec="[$1]" '
+        /^\[/ { insec = ($0 == sec) }
+        insec && /^boot_partition=/ { sub(/^boot_partition=/, ""); print; exit }
+    ' "$MNT/autoboot.txt"
+}
+
+# rewritten only when it changes: no FAT write on a normal boot
+write_autoboot() {
+    all=$(part_of "$1")
+    try=$(part_of "$2")
+    mount_bootsel ro
+    if [ "$(read_part all)" = "$all" ] && [ "$(read_part tryboot)" = "$try" ]; then
+        return 0
+    fi
+    mount_bootsel rw
+    cat > "$MNT/autoboot.txt.new" <<EOF
+[all]
+tryboot_a_b=1
+boot_partition=$all
+[tryboot]
+boot_partition=$try
+EOF
+    sync "$MNT/autoboot.txt.new"
+    mv "$MNT/autoboot.txt.new" "$MNT/autoboot.txt"
+    sync
+    mount_bootsel ro
+}
+
+current_slot() {
+    sed -n 's/.*rauc\.slot=\([AB]\).*/\1/p' /proc/cmdline
+}
+
+case "${1:-}" in
+    get-primary)
+        mount_bootsel ro
+        slot_of "$(read_part all)"
+        ;;
+    set-primary)
+        slot=$2
+        mount_bootsel ro
+        write_autoboot "$(slot_of "$(read_part all)")" "$slot"
+        ;;
+    get-state)
+        cat "$STATE_DIR/$2" 2>/dev/null || echo good
+        ;;
+    set-state)
+        slot=$2
+        state=$3
+        mkdir -p "$STATE_DIR"
+        echo "$state" > "$STATE_DIR/$slot.new"
+        mv "$STATE_DIR/$slot.new" "$STATE_DIR/$slot"
+        if [ "$state" = good ] && [ "$slot" = "$(current_slot)" ]; then
+            write_autoboot "$slot" "$(other_of "$slot")"
+        fi
+        ;;
+    get-current)
+        current_slot
+        ;;
+    *)
+        echo "usage: $0 get-primary|set-primary <slot>|get-state <slot>|set-state <slot> <good|bad>|get-current" >&2
+        exit 1
+        ;;
+esac
