@@ -19,5 +19,11 @@ mkdir -p /data/var/log/journal
 # This file lives on /data and is never in git.
 EOF
 
-chown -R speaker:speaker /data/opt /data/opt/ai-smart-speaker \
-    /data/recordings /data/music /data/mopidy /data/state /data/cache
+# Not -R: busybox chown follows symlinks, and the venv's bin/python points into
+# the read-only rootfs, so a recursive chown failed the unit (and with it the
+# journal and NetworkManager bind mounts) once the app was deployed. It also
+# touched every inode under the venv on each boot. What is created inside
+# these directories later belongs to speaker anyway.
+chown speaker:speaker /data/opt /data/opt/ai-smart-speaker \
+    /data/recordings /data/music /data/mopidy /data/state /data/cache \
+    /data/cache/mopidy
