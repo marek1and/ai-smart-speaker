@@ -310,8 +310,9 @@ Once MPD is running, you can ask the assistant to play radio stations.
 1. **User Command:** You ask the assistant to play a radio station (e.g., "Play RMF FM").
 2. **Function Calling:** The LLM uses the `play_internet_radio` tool with the station name.
 3. **Station Resolution:** The system resolves the stream URL using this priority chain:
-   - **Pinned URL** from the config — wins over everything, no network call. The escape hatch
-     for a station whose RadioBrowser entry is wrong.
+   - **Pinned URL** from the config — wins over everything; the escape hatch for a station
+     whose RadioBrowser entry is wrong. It is probed once and skipped only when the server
+     says it is gone (HTTP 404/410), not when it merely refuses the probe or has a 5xx.
    - **URL cache** in `radio_state.json` — instant, but only while the entry is younger than
      `url_cache_ttl_hours`; a stale one is re-resolved.
    - **Pinned station UUID** — looked up via RadioBrowser, the result is probed before caching.

@@ -84,14 +84,15 @@ resize2fs /dev/mmcblk0p6
 
 On `/data`:
 
-- `/data/opt/ai-smart-speaker` — application + `.venv` (symlinked from `/opt/ai-smart-speaker`, so `sync-to-rpi.sh` keeps working unchanged)
-- `/data/recordings`, `/data/music`, `/data/mopidy` — recordings, music, Mopidy state
+- `/data/opt/ai-smart-speaker` — application + `.venv` (symlinked from `/opt/ai-smart-speaker`, so `sync-to-rpi.sh` keeps working unchanged); its `recordings/` holds the wake word clips and session recordings
+- `/data/music`, `/data/mopidy` — music, Mopidy state
 - `/data/mopidy/mopidy.conf` — site-specific Mopidy overrides (Spotify/YouTube credentials) — never in git
 - `/data/cache` — pip / huggingface / Mopidy caches (`XDG_CACHE_HOME`)
 - `/data/overlay-etc/` — writable `/etc` overlay (SSH host keys, NM WiFi profiles) — `overlayfs-etc` image feature
 - `/data/var/lib/NetworkManager` — bind-mounted onto `/var/lib/...`
-- `/data/var/log/journal` — bind-mounted onto `/var/log/journal` (persistent journal)
-- `/data/state` — small service state, e.g. the log-shipping cursor
+- `/data/var/log/journal` — bind-mounted onto `/var/volatile/log/journal`, i.e. `/var/log/journal` (persistent journal)
+- `/data/state` — small service state owned by `speaker`: WirePlumber's (`XDG_STATE_HOME`), the log-shipping cursor
+- `/data/rauc` — RAUC's status and the slot states of the tryboot backend; root only (`0700`), never under `/data/state`, which `speaker` can rename
 
 System journal: **persistent on `/data`** (`Storage=persistent`, capped at
 200 MB), bind-mounted from `/data/var/log/journal` before journald flushes. On
@@ -269,8 +270,9 @@ false` by default:
 So out of the box you get MPD-protocol + radio + YouTube (Music); Spotify is one
 `cargo bitbake` + rebuild away.
 
-> Smoke-test after the swap: confirm `mpc -h 127.0.0.1 status`, adding a radio
-> stream URL, and that `mpc outputs` shows `Mute` disabled while playing.
+> Smoke-test after the swap: there is no `mpc` on the image; speak the MPD
+> protocol with `printf 'status\nclose\n' | nc 127.0.0.1 6600` (`outputs`,
+> `add <url>`, `play`), or tunnel the port and use `mpc` from another machine.
 
 ## System updates (RAUC, A/B)
 
@@ -282,15 +284,18 @@ slot then boots once and only becomes the default after it proved healthy.
   `reboot '0 tryboot'`. RAUC drives it through a custom bootloader backend
   (`recipes-core/aispeaker-update/files/rpi-tryboot-backend`): installing
   points `[tryboot]` at the new slot, `rauc status mark-good` on the running
-  slot points `[all]` at it.
+  slot points both `[all]` and `[tryboot]` at it — so a stray tryboot later
+  boots the same slot, never an old or half-written one. Its state lives in
+  `/data/rauc` (root only).
 - **Boot files ride in the rootfs** (`/usr/lib/aispeaker/boot`); RAUC's
   post-install handler formats the new slot's boot partition, copies them and
   sets `root=` / `rauc.slot=` in its `cmdline.txt`. The bundle holds only the
   rootfs, so kernel and rootfs always come from the same build.
 - **Confirmation:** `aispeaker-health-check.service` marks the slot good once
   the network is up, `sshd.socket` listens and `ai-smart-speaker` (when
-  deployed) has been active for 60 s. On a trial boot that does not get there
-  within 10 min it reboots — back to the previous slot.
+  deployed) has been active for 60 s; a failed `mark-good` (bootsel not
+  writable) is retried. On a trial boot that does not get there within 10 min
+  it reboots — back to the previous slot.
 - **Rollback without touching the speaker:** a kernel that cannot mount its
   root panics and reboots (`panic=10`); a hang is reset by the watchdog
   (systemd `RuntimeWatchdogSec=30s`); an unhealthy system by the health check.
@@ -372,9 +377,12 @@ installer there does not work yet — tryboot boots the `[tryboot]` slot of
    --reboot-argument='0 tryboot'`).
 
 What the installer does: waits 10 s, copies the image (~180 MB) into RAM — up
-to three attempts — tests it with `bunzip2 -t`, then writes the card from RAM
-and reboots into the new system. On the speaker this took 10.5 min (74 s copy
-and test, 598 s write); 15 min on the spare Pi's slower card. The log goes to
+to three attempts — decompresses it once as an integrity test, writes the card
+from RAM, then drops the page cache and compares the card with the image
+before it reports success and reboots (a writeback error reaches neither
+bunzip2 nor busybox `sync`). Without the read-back an install took 10.5–12 min
+on the speaker and 15–18 min on the spare Pi's slower card; the read-back adds
+about one read of the card. The log goes to
 `aispeaker-installer.log` on the boot partition: the old one until the write
 starts, the new one afterwards (`/boot/aispeaker-installer.log` on Yocto).
 
@@ -473,6 +481,13 @@ What the trimming removed (see `conf/distro/aispeaker.conf`):
 - **SBOM generation** — wrynose moved `create-spdx` into `INHERIT_DISTRO`, so it
   is on by default; it produced a 32 MB spdx.json and 16% of all build tasks.
 - **bluetooth** — removed from both DISTRO_FEATURES and MACHINE_FEATURES.
+- **Services with nothing to do** (2026-10-30): `3g`/`nfc` from poky's default
+  DISTRO_FEATURES (ofono, neard), NetworkManager's `dnsmasq`, systemd's userdb
+  (userdbd + worker pool, ~28 MB), busybox syslog/klogd (duplicate the
+  journal); `rpcbind` stays installed for nfs-utils-client but disabled (NFSv4).
+  The speaker then runs 18 services, as many as on Raspberry Pi OS.
+- **Swap:** 512 MB zram (zstd) instead of none — the speaker has 1 GB; swap on
+  the SD card would wear it.
 
 Python is the largest remaining item at 171 MB (yt_dlp 25 MB, chardet 24 MB,
 pip 12 MB). Another ~40 MB is reachable — chardet comes in via python3-requests,
