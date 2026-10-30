@@ -141,35 +141,23 @@ Photos of the assembly process are located in `hardware/pictures/`. The logical 
 
 The Raspberry Pi 5 runs a modern Linux audio stack optimized for low-latency voice processing. For details on the Python application, see the [Application README](./application/README.md).
 
-### Autostart Configuration (systemd)
+### Operating system
 
-To configure the application to start automatically on boot as a user service:
+Since 2026-10-30 the speaker runs **AISpeaker Linux**, a Yocto image with a
+read-only root filesystem built from [`yocto/`](./yocto/README.md); the app,
+its venv and all mutable state live on the `/data` partition. Build, install
+(including the in-place install without opening the case), deploy and services
+are described there. In short:
 
-1. Copy the provided systemd service file:
+```bash
+application/sync-to-rpi.sh aispeaker                          # deploy (user speaker)
+ssh aispeaker-root systemctl restart ai-smart-speaker          # system unit, not --user
+ssh aispeaker-root 'journalctl -u ai-smart-speaker -f -o cat'  # logs (persistent journal)
+```
 
-   ```bash
-   mkdir -p ~/.config/systemd/user
-   cp linux/home/user/.config/systemd/user/ai-smart-speaker.service ~/.config/systemd/user/
-   ```
-
-2. Enable lingering (allows user services to start on boot without login):
-
-   ```bash
-   loginctl enable-linger $USER
-   ```
-
-3. Reload and enable:
-
-   ```bash
-   systemctl --user daemon-reload
-   systemctl --user enable --now ai-smart-speaker.service
-   ```
-
-4. View logs:
-
-   ```bash
-   journalctl --user-unit ai-smart-speaker -f
-   ```
+The `linux/` directory holds the Raspberry Pi OS era configuration; the PipeWire
+and WirePlumber files below are still used by the image (its recipes link to
+them), the systemd user units and the polkit rule are not.
 
 ### Audio Stack: PipeWire & WirePlumber
 

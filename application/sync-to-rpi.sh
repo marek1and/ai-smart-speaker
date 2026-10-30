@@ -1,7 +1,8 @@
 #!/bin/bash
-# Sync project files to Raspberry Pi
-# Usage: ./sync.sh [hostname]
-#   hostname defaults to 'raspberrypi' if not provided
+# Sync project files to the speaker
+# Usage: ./sync-to-rpi.sh [host]
+#   host defaults to 'aispeaker' (ssh alias for speaker@ the speaker; on Yocto
+#   the app's files must belong to speaker, so never sync as root)
 
 set -e
 

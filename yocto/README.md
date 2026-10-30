@@ -63,6 +63,10 @@ Nothing personal (addresses, credentials, keys) is committed. Before building
 | p2 3 GB | root | ext4 | `/` **read-only** | entire OS |
 | p3 8 GB | data | ext4 | `/data` (rw, noatime) | everything mutable |
 
+The rest of the card is left unallocated by the image. Grow `/data` once after
+installing, online and without unmounting (done on the speaker: 8.6 → 53 GB):
+`printf 'Yes\n100%%\n' | parted ---pretend-input-tty /dev/mmcblk0 resizepart 3 && resize2fs /dev/mmcblk0p3`.
+
 On `/data`:
 
 - `/data/opt/ai-smart-speaker` — application + `.venv` (symlinked from `/opt/ai-smart-speaker`, so `sync-to-rpi.sh` keeps working unchanged)
@@ -146,7 +150,15 @@ feature models, so fetch them once:
 `.venv/bin/python -c 'import openwakeword.utils as u; u.download_models()'`
 (the app needs `melspectrogram.onnx`, `embedding_model.onnx` and
 `silero_vad.onnx`). Then, as root:
-`systemctl start ai-smart-speaker`.
+`systemctl start ai-smart-speaker` (a system unit with `User=speaker`, not
+`systemctl --user`; it starts by itself on later boots once the venv exists).
+
+SSH: `speaker` for deploys (the app's files must belong to it), `root` for
+administration; there is no sudo and no password login. On dev the aliases are
+`aispeaker` (speaker@) and `aispeaker-root` in `~/.ssh/config`.
+`sync-to-rpi.sh` sends dev's `config.yml`, i.e. the production one with
+`mqtt.enabled: true` — on a second, test Pi turn MQTT off after every sync, or
+it takes over the speaker's broker session (same client id).
 
 ## Boot time
 
@@ -247,50 +259,67 @@ So out of the box you get MPD-protocol + radio + YouTube (Music); Spotify is one
 
 ## In-place install — no card removal, no case opening
 
-You will test on a spare Pi first (flash normally, as above). To then move the
-**speaker** to Yocto without opening it, use the RPi5-native **tryboot** flow: a
-tiny installer runs from RAM and rewrites the internal SD card from a USB stick.
+How the speaker went from Raspberry Pi OS to Yocto on 2026-10-30, and how a new
+image gets onto it today. A small installer boots once via the RPi5 **tryboot**
+flag, runs from RAM and rewrites the SD card from a USB stick. Tryboot is
+one-shot: any failure before the write, or a power cut before it, brings the
+current system back.
 
-Because the installer runs entirely from RAM, it can overwrite the whole card;
-because the image source is the USB stick (not the card being written), there's
-no self-overwrite; and because tryboot is **one-shot**, a power-cut mid-flash
-just boots the old system again.
+**The whole card is rewritten, `/data` included** — afterwards redeploy the app
+(Build section). Phase 3 (A/B) is what removes this.
 
-Build both the image and the installer initramfs:
-
-```bash
-yocto/kas.sh build yocto/kas/aispeaker.yml
-yocto/kas.sh build --target aispeaker-installer-initramfs yocto/kas/aispeaker.yml
-```
-
-1. Copy `aispeaker-image-*.wic.bz2` onto a FAT/ext4 **USB stick**.
-2. Copy the installer artifacts to the running target and stage them:
+1. Build the image and the installer, then bake the site configuration (WiFi,
+   NFS) into a copy of the image. The speaker has no screen, no serial console
+   and no password, so without a WiFi profile on first boot it is unreachable:
 
    ```bash
-   scp yocto/build/tmp/deploy/images/raspberrypi5/{Image,*.dtb,\
-       aispeaker-installer-initramfs*.cpio.gz} pi@aispeaker:/tmp/inst/
-   ssh pi@aispeaker 'sudo /path/to/stage-inplace-install.sh /tmp/inst'
+   yocto/kas.sh build yocto/kas/aispeaker.yml
+   yocto/kas.sh build --target aispeaker-installer-initramfs yocto/kas/aispeaker.yml
+   sudo yocto/scripts/make-provisioned-image.sh   # → …/aispeaker-image-raspberrypi5.provisioned.wic.bz2
    ```
 
-   The script puts kernel, initramfs, dtbs, overlays and a copy of
-   `cmdline.txt` into `/boot/firmware/aispeaker-installer/` and writes a
-   `tryboot.txt` that selects it via `os_prefix`. With the tryboot flag the
-   firmware reads `tryboot.txt` *instead of* `config.txt`; nothing the current
-   system boots from is overwritten, so a power-cycle really returns to it.
+2. Put **only** `*.provisioned.wic.bz2` on a FAT32 (or ext4) stick — the
+   installer takes the first `aispeaker-image*.wic.bz2` it finds. The file holds
+   the WiFi PSK; wipe the stick afterwards.
+3. Stage the installer on the running system (Raspberry Pi OS: boot partition
+   `/boot/firmware`, with sudo; Yocto: `/boot`, read-only — `mount -o remount,rw
+   /boot` first, as root):
 
-3. Plug the USB stick into the speaker, then `ssh pi@aispeaker 'sudo reboot
-   "0 tryboot"'`. The installer flashes the card and reboots into Yocto.
-4. Provision `/data` on the now-running speaker (WiFi profile, dirs) with
-   `provision-data.sh` targeting the live card, or seed it over SSH.
+   ```bash
+   D=yocto/build/tmp/deploy/images/raspberrypi5
+   scp $D/Image $D/bcm2712-rpi-5-b.dtb $D/bcm2712-rpi-cm5*.dtb \
+       $D/aispeaker-installer-initramfs-raspberrypi5.cpio.gz \
+       yocto/scripts/stage-inplace-install.sh <host>:/tmp/inst/
+   ssh <host> 'sudo bash /tmp/inst/stage-inplace-install.sh /tmp/inst'          # Raspberry Pi OS
+   ssh aispeaker-root 'bash /tmp/inst/stage-inplace-install.sh /tmp/inst /boot' # Yocto
+   ```
 
-**Validate this whole flow on the spare Pi first** (put Raspbian on it, then run
-the in-place upgrade to Yocto): the installer initramfs and tryboot staging are
-prepared here but unverified until a real build exists. A serial console
-(`enable_uart=1`) makes the one-shot boot observable.
+   Kernel, initramfs, dtbs, overlays and a copy of `cmdline.txt` go into
+   `aispeaker-installer/` on the boot partition, plus a `tryboot.txt` selecting
+   it via `os_prefix`. Nothing the current system boots from is changed; a
+   plain reboot still boots it.
+4. Plug the stick in and `reboot '0 tryboot'` (`systemctl reboot
+   --reboot-argument='0 tryboot'`).
 
-Once on Yocto with the A/B layout of Phase 3, updates no longer need this dance
-— you flash the spare slot and switch. This tryboot installer is specifically
-the **one-time Raspbian → Yocto** migration tool.
+What the installer does: waits 10 s, copies the image (~180 MB) into RAM — up
+to three attempts — tests it with `bunzip2 -t`, then writes the card from RAM
+and reboots into the new system. On the speaker this took 10.5 min (74 s copy
+and test, 598 s write); 15 min on the spare Pi's slower card. The log goes to
+`aispeaker-installer.log` on the boot partition: the old one until the write
+starts, the new one afterwards (`/boot/aispeaker-installer.log` on Yocto).
+
+Behaviour that shaped it, found on the spare Pi:
+
+- busybox in the initramfs: `mount` needs `-t`; `dd` has no `conv=`; there is
+  no `/tmp` until the init creates it; `od`/`blockdev` are minimal or missing.
+- `/dev/console` is the last `console=` of the copied cmdline (on Raspberry Pi
+  OS `tty1`, with no framebuffer here) — hence logging through `/dev/kmsg`.
+- the cheap test stick dropped off the bus ("device offline") 6–7 s after boot
+  whenever it was busy then; hence the wait, the RAM copy and a read-only mount.
+- the Pi 5 fan runs flat out without its driver, so it says nothing about the
+  installer working.
+- the write-progress lines (`/proc/<pid>/io`) never show up in the log, although
+  the same code works as a script — not yet understood.
 
 ## Logs (`aispeaker-log-shipping`)
 
@@ -316,45 +345,43 @@ the share would block the audio event loop whenever the NAS stalls (up to the
 on a hard failure, OOM kills and systemd's own restart messages. The app keeps
 writing to stdout; where that ends up is an infrastructure decision.
 
-## Recordings/logs on NFS (optional)
+## NFS share (logs; recordings stay local)
 
-`/data` stays mandatory regardless — it is the writable backbone (/etc overlay,
-venvs, NM state, caches, Mopidy state). NFS only **offloads** bulky/shareable
-data (recordings) to the NAS; it can't replace `/data` (network isn't up in
-early boot, and a RO rootfs needs a local writable partition to come up at all).
+`/data` is the writable backbone (/etc overlay, venvs, NM state, caches, Mopidy
+state, recordings); the NFS share only receives the log copies. It can't
+replace `/data`: the network isn't up in early boot, and a read-only rootfs needs
+a local writable partition to come up at all.
 
-1. Export a share on the NAS (NFSv4) for the speaker's IP.
+1. Export a share on the NAS (NFSv4) **for the speaker's IP** — QNAP grants
+   access per host; a missing host shows up as "No such file or directory" from
+   the NFSv4 pseudo-root, not as "access denied".
 2. Set in `local/nfs.env`: `NFS_EXPORT` (server:export), `NFS_MOUNTPOINT`
-   (default `/mnt/nas` — generic on purpose: the speaker should not care which
-   box exports the share), `NFS_OPTIONS`. `provision-data.sh` then
-   **generates** the `<mountpoint>.mount` + `.automount` units (name derived via
-   `systemd-escape`) into the `/etc` overlay and enables the automount. Nothing
-   NFS is baked into the image.
+   (default `/mnt/nas`; it must exist in the image), `NFS_OPTIONS`.
+   `provision-data.sh` then **generates** the `<mountpoint>.mount` + `.automount`
+   units into the `/etc` overlay and enables the automount. Nothing NFS is
+   baked into the image.
    > QNAP with NFSv4 uses a pseudo-root, so the export path is `/<share>`
    > (e.g. `192.168.1.15:/aispeaker`), not the `/share/...` v3 path.
-3. Point the recordings dir at the share, e.g.
-   `ln -sfn /mnt/nas/recordings /data/opt/ai-smart-speaker/recordings`.
 
-`soft,timeo=50` + automount = an absent NAS never hangs boot or the app (the
-mount is attempted lazily on first access and fails fast).
+`soft,timeo=50` + automount = an absent NAS never hangs boot.
 
-**Fallback pattern (recommended):** rather than writing recordings straight to
-NFS, have the app write locally to `/data/recordings` (always works, survives a
-NAS/power outage) and a systemd timer `rsync` them to the NFS mount every few
-minutes (optionally `--remove-source-files` after a successful copy). The hot
-path never depends on the NAS; the NAS gets a copy when it's reachable.
+Recordings stay on `/data` (decided 2026-10-30): about 1 MB per wake-up, tens of
+MB a day, a negligible share of the card's write endurance. Writing them to NFS
+directly is not safe — the app writes session recordings on its event loop, and
+a soft mount can stall a call for ~15 s when the NAS is down. Copy them to the
+NAS by hand when they are needed for training.
 
 ## Roadmap
 
-- **Phase 1 (this)**: RO system image, app deployed to `/data` via rsync+venv.
-- **Phase 2**: recordings on NFS (log shipping is done — see above); optionally
-  bake the app + its Python deps into the image (wheel-based recipes).
-- **Phase 3**: A/B updates — second rootfs partition + RAUC/swupdate, image
-  pulled from the NAS over the network. This gives "swap image on the NAS,
-  reboot" without making boot depend on the network. Full network boot
-  (TFTP/NFS root) is possible on RPi5, but couples the speaker's availability
-  to the NAS and network — an offline-capable A/B scheme is the safer variant
-  of the same workflow.
+- **Phase 1 — done.** RO system image, app deployed to `/data` via rsync+venv;
+  the speaker runs it since 2026-10-30 (boot to wake word 10.5 s, Raspberry Pi
+  OS: 19.3 s).
+- **Phase 2**: optionally bake the app + its Python deps into the image
+  (wheel-based recipes). Log shipping is done; recordings stay local (above).
+- **Phase 3**: A/B updates — two boot+root slot pairs via the RPi5 firmware's
+  `tryboot_a_b` + an update tool (RAUC, or a small script), bundle pulled from
+  the NAS. Needs a new partition layout, i.e. one more full install. Until then
+  a system update is the in-place install above, which wipes `/data`.
 
 ## Build status & known iteration points
 
@@ -408,20 +435,21 @@ modern-Python-packaging ones):
 - **PyPI recipes** use the underscore `PYPI_PACKAGE` form — the pypi class builds
   the archive name from it and ignores `PYPI_ARCHIVE_NAME`.
 
-Still to verify on real hardware / not covered by the build:
+Verified on the hardware (2026-10-24 … 10-30): boot without failed units,
+`/etc` overlay, journal and NetworkManager state on `/data`, NFS, the in-place
+installer (Raspberry Pi OS → Yocto and Yocto → Yocto), the app with the
+reSpeaker and MQTT, radio play/stop and resume through Mopidy's MPD protocol.
+What only showed up on the hardware is in the commit messages of that week:
+read-only rootfs ordering, the app unit's groups, the reSpeaker output levels,
+the non-recursive chown, the trimmed services, zram.
 
-- Mopidy over the MPD protocol: smoke-test the app's commands (see the Mopidy
-  section).
+Still open:
+
 - Spotify: `gstreamer1.0-plugins-spotify` is a scaffold — generate its crate
   manifest with `cargo bitbake` before enabling (see the Mopidy section).
-- `overlayfs-etc` preinit hook on the kernel cmdline — verify the generated
-  cmdline / that `/etc` is writable after first boot.
-- the in-place installer initramfs (USB module names, `os_prefix` lookup of
-  the dtb/overlays/cmdline.txt on RPi5) — validate on the spare Pi before using
-  it on the speaker.
-- audio actually reaching the XVF3800, and Python runtime module deps of the
-  baked-in packages (yt-dlp etc.) — a boot + `mpc status` smoke test.
-- system update = reflash / in-place installer / dd until Phase 3 lands.
+- a reSpeaker plugged in after boot gets only its sink in PipeWire, no source;
+  a reboot fixes it.
+- no `systemd-analyze` in the image (boot time: `journalctl -b | grep "Startup finished"`).
 - for servicing, the rootfs can be remounted rw: `mount -o remount,rw /`
 
 ## Why a subdirectory, not a separate repo
