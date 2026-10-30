@@ -42,22 +42,24 @@ DEST="$BOOT/$PREFIX"
 rm -rf "$DEST"
 mkdir -p "$DEST"
 
-install -m 0644 "$KERNEL" "$DEST/kernel.img"
-install -m 0644 "$INITRD" "$DEST/initramfs.img"
+# cp, not install: the FAT boot partition has no modes to set, and the Yocto
+# image has no install(1)
+cp "$KERNEL" "$DEST/kernel.img"
+cp "$INITRD" "$DEST/initramfs.img"
 # os_prefix also applies to the device tree, overlays and cmdline.txt, so each
 # of them has to exist under $DEST: the build's own when provided, otherwise a
 # copy of what the current system boots with.
 if ls "$SRC"/*.dtb >/dev/null 2>&1; then
-    install -m 0644 "$SRC"/*.dtb "$DEST/"
+    cp "$SRC"/*.dtb "$DEST/"
 else
-    install -m 0644 "$BOOT"/*.dtb "$DEST/"
+    cp "$BOOT"/*.dtb "$DEST/"
 fi
 if [ -d "$SRC/overlays" ]; then
     cp -r "$SRC/overlays" "$DEST/"
 elif [ -d "$BOOT/overlays" ]; then
     cp -r "$BOOT/overlays" "$DEST/"
 fi
-[ -f "$BOOT/cmdline.txt" ] && install -m 0644 "$BOOT/cmdline.txt" "$DEST/cmdline.txt"
+[ -f "$BOOT/cmdline.txt" ] && cp "$BOOT/cmdline.txt" "$DEST/cmdline.txt"
 
 # With the tryboot flag set the firmware reads tryboot.txt INSTEAD of
 # config.txt (not on top of it), so this file is the entire boot config for
