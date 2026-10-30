@@ -15,6 +15,8 @@ SRC_URI = " \
     file://aispeaker-data-setup.service \
     file://var-lib-NetworkManager.mount \
     file://10-aispeaker-volatile-lib.conf \
+    file://aispeaker-zram \
+    file://aispeaker-zram.service \
 "
 
 S = "${UNPACKDIR}"
@@ -24,6 +26,7 @@ inherit systemd
 SYSTEMD_SERVICE:${PN} = " \
     aispeaker-data-setup.service \
     var-lib-NetworkManager.mount \
+    aispeaker-zram.service \
 "
 SYSTEMD_AUTO_ENABLE = "enable"
 
@@ -45,12 +48,15 @@ do_install() {
     install -d ${D}${sysconfdir}/systemd/system
     ln -s /dev/null ${D}${sysconfdir}/systemd/system/NetworkManager-wait-online.service
 
+
     install -d ${D}${sbindir}
     install -m 0755 ${S}/aispeaker-data-setup.sh ${D}${sbindir}/aispeaker-data-setup
+    install -m 0755 ${S}/aispeaker-zram ${D}${sbindir}/aispeaker-zram
 
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${S}/aispeaker-data-setup.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${S}/var-lib-NetworkManager.mount ${D}${systemd_system_unitdir}/
+    install -m 0644 ${S}/aispeaker-zram.service ${D}${systemd_system_unitdir}/
     install -d ${D}${systemd_system_unitdir}/systemd-timesyncd.service.d
     install -m 0644 ${S}/10-aispeaker-volatile-lib.conf \
         ${D}${systemd_system_unitdir}/systemd-timesyncd.service.d/
@@ -66,3 +72,4 @@ do_install() {
 FILES:${PN} = "${sysconfdir} ${sbindir} ${systemd_system_unitdir} /mnt/nas"
 
 RDEPENDS:${PN} = "networkmanager"
+RRECOMMENDS:${PN} = "kernel-module-zram"

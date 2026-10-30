@@ -1,0 +1,19 @@
+#!/bin/sh
+# Compressed swap in RAM. The speaker has 1 GB and no swap otherwise; swap on
+# the SD card would wear it, zram does not touch it.
+set -e
+SIZE="${ZRAM_SIZE:-512M}"
+
+case "${1:-start}" in
+start)
+    modprobe zram num_devices=1
+    echo zstd > /sys/block/zram0/comp_algorithm
+    echo "$SIZE" > /sys/block/zram0/disksize
+    mkswap /dev/zram0 >/dev/null
+    swapon -p 100 /dev/zram0
+    ;;
+stop)
+    swapoff /dev/zram0
+    echo 1 > /sys/block/zram0/reset
+    ;;
+esac

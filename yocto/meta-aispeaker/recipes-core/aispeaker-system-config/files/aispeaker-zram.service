@@ -1,0 +1,14 @@
+[Unit]
+Description=Compressed swap in RAM (zram)
+DefaultDependencies=no
+Before=swap.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/aispeaker-zram start
+ExecStop=/usr/sbin/aispeaker-zram stop
+
+[Install]
+WantedBy=swap.target
