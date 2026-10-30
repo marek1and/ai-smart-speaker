@@ -27,8 +27,12 @@ class RadioClient:
         except Exception:
             pass
 
-    def _check_url(self, url: str) -> bool:
+    def _check_url(self, url: str, gone_only: bool = False) -> bool:
         """True if the stream URL answers without an HTTP error status.
+
+        gone_only: reject only 404/410, the statuses that say the stream is not
+        there. Used for pinned URLs, which must keep winning over RadioBrowser
+        when a server merely refuses the probe (403/405) or hiccups (5xx).
 
         Fail-open by design: only an explicit 4xx/5xx rejects a URL. Icecast
         servers speak enough dialects (ICY status lines, refused HEAD, slow
@@ -47,7 +51,7 @@ class RadioClient:
             )
             status = response.status_code
             response.close()
-            if status >= 400:
+            if status in (404, 410) or (status >= 400 and not gone_only):
                 logger.warning("Stream URL %s answered HTTP %d — rejecting", url, status)
                 return False
             return True
@@ -55,8 +59,8 @@ class RadioClient:
             logger.debug("Stream URL check for %s inconclusive (%s) — accepting", url, e)
             return True
 
-    async def _url_is_alive(self, url: str) -> bool:
-        return await asyncio.to_thread(self._check_url, url)
+    async def _url_is_alive(self, url: str, gone_only: bool = False) -> bool:
+        return await asyncio.to_thread(self._check_url, url, gone_only)
 
     def _resolve_pin(self, key: str) -> tuple[object | None, str]:
         """Finds the pinned station for a query key, by keyword or official name.
@@ -77,7 +81,8 @@ class RadioClient:
 
         Priority:
           1. URL pinned in the config (wins over everything — escape hatch for
-             wrong RadioBrowser entries)
+             wrong RadioBrowser entries — unless the server says it is gone:
+             HTTP 404/410)
           2. URL cache in RadioStateManager, unless older than url_cache_ttl_hours
           3. Pinned station → UUID resolution via RadioBrowser → verify → cache
           4. RadioBrowser name search → verify candidates → cache
@@ -88,9 +93,9 @@ class RadioClient:
         key = station_name.lower().strip()
         pin, key = self._resolve_pin(key)
 
-        # 1. Hard-wired URL from the config — no lookup, no cache. A dead one
-        # falls through to the online lookup.
-        if pin is not None and pin.url and await self._url_is_alive(pin.url):
+        # 1. Hard-wired URL from the config — no lookup, no cache. Only one the
+        # server reports as gone falls through to the online lookup.
+        if pin is not None and pin.url and await self._url_is_alive(pin.url, gone_only=True):
             name = pin.name or station_name
             if self._state:
                 # Mirror it into the state so URL→name lookups keep working when
