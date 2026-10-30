@@ -512,28 +512,34 @@ async def get_ha_entities_state(entity_ids: Optional[list[str]] = None) -> dict:
 
 
 async def _no_change_off(entity_id: str, current: str) -> dict:
-    """no_change for OFF: lists the lights of the same room that are still on.
+    """no_change for OFF: lists the lights of the same HA area that are still on.
 
-    Room = light entity_id without its last "_" part (light.hall_upper_main → light.hall_upper_).
+    The room comes from HA's area registry, not from the entity id. Only lights:
+    turning off "the rest of the room" for a switch could cut a TV or a pump.
     """
-    domain, object_id = entity_id.split(".", 1)
-    room = object_id.rsplit("_", 1)[0]
+    domain = entity_id.split(".", 1)[0]
     states = (
-        await asyncio.to_thread(ha_client.get_states_by_prefix, f"{domain}.{room}_")  # type: ignore[union-attr]
-        if domain == "light" and "_" in object_id
-        else {}
+        await asyncio.to_thread(ha_client.get_area_states, entity_id)  # type: ignore[union-attr]
+        if domain == "light"
+        else None
     )
-    still_on = sorted(e for e, s in states.items() if e != entity_id and s == "on")
+    still_on = sorted(e for e, s in (states or {}).items() if e != entity_id and s == "on")
     if still_on:
         message = (
             f"{entity_id} is already {current}; nothing was sent. In the same room "
             f"these are on: {', '.join(still_on)}. The user most likely meant them — "
             "turn them off now. Never turn anything on."
         )
-    else:
+    elif states is not None:
         message = (
             f"{entity_id} is already {current}; nothing was sent and nothing else in "
             "this room is on. Tell the user it is already off. Never turn anything on."
+        )
+    else:
+        # not looked up (not a light, no area, or HA did not answer): claim nothing
+        message = (
+            f"{entity_id} is already {current}; nothing was sent. Tell the user it is "
+            "already off. Never turn anything on."
         )
     return {
         "status": "no_change",

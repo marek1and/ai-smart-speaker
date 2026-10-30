@@ -1,3 +1,4 @@
+import json
 import time
 
 import requests
@@ -102,13 +103,32 @@ class HomeAssistantClient:
             if s["entity_id"] in wanted
         }
 
-    def get_states_by_prefix(self, prefix: str) -> dict[str, str]:
-        """Returns {entity_id: state} for every entity whose id starts with prefix."""
-        return {
-            s["entity_id"]: s["state"]
-            for s in self._all_states()
-            if s["entity_id"].startswith(prefix)
-        }
+    def get_area_states(self, entity_id: str) -> dict[str, str] | None:
+        """Returns {entity_id: state} for the entities of entity_id's domain in its HA area.
+
+        None when HA could not be asked or the entity has no area: the caller must
+        not read that as "nothing else in the room is on".
+        """
+        template = (
+            "{% set a = area_id(eid) %}"
+            "{% if a %}{% set ns = namespace(d={}) %}"
+            "{% for e in area_entities(a) if e.startswith(eid.split('.')[0] ~ '.') %}"
+            "{% set ns.d = dict(ns.d, **{e: states(e)}) %}{% endfor %}"
+            "{{ ns.d | tojson }}{% else %}null{% endif %}"
+        )
+        try:
+            response = self._request(
+                "POST",
+                f"{self.base_url}/template",
+                'get',
+                json={"template": template, "variables": {"eid": entity_id}},
+            )
+            metrics.HA_REQUESTS.labels(method='get', status='ok').inc()
+            return json.loads(response.text)
+        except (requests.exceptions.RequestException, ValueError) as e:
+            logger.error("Error getting the area of %s: %s", entity_id, e)
+            metrics.HA_REQUESTS.labels(method='get', status='error').inc()
+            return None
 
     def call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> bool:
         """Calls a HA service."""
