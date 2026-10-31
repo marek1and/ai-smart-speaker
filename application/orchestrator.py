@@ -141,6 +141,9 @@ class AudioOrchestrator:
 
         # Events for coordination
         self._wake_event = asyncio.Event()
+        # Wakes the IDLE loop for a wake word or a typed request; what to do is
+        # decided from _wake_event and _text_requests, this is only the nudge.
+        self._idle_signal = asyncio.Event()
         # Typed requests (MQTT); one at a time, taken by the state machine.
         self._text_requests: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
         self._text_turn: Optional[str] = None
@@ -652,6 +655,7 @@ class AudioOrchestrator:
     async def _start_followup_conversation(self) -> None:
         """Start a new conversation turn from follow-up state."""
         metrics.FOLLOWUPS_STARTED.inc()
+        self._drop_queued_text()
         if self._hybrid_vad:
             self._hybrid_vad.reset()
 
@@ -794,6 +798,7 @@ class AudioOrchestrator:
         if self._state == SpeakerState.IDLE:
             self._last_wake_result = result
             self._wake_event.set()
+            self._idle_signal.set()
 
         elif self._state == SpeakerState.RESPONDING:
             logger.info("BARGE-IN: Interrupting AI playback!")
@@ -1027,10 +1032,14 @@ class AudioOrchestrator:
             finally:
                 self._wake_in_progress = False
             return
-        try:
-            await asyncio.wait_for(self._wake_event.wait(), timeout=1.0)
-        except asyncio.TimeoutError:
-            return
+        if not self._wake_event.is_set():
+            try:
+                await asyncio.wait_for(self._idle_signal.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                return
+            self._idle_signal.clear()
+            if not self._wake_event.is_set():
+                return  # a typed request: taken on the next pass
 
         self._wake_event.clear()
         self._wake_in_progress = True
@@ -1051,11 +1060,22 @@ class AudioOrchestrator:
             self._text_requests.put_nowait(text)
         except asyncio.QueueFull:
             return False
+        self._idle_signal.set()
         return True
+
+    def _drop_queued_text(self) -> None:
+        """A voice turn started first: answer a waiting typed request with busy
+        instead of firing it later, out of context."""
+        while not self._text_requests.empty():
+            text = self._text_requests.get_nowait()
+            logger.info("Voice turn started first — dropping text request: %s", text)
+            self._publish_turn("text", text, "", error="busy")
 
     async def _open_session_and_listen(self, text: Optional[str] = None) -> None:
         """Open (or reuse) the API session and start a turn: listening after a
         wake word, or answering a typed request when text is given."""
+        if text is None:
+            self._drop_queued_text()
         if not self._api_manager.session_active:
             await self._api_manager.open_session()
             if not self._api_manager.session_active:
@@ -1101,7 +1121,11 @@ class AudioOrchestrator:
             # No initial-silence check: nobody is expected to speak.
             self._listening_entry_time = None
             self._set_state(SpeakerState.LISTENING)
-            if not await self._api_manager.send_text(text):
+            if await self._api_manager.send_text(text):
+                # Nobody speaks after a typed request, so nothing else ends a
+                # turn the API never answers (stalled socket).
+                self._api_manager.start_watchdog(self.live_cfg.turn_watchdog_timeout)
+            else:
                 self._publish_turn("text", text, "", error="send_failed")
                 self._text_turn = None
                 # _finish_turn skips a LISTENING state (its barge-in guard).
@@ -1141,6 +1165,10 @@ class AudioOrchestrator:
             self._turn_complete_event.clear()
             logger.info("Turn complete without audio response")
             self._listening_entry_time = None
+            if self._text_turn is not None:
+                # The answer is over even without audio; _finish_turn would
+                # skip a LISTENING state as a barge-in and leave it hanging.
+                self._set_state(SpeakerState.RESPONDING)
             await self._execute_post_response_actions()
             return
 

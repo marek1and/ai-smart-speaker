@@ -38,13 +38,21 @@ class MQTTBridge:
         self._power_task: Optional[asyncio.Task] = None
         self._station_task: Optional[asyncio.Task] = None
         self._text_handler: Optional[Callable[[str], bool]] = None
+        self._connected = False
 
     def set_text_handler(self, handler: Callable[[str], bool]) -> None:
         """handler(text) queues a typed request; False means the speaker is busy."""
         self._text_handler = handler
 
     def publish_turn(self, event: dict) -> None:
-        """Enqueues a finished conversation turn for the assistant/reply topic."""
+        """Enqueues a finished conversation turn for the assistant/reply topic.
+
+        Dropped while the broker is unreachable: unlike the retained state,
+        replaying hours of old turns on reconnect would only mislead.
+        """
+        if not self._connected:
+            logger.debug("MQTT down — not publishing turn: %s", event.get("request"))
+            return
         self._publish_queue.put_nowait({"turn": event})
 
     def on_state_change(self, event: dict) -> None:
@@ -100,10 +108,12 @@ class MQTTBridge:
                     )
                     await self._publish_initial_state(client, radio)
                     metrics.MQTT_CONNECTED.set(1)
+                    self._connected = True
                     async with asyncio.TaskGroup() as tg:
                         tg.create_task(self._publish_loop(client, radio, assistant))
                         tg.create_task(self._command_loop(client, radio, assistant))
             except Exception as e:
+                self._connected = False
                 metrics.MQTT_CONNECTED.set(0)
                 # An ExceptionGroup from the TaskGroup says nothing useful on its
                 # own — log the leaf exceptions instead.

@@ -23,6 +23,7 @@ class FakeApi:
         self.activity_started = False
         self.chunks_received = 0
         self.closed = 0
+        self.watchdogs = []
 
     async def open_session(self):
         self.session_active = self.open_ok
@@ -41,6 +42,9 @@ class FakeApi:
 
     async def send_activity_start(self):
         pass
+
+    def start_watchdog(self, timeout):
+        self.watchdogs.append(timeout)
 
 
 class FakeMPD:
@@ -162,6 +166,65 @@ async def test_turns_are_published_with_their_source(make):
     o._state = SpeakerState.RESPONDING
     await o._execute_post_response_actions()
     assert o._mqtt_bridge.turns[-1] == {"source": "voice", "request": "która godzina", "reply": "Dwunasta."}
+
+
+async def test_text_turn_starts_the_turn_watchdog(make):
+    # a stalled socket must not leave the speaker deaf in LISTENING
+    o = make()
+    o.submit_text("x")
+    await o._handle_idle_state()
+    assert o._api_manager.watchdogs == [get_config().live.turn_watchdog_timeout]
+
+
+async def test_unanswered_text_turn_ends_and_is_reported(make):
+    o = make()
+    o.submit_text("x")
+    await o._handle_idle_state()
+    o._on_turn_timeout()  # watchdog fired, no audio ever came
+    await o._handle_listening_state()
+    assert o.state == SpeakerState.IDLE
+    assert o._mqtt_bridge.turns[-1] == {"source": "text", "request": "x", "reply": ""}
+
+
+async def test_voice_turn_without_audio_still_waits_in_listening(make):
+    # unchanged for speech: late audio after turn_complete still plays (05.09.2026)
+    o = make()
+    o._state = SpeakerState.LISTENING
+    o._turn_complete_event.set()
+    await o._handle_listening_state()
+    assert o.state == SpeakerState.LISTENING
+
+
+async def test_idle_loop_wakes_at_once_for_text(make):
+    o = make()
+    idle = asyncio.create_task(o._handle_idle_state())
+    await asyncio.sleep(0.01)
+    o.submit_text("x")
+    await asyncio.wait_for(idle, 0.2)  # returns long before the 1 s poll
+    await o._handle_idle_state()
+    assert o._api_manager.sent == ["x"]
+
+
+async def test_wake_word_still_opens_a_session(make):
+    o = make()
+    o._wake_event.set()
+    o._idle_signal.set()
+    await o._handle_idle_state()
+    assert o.state == SpeakerState.LISTENING and o._api_manager.sent == []
+
+
+@pytest.mark.parametrize("start", ["follow_up", "wake"])
+async def test_voice_turn_answers_a_waiting_text_with_busy(make, start):
+    o = make()
+    o._api_manager.session_active = True
+    o._state = SpeakerState.FOLLOW_UP
+    o.submit_text("stare pytanie")
+    if start == "follow_up":
+        await o._start_followup_conversation()
+    else:
+        await o._open_session_and_listen()
+    assert o._text_requests.empty()
+    assert o._mqtt_bridge.turns[-1] == {"source": "text", "request": "stare pytanie", "reply": "", "error": "busy"}
 
 
 async def test_text_answers_a_follow_up_question(make):

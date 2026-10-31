@@ -183,8 +183,9 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             # Run the cancel/clear start_new_turn queued now: left to the send
             # task, it could cancel this turn's response. It also drops the mic
             # audio appended so far, so that doesn't join the turn.
-            await self._cancel_and_clear(cancel_response=bool(self._pending_cancel))
-            self._pending_cancel = None
+            cancel = bool(self._pending_cancel)
+            self._pending_cancel = None  # before awaiting, or the send task runs it too
+            await self._cancel_and_clear(cancel_response=cancel)
             await self._ws_send({
                 "type": "conversation.item.create",
                 "item": {

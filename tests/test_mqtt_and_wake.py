@@ -72,6 +72,7 @@ class Client:
 @pytest.fixture
 def bridge():
     b = MQTTBridge(get_config().mqtt, FakeMPD(), FakeRadio())
+    b._connected = True
     b.asked = []
     b.set_text_handler(lambda t: b.asked.append(t) or True)
     return b
@@ -112,6 +113,15 @@ async def test_busy_speaker_answers_with_an_error_turn(bridge):
     bridge.set_text_handler(lambda t: False)
     await run_commands(bridge, [message(f"{P}/assistant/ask", "hej")])
     assert bridge._publish_queue.get_nowait()["turn"]["error"] == "busy"
+
+
+def test_turns_are_dropped_while_the_broker_is_down(bridge):
+    # 07-10.09.2026: 71 h without MQTT; turns must not pile up and replay
+    bridge._connected = False
+    bridge.publish_turn({"source": "voice", "request": "x", "reply": "y"})
+    assert bridge._publish_queue.empty()
+    bridge.on_state_change({"state": "OFF"})  # retained state still queues
+    assert not bridge._publish_queue.empty()
 
 
 async def test_turns_are_published_as_utf8_json_without_retain(bridge):
