@@ -173,17 +173,16 @@ async def next_track() -> dict:
     client = _mpd()
     if client.source != "music":
         return {"status": "error", "details": "The radio is playing; it has no next track."}
-    result, song = await client.next_track()
+    result, song, remaining = await client.next_track()
     if result == "no_next":
         return {"status": "no_next", "details": "That was the last track in the queue."}
     if result == "error":
         return {"status": "error", "details": "Could not switch tracks."}
-    status = await client.get_status() or {}
     return {
         "status": "success",
         "title": song.get("title") or "Unknown",
         "artist": song.get("artist"),
-        "remaining_tracks": client.remaining_tracks(status),
+        "remaining_tracks": remaining,
     }
 
 

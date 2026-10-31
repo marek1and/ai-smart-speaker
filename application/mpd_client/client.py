@@ -50,6 +50,10 @@ class MPDClientWrapper:
         self._position_stalled_since: Optional[float] = None
         self._stall_restarts = 0
         self._last_songid: Optional[str] = None
+        # Queue position of the last track seen playing. Mopidy drops "song"
+        # from status once playback stops (also when a track fails), and
+        # next_track still has to know where it was.
+        self._last_song_pos: Optional[int] = None
         self._mpd_lock = asyncio.Lock()
 
         # What the queue holds: "radio" (a station) or "music" (tracks from a
@@ -164,6 +168,11 @@ class MPDClientWrapper:
             elapsed = float(status.get("elapsed"))
         except (TypeError, ValueError):
             elapsed = None
+        if status.get("song") is not None:
+            try:
+                self._last_song_pos = int(status["song"])
+            except (TypeError, ValueError):
+                pass
         songid = status.get("songid")
         if songid != self._last_songid:
             # Next track in a music queue: elapsed restarts from 0.
@@ -535,6 +544,7 @@ class MPDClientWrapper:
         self._expecting_stop = False
         self._stream_failure_reported = False
         self._seen_play_since_start = False
+        self._last_song_pos = 0
         return True
 
     async def play_station(
@@ -585,38 +595,51 @@ class MPDClientWrapper:
         metrics.RADIO_PLAYING.set(1)
         metrics.RADIO_VOLUME.set(self._restore_volume)
 
-    @staticmethod
-    def remaining_tracks(status: Dict[str, Any]) -> int:
-        """Tracks queued after the current one (0 when nothing follows)."""
+    def _queue_position(self, status: Dict[str, Any]) -> Optional[int]:
         try:
-            position = int(status.get("song", -1))
+            return int(status["song"]) if status.get("song") is not None else self._last_song_pos
+        except (TypeError, ValueError):
+            return self._last_song_pos
+
+    def remaining_tracks(self, status: Dict[str, Any]) -> int:
+        """Tracks queued after the current (or last played) one."""
+        position = self._queue_position(status)
+        try:
             length = int(status.get("playlistlength", 0))
         except (TypeError, ValueError):
             return 0
-        return max(length - position - 1, 0) if position >= 0 else 0
+        return max(length - position - 1, 0) if position is not None and position >= 0 else 0
 
-    async def next_track(self) -> tuple[str, Optional[Dict[str, Any]]]:
+    async def next_track(self) -> tuple[str, Optional[Dict[str, Any]], int]:
         """Plays the next queued music track, also when playback has stopped.
 
-        Returns ("ok", currentsong), ("no_next", None) or ("error", None).
+        Returns (result, track, remaining): ("ok", playlistinfo of the new
+        track, tracks after it), ("no_next", None, 0) or ("error", None, 0).
         """
         if self._source != "music":
-            return "no_next", None
+            return "no_next", None, 0
         async with self._mpd_lock:
             status = await self._get_status_unsafe()
             if status is None:
-                return "error", None
-            if self.remaining_tracks(status) == 0:
-                return "no_next", None
+                return "error", None, 0
+            remaining = self.remaining_tracks(status)
+            if remaining == 0:
+                return "no_next", None, 0
             was_playing = status.get("state") == "play"
+            next_pos = self._queue_position(status) + 1
             try:
-                await self._run_mpd_cmd(self.client.play, int(status["song"]) + 1)
-                song = await self._run_mpd_cmd(self.client.currentsong)
+                await self._run_mpd_cmd(self.client.play, next_pos)
+                # Not currentsong: Mopidy switches only once the track resolves
+                # (with allow_cache, after the download starts), so right after
+                # play() it still names the previous track.
+                found = await self._run_mpd_cmd(self.client.playlistinfo, next_pos)
             except (MPDError, IOError, MPDConnectionError, asyncio.TimeoutError) as e:
                 logger.error("Error skipping to the next track: %s", e)
                 await self._disconnect_unsafe()
-                return "error", None
+                return "error", None, 0
+            song = found[0] if found else {}
             self._is_playing = True
+            self._last_song_pos = next_pos
         # Mopidy buffers the new track like a fresh start; same grace window.
         self._playback_started_at = time.monotonic()
         self._expecting_stop = False
@@ -626,7 +649,7 @@ class MPDClientWrapper:
         if not was_playing:
             metrics.RADIO_PLAYING.set(1)
             self._notify(state="ON", volume=self._restore_volume)
-        return "ok", song
+        return "ok", song, remaining - 1
 
     @property
     def source(self) -> str:
