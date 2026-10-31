@@ -1,0 +1,46 @@
+# Config for the test suite: no secrets, hosts that don't exist. Loaded by
+# conftest.py before any application module reads get_config().
+api_keys:
+  google_api_key: "test"
+
+home_assistant:
+  url: "http://ha.invalid:8123"
+  api_key: "test-token"
+
+radio:
+  country: "Poland"
+  url_cache_ttl_hours: 168.0
+  url_check_timeout: 1.0
+  stations:
+    eska:
+      uuid: "11111111-1111-1111-1111-111111111111"
+      name: "Radio Eska"
+      url: "http://pinned.invalid/eska.mp3"
+    zet: "22222222-2222-2222-2222-222222222222"
+
+music:
+  enabled: true
+  provider: "youtube"
+  rpc_url: "http://mopidy.invalid:6680/mopidy/rpc"
+  artist_tracks: 5
+
+mpd:
+  state_poll_interval: 2.0
+  stream_start_grace: 15.0
+  stream_stall_timeout: 20.0
+  stream_stall_max_restarts: 2
+  volume_fade_in_seconds: 0.0
+  volume_duck_percentage: 20
+  default_playback_volume: 50
+
+mqtt:
+  enabled: false
+
+tv:
+  power_item: "media_player.tv"
+  channels:
+    "TVP 1": 1
+    "Polsat": 4
+
+live:
+  system_instruction: "Stations: {radio_stations}. Channels: {tv_channels}."

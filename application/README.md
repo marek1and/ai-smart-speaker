@@ -52,6 +52,23 @@ To run the application, simply execute the `main.py` script:
 python main.py
 ```
 
+## Tests
+
+The test suite lives in `../tests/` (outside `application/`, so `sync-to-rpi.sh` never ships
+it) and runs on dev without the speaker, the network or audio hardware: MPD/Mopidy, Home
+Assistant, RadioBrowser, Mopidy's JSON-RPC, MQTT and the realtime API are faked. It covers the
+paths behind past incidents: the MPD client against Mopidy's quirks (refused `clearerror`, the
+inverted "Mute" output, no `status.error`), dead and frozen streams, resume after a restart, a
+cancelled fade killing the state machine, HA retries and honest tool results, station URL
+priority, wake word gating, typed requests over MQTT and radio/music sharing the queue.
+
+```bash
+cd application && .venv/bin/pip install -r ../tests/requirements.txt
+cd .. && application/.venv/bin/python -m pytest
+```
+
+`tests/config.test.yml` replaces `config.yml` for the run (no secrets, hosts that don't exist).
+
 ## Deployment to Raspberry Pi
 
 The `sync-to-rpi.sh` script provides a convenient way to synchronize the application files to a Raspberry Pi. It uses `rsync` to efficiently transfer the project while excluding unnecessary files like virtual environments, cache, and local recordings.

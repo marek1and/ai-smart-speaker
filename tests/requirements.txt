@@ -1,0 +1,4 @@
+# Test-only dependencies, installed into application/.venv on dev. Never deployed:
+# sync-to-rpi.sh sends application/ only.
+pytest==9.2.0
+pytest-asyncio==1.4.1

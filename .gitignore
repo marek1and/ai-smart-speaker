@@ -35,3 +35,4 @@ yocto/meta-rauc/
 /poky/
 /meta-openembedded/
 /meta-raspberrypi/
+.pytest_cache/
