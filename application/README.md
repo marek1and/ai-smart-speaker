@@ -39,7 +39,11 @@ The project is organized into the following directories:
     pip install -r requirements.txt
     ```
 
-    *Note: On some systems, you might need to install `openwakeword` with `--no-deps`.*
+    *Note: On Python 3.12+ install `openwakeword` separately with `--no-deps`
+    (`pip install openwakeword==0.6.0 --no-deps`); `pip check` then reports the missing
+    `tflite-runtime`, which the app does not use (ONNX only).*
+
+    Versions are pinned to what runs on the speaker; bump them on purpose and run the tests.
 
 3. **Configure the application:**
     Create a `config.yml` file in this `application/` directory (next to `config.py`) and add your API keys and other custom configurations. See the `Configuration` section below for more details.
