@@ -12,7 +12,7 @@ The project is organized into the following directories:
 - `openhab/`: Contains the client for interacting with the OpenHAB REST API.
 - `mpd_client/`: MPD-protocol client (MPD or Mopidy) with volume ducking, stream-failure detection and the persisted radio state (`radio_state.json`).
 - `radio/`: Resolves station names to stream URLs (config pins, URL cache, RadioBrowser).
-- `mqtt_bridge/`: Exposes the radio over MQTT (power/station/volume commands and state) for Home Assistant/KNX.
+- `mqtt_bridge/`: Exposes the radio over MQTT (power/station/volume commands and state) for Home Assistant/KNX. Also takes typed requests on `<topic_prefix>/assistant/ask` (spoken reply on the speaker) and publishes every finished turn as JSON (`source`, `request`, `reply`, optional `error`) on `<topic_prefix>/assistant/reply`.
 - `music/`: On-demand music search through Mopidy's JSON-RPC (YouTube; providers are keyed by Mopidy URI scheme).
 - `realtime/`: Manages the real-time communication with the selected API (Gemini or OpenAI).
 - `sounds/`: Stores sound effects for different events (e.g., wake word, end of conversation).
@@ -224,7 +224,7 @@ metrics:
 | **Sessions** | Sessions opened/closed (with close reason: max_turns / inactivity / false_trigger), turns completed, API errors |
 | **Conversation** | Barge-ins, follow-ups started, follow-up timeouts, state machine transitions |
 | **Radio** | Play events by source (AI new station / AI resume / MQTT power / MQTT station), stops, volume changes, duck/unduck events, current volume, per-station play counts, streams that failed to start, MPD reconnections |
-| **MQTT** | Connection state, command counts by type (power_on / power_off / station / volume) |
+| **MQTT** | Connection state, command counts by type (power_on / power_off / station / volume / text) |
 | **OpenHAB** | HTTP requests by method and status, per-item state change counts |
 | **Home Assistant** | REST requests by method (get / set) and status (ok / error / retry), per-entity state change counts |
 | **TV** | Power-on and channel-switch command counts |

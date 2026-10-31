@@ -242,6 +242,19 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         except Exception as e:
             logger.error("Failed to send activity_end: %s", e)
 
+    async def send_text(self, text: str) -> bool:
+        if not self._session_active or self._session is None:
+            return False
+        self._begin_text_turn(text)
+        try:
+            await self._session.send_realtime_input(text=text)
+            logger.info("Sent text turn to API")
+            return True
+        except Exception as e:
+            self._waiting_for_turn_complete = False
+            logger.error("Failed to send text turn: %s", e)
+            return False
+
     async def _run_conversation(self) -> None:
         """
         Run a conversation session with the Gemini API.

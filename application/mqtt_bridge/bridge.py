@@ -1,7 +1,8 @@
 import asyncio
+import json
 import logging
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import aiomqtt
 
@@ -36,6 +37,15 @@ class MQTTBridge:
         # left to run to completion regardless of newer messages arriving).
         self._power_task: Optional[asyncio.Task] = None
         self._station_task: Optional[asyncio.Task] = None
+        self._text_handler: Optional[Callable[[str], bool]] = None
+
+    def set_text_handler(self, handler: Callable[[str], bool]) -> None:
+        """handler(text) queues a typed request; False means the speaker is busy."""
+        self._text_handler = handler
+
+    def publish_turn(self, event: dict) -> None:
+        """Enqueues a finished conversation turn for the assistant/reply topic."""
+        self._publish_queue.put_nowait({"turn": event})
 
     def on_state_change(self, event: dict) -> None:
         """Sync callback registered with MPDClientWrapper. Enqueues MQTT publish."""
@@ -44,6 +54,7 @@ class MQTTBridge:
     async def run(self) -> None:
         """Main loop — connects to broker, subscribes, and handles publish/command tasks."""
         radio = f"{self._config.topic_prefix}/radio"
+        assistant = f"{self._config.topic_prefix}/assistant"
         # LWT marks the bridge unavailable instead of publishing a false
         # "radio off" — MPD keeps playing even when the MQTT link blinks.
         will = aiomqtt.Will(
@@ -73,6 +84,9 @@ class MQTTBridge:
                     clean_session=False,
                 ) as client:
                     await client.subscribe(f"{radio}/command/#", qos=1)
+                    # QoS 0: the persistent session must not queue questions
+                    # while the speaker is offline and answer them hours later.
+                    await client.subscribe(f"{assistant}/ask", qos=0)
                     if outage_since is not None:
                         logger.info(
                             "MQTT back up after %.0fs of outage",
@@ -81,14 +95,14 @@ class MQTTBridge:
                         outage_since = None
                     delay = self._config.reconnect_interval
                     logger.info(
-                        "MQTT connected to %s:%d, subscribed to %s/command/#",
-                        self._config.broker, self._config.port, radio,
+                        "MQTT connected to %s:%d, subscribed to %s/command/# and %s/ask",
+                        self._config.broker, self._config.port, radio, assistant,
                     )
                     await self._publish_initial_state(client, radio)
                     metrics.MQTT_CONNECTED.set(1)
                     async with asyncio.TaskGroup() as tg:
-                        tg.create_task(self._publish_loop(client, radio))
-                        tg.create_task(self._command_loop(client, radio))
+                        tg.create_task(self._publish_loop(client, radio, assistant))
+                        tg.create_task(self._command_loop(client, radio, assistant))
             except Exception as e:
                 metrics.MQTT_CONNECTED.set(0)
                 # An ExceptionGroup from the TaskGroup says nothing useful on its
@@ -129,9 +143,14 @@ class MQTTBridge:
         await client.publish(f"{radio}/volume", str(volume), qos=1, retain=True)
         logger.debug("MQTT initial state published: state=%s station=%s volume=%d", state, station, volume)
 
-    async def _publish_loop(self, client: aiomqtt.Client, radio: str) -> None:
+    async def _publish_loop(self, client: aiomqtt.Client, radio: str, assistant: str) -> None:
         while True:
             event = await self._publish_queue.get()
+            if "turn" in event:
+                await client.publish(
+                    f"{assistant}/reply", json.dumps(event["turn"], ensure_ascii=False), qos=1
+                )
+                continue
             if "state" in event:
                 await client.publish(f"{radio}/state", event["state"], qos=1, retain=True)
             if "station" in event:
@@ -139,11 +158,13 @@ class MQTTBridge:
             if "volume" in event:
                 await client.publish(f"{radio}/volume", str(event["volume"]), qos=1, retain=True)
 
-    async def _command_loop(self, client: aiomqtt.Client, radio: str) -> None:
+    async def _command_loop(self, client: aiomqtt.Client, radio: str, assistant: str) -> None:
         async for message in client.messages:
             topic = str(message.topic)
             payload = message.payload.decode().strip()
-            if topic == f"{radio}/command/power":
+            if topic == f"{assistant}/ask":
+                self._handle_text_request(payload, message.retain)
+            elif topic == f"{radio}/command/power":
                 if self._power_task and not self._power_task.done():
                     self._power_task.cancel()
                 self._power_task = asyncio.create_task(self._handle_power(payload))
@@ -153,6 +174,18 @@ class MQTTBridge:
                 self._station_task = asyncio.create_task(self._handle_station(payload))
             elif topic == f"{radio}/command/volume":
                 asyncio.create_task(self._handle_volume(payload))
+
+    def _handle_text_request(self, text: str, retained: bool) -> None:
+        if retained:
+            # A retained question would be asked again on every reconnect.
+            logger.warning("MQTT: ignoring retained text request '%s'", text)
+            return
+        if not text or self._text_handler is None:
+            return
+        metrics.MQTT_COMMANDS.labels(command='text').inc()
+        if not self._text_handler(text):
+            logger.info("MQTT: speaker busy, text request refused: %s", text)
+            self.publish_turn({"source": "text", "request": text, "reply": "", "error": "busy"})
 
     def _confirm(self) -> None:
         if self._sound_player:

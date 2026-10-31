@@ -175,6 +175,32 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         except Exception as e:
             logger.error("Failed to send activity_end: %s", e)
 
+    async def send_text(self, text: str) -> bool:
+        if not self._session_active or self._ws is None:
+            return False
+        self._begin_text_turn(text)
+        try:
+            # Run the cancel/clear start_new_turn queued now: left to the send
+            # task, it could cancel this turn's response. It also drops the mic
+            # audio appended so far, so that doesn't join the turn.
+            await self._cancel_and_clear(cancel_response=bool(self._pending_cancel))
+            self._pending_cancel = None
+            await self._ws_send({
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            })
+            await self._ws_send({"type": "response.create"})
+            logger.info("Sent text turn to OpenAI")
+            return True
+        except Exception as e:
+            self._waiting_for_turn_complete = False
+            logger.error("Failed to send text turn: %s", e)
+            return False
+
     def start_new_turn(self) -> None:
         """Start a new conversation turn.
 

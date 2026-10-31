@@ -181,7 +181,7 @@ def _pre_register_labels() -> None:
     for method in ('get', 'set'):
         for status in ('ok', 'error', 'retry'):
             HA_REQUESTS.labels(method=method, status=status)
-    for cmd in ('power_on', 'power_off', 'station', 'volume'):
+    for cmd in ('power_on', 'power_off', 'station', 'volume', 'text'):
         MQTT_COMMANDS.labels(command=cmd)
     for action in ('power_on', 'channel_switch'):
         TV_COMMANDS.labels(action=action)

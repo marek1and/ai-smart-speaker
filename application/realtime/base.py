@@ -111,6 +111,21 @@ class BaseRealtimeManager(ABC):
         """Signal that user stopped speaking (manual VAD)."""
         ...
 
+    @abstractmethod
+    async def send_text(self, text: str) -> bool:
+        """Send a typed user turn; the reply comes back as audio like a spoken one."""
+        ...
+
+    def _begin_text_turn(self, text: str) -> None:
+        """Bookkeeping shared by send_text implementations (after start_new_turn)."""
+        # The early-audio/turn_complete guards wait for ~1.6 s of mic audio to
+        # filter replies left over from a barged-in turn. A text turn starts
+        # clean, and its reply can arrive before that much audio was sent.
+        self._frames_sent = self._min_frames_for_turn_complete
+        # Keeps local VAD from opening an audio turn on top of this one.
+        self._waiting_for_turn_complete = True
+        self._user_transcript = text
+
     async def _wait_for_session(self, timeout: float, provider: str) -> bool:
         """Wait for the conversation task to establish a session.
 

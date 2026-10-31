@@ -141,6 +141,10 @@ class AudioOrchestrator:
 
         # Events for coordination
         self._wake_event = asyncio.Event()
+        # Typed requests (MQTT); one at a time, taken by the state machine.
+        self._text_requests: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        self._text_turn: Optional[str] = None
+        self._mqtt_bridge = None
         self._turn_complete_event = asyncio.Event()
         self._stop_playback_event = asyncio.Event()
         self._last_wake_result: Optional[WakeWordResult] = None
@@ -296,6 +300,7 @@ class AudioOrchestrator:
                 self._sound_player,
             )
             self.mpd_client.add_state_listener(self._mqtt_bridge.on_state_change)
+            self._mqtt_bridge.set_text_handler(self.submit_text)
             self._spawn(self._mqtt_bridge.run(), name="mqtt_bridge")
             logger.info(
                 "MQTT bridge started (broker=%s:%d)",
@@ -652,6 +657,7 @@ class AudioOrchestrator:
 
         self._api_manager.start_new_turn()
         self._turn_complete_event.clear()
+        self._text_turn = None
 
         await self._send_preroll()
         # Speech was already detected before entering LISTENING — no silence timeout.
@@ -858,6 +864,7 @@ class AudioOrchestrator:
 
         self._api_manager.start_new_turn()
         self._turn_complete_event.clear()
+        self._text_turn = None
 
         if self.live_cfg.enable_manual_vad:
             await self._api_manager.send_activity_start()
@@ -957,6 +964,10 @@ class AudioOrchestrator:
                     follow_up_start = None
 
                 elif self._state == SpeakerState.FOLLOW_UP:
+                    if not self._text_requests.empty():
+                        follow_up_start = None
+                        await self._open_session_and_listen(self._text_requests.get_nowait())
+                        continue
                     if follow_up_start is None:
                         follow_up_start = time.time()
 
@@ -1006,7 +1017,16 @@ class AudioOrchestrator:
             self._set_state(SpeakerState.IDLE)
 
     async def _handle_idle_state(self) -> None:
-        """Handle IDLE state: wait for wake word."""
+        """Handle IDLE state: wait for wake word or a typed request."""
+        if not self._text_requests.empty():
+            text = self._text_requests.get_nowait()
+            await self._duck_radio_if_playing()
+            self._wake_in_progress = True
+            try:
+                await self._open_session_and_listen(text)
+            finally:
+                self._wake_in_progress = False
+            return
         try:
             await asyncio.wait_for(self._wake_event.wait(), timeout=1.0)
         except asyncio.TimeoutError:
@@ -1019,8 +1039,23 @@ class AudioOrchestrator:
         finally:
             self._wake_in_progress = False
 
-    async def _open_session_and_listen(self) -> None:
-        """Open (or reuse) the API session for a fresh wake word and start listening."""
+    def submit_text(self, text: str) -> bool:
+        """Queues a typed request (called by the MQTT bridge).
+
+        Refused while a turn is in progress or another request waits: the reply
+        would talk over the current one.
+        """
+        if self._state not in (SpeakerState.IDLE, SpeakerState.FOLLOW_UP):
+            return False
+        try:
+            self._text_requests.put_nowait(text)
+        except asyncio.QueueFull:
+            return False
+        return True
+
+    async def _open_session_and_listen(self, text: Optional[str] = None) -> None:
+        """Open (or reuse) the API session and start a turn: listening after a
+        wake word, or answering a typed request when text is given."""
         if not self._api_manager.session_active:
             await self._api_manager.open_session()
             if not self._api_manager.session_active:
@@ -1032,6 +1067,8 @@ class AudioOrchestrator:
                     self._sound_player.play(SoundEvent.ERROR)
                 await self.mpd_client.unduck()
                 self._set_state(SpeakerState.IDLE)
+                if text is not None:
+                    self._publish_turn("text", text, "", error="session_failed")
                 return
             metrics.SESSIONS_OPENED.inc()
             self._recorder.start(
@@ -1057,6 +1094,20 @@ class AudioOrchestrator:
         self._api_manager.start_new_turn()
         self._turn_complete_event.clear()
         self._last_activity_time = time.time()
+        self._text_turn = text
+
+        if text is not None:
+            logger.info("Text request: %s", text)
+            # No initial-silence check: nobody is expected to speak.
+            self._listening_entry_time = None
+            self._set_state(SpeakerState.LISTENING)
+            if not await self._api_manager.send_text(text):
+                self._publish_turn("text", text, "", error="send_failed")
+                self._text_turn = None
+                # _finish_turn skips a LISTENING state (its barge-in guard).
+                self._set_state(SpeakerState.IDLE)
+                await self._finish_turn(play_end_sound=False)
+            return
 
         await self._send_preroll()
         # Arm initial-silence check — no speech detected yet after wake word.
@@ -1207,6 +1258,13 @@ class AudioOrchestrator:
 
     async def _execute_post_response_actions(self) -> None:
         """Execute deferred actions and decide the next state after AI response."""
+        if self._api_manager is not None:
+            self._publish_turn(
+                "text" if self._text_turn is not None else "voice",
+                self._text_turn or self._api_manager.user_transcript.strip(),
+                self._api_manager.ai_transcript.strip(),
+            )
+        self._text_turn = None
         turn_should_end = await self._dispatch_deferred_actions()
 
         if turn_should_end:
@@ -1327,6 +1385,17 @@ class AudioOrchestrator:
 
         self._set_state(SpeakerState.IDLE)
         logger.info("Listening for wake word... (session closed after false trigger)")
+
+    def _publish_turn(
+        self, source: str, request: str, reply: str, error: Optional[str] = None
+    ) -> None:
+        """Sends the finished turn to MQTT so it can be read away from the speaker."""
+        if self._mqtt_bridge is None:
+            return
+        event = {"source": source, "request": request, "reply": reply}
+        if error:
+            event["error"] = error
+        self._mqtt_bridge.publish_turn(event)
 
     def _ai_ended_with_question(self) -> bool:
         """Fallback follow-up trigger: AI transcript ends with '?'.
