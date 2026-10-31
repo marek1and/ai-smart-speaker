@@ -268,7 +268,20 @@ async def test_load_station_marks_the_queue_as_radio(client):
     assert client.source == "radio"
 
 
-async def test_frozen_music_is_stopped_not_replaced_by_the_radio(client, mopidy, eska):
+async def test_frozen_music_skips_to_the_next_track(client, mopidy, eska):
+    await client.play_music(["youtube:video:a", "youtube:video:b"], "Song")
+    called = []
+
+    async def resolve(key):
+        called.append(key)
+
+    client._position_stalled_since = time.monotonic() - 100
+    await client._recover_stalled_stream(resolve)
+    assert called == [] and mopidy.state == "play" and mopidy.song == 1
+    assert not client._is_ducked  # not a turn: nobody would unduck it
+
+
+async def test_frozen_last_music_track_stops(client, mopidy, eska):
     await client.play_music(["youtube:video:a"], "Song")
     called = []
 
@@ -316,6 +329,45 @@ async def test_next_track_after_a_failed_track_uses_the_last_position(client, mo
     result, track, remaining = await client.next_track()
     assert result == "ok" and ("play", 4) in mopidy.calls and remaining == 10
     assert client.events[-1]["state"] == "ON"
+
+
+async def test_next_track_from_a_stop_starts_ducked_mid_turn(client, mopidy):
+    # the tool runs before the spoken reply; music must not start at full volume under it
+    await client.play_music([f"youtube:video:{i}" for i in range(3)], "Song")
+    await client.stop()
+    mopidy.calls.clear()
+    await client.next_track(start_ducked=True)
+    setvols = [c for c in mopidy.calls if c[0] == "setvol"]
+    play_at = mopidy.calls.index(("play", 1))
+    assert setvols and mopidy.calls.index(setvols[0]) < play_at
+    assert setvols[0][1] == client._map_volume_to_curve(client.config.volume_duck_percentage)
+    assert client._is_ducked
+
+
+async def test_next_track_while_playing_keeps_the_current_level(client, mopidy):
+    await client.play_music([f"youtube:video:{i}" for i in range(3)], "Song")
+    mopidy.calls.clear()
+    await client.next_track(start_ducked=True)
+    assert not any(c[0] == "setvol" for c in mopidy.calls)
+
+
+async def test_source_is_recovered_from_the_queue_after_an_app_restart(client, mopidy):
+    mopidy.queue = ["youtube:video:a", "youtube:video:b"]
+    await client.initialize_state()
+    assert client.source == "music"
+
+
+async def test_radio_queue_after_restart_stays_radio(client, mopidy):
+    mopidy.queue = ["http://ic1.smcdn.pl/2170-1.mp3"]
+    await client.initialize_state()
+    assert client.source == "radio"
+
+
+async def test_power_on_with_music_and_no_known_station_resumes_the_music(client, mopidy):
+    await client.play_music(["youtube:video:a", "youtube:video:b"], "Song")
+    await client.stop()
+    await client.resume(resolve_eska)
+    assert mopidy.state == "play" and mopidy.queue[0] == "youtube:video:a"
 
 
 async def test_next_track_refused_for_the_radio(client, eska):

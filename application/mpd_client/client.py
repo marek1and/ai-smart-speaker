@@ -215,9 +215,13 @@ class MPDClientWrapper:
         self._last_elapsed = None
         self._position_stalled_since = None
         if self._source == "music":
-            logger.error("Music track frozen for %.0fs — stopping playback", stalled_for)
             metrics.RADIO_STREAM_ERRORS.labels(station="music").inc()
-            await self.stop()
+            result, _, _ = await self.next_track()
+            if result == "ok":
+                logger.error("Music track frozen for %.0fs — skipped to the next one", stalled_for)
+            else:
+                logger.error("Music track frozen for %.0fs, nothing left — stopping", stalled_for)
+                await self.stop()
             return
         station = self._radio_state.get_current_name() or "unknown"
         metrics.RADIO_STREAM_ERRORS.labels(station=station).inc()
@@ -371,6 +375,18 @@ class MPDClientWrapper:
             await self._connect()
             status = await self._get_status_unsafe()
             logger.info(f"MPD status: {status}")
+            if self.is_connected:
+                try:
+                    first = await self._run_mpd_cmd(self.client.playlistinfo, 0)
+                except (MPDError, IOError, MPDConnectionError, asyncio.TimeoutError) as e:
+                    logger.warning("Could not read the queue on startup: %s", e)
+                    first = []
+                # The app may restart while Mopidy keeps a music queue; radio
+                # entries are stream URLs, music tracks use a backend scheme.
+                uri = (first[0].get("file") or "") if first else ""
+                if uri and not uri.startswith(("http://", "https://")):
+                    self._source = "music"
+                    logger.info("Queue holds music (%s) — source: music", uri)
 
     async def _connect(self) -> bool:
         """Connects to the MPD server. Must be called within a lock."""
@@ -610,8 +626,14 @@ class MPDClientWrapper:
             return 0
         return max(length - position - 1, 0) if position is not None and position >= 0 else 0
 
-    async def next_track(self) -> tuple[str, Optional[Dict[str, Any]], int]:
+    async def next_track(
+        self, start_ducked: bool = False
+    ) -> tuple[str, Optional[Dict[str, Any]], int]:
         """Plays the next queued music track, also when playback has stopped.
+
+        start_ducked: called mid-turn (the AI tool). Playback restarting from a
+        stop was not ducked at the wake word, so it starts at the duck level and
+        unduck() at the end of the turn fades it in.
 
         Returns (result, track, remaining): ("ok", playlistinfo of the new
         track, tracks after it), ("no_next", None, 0) or ("error", None, 0).
@@ -627,7 +649,12 @@ class MPDClientWrapper:
                 return "no_next", None, 0
             was_playing = status.get("state") == "play"
             next_pos = self._queue_position(status) + 1
+            duck_now = start_ducked and not was_playing and not self._is_ducked
             try:
+                if duck_now:
+                    await self._set_internal_volume_unsafe(
+                        min(self.config.volume_duck_percentage, self._restore_volume)
+                    )
                 await self._run_mpd_cmd(self.client.play, next_pos)
                 # Not currentsong: Mopidy switches only once the track resolves
                 # (with allow_cache, after the download starts), so right after
@@ -640,6 +667,8 @@ class MPDClientWrapper:
             song = found[0] if found else {}
             self._is_playing = True
             self._last_song_pos = next_pos
+            if duck_now:
+                self._is_ducked = True
         # Mopidy buffers the new track like a fresh start; same grace window.
         self._playback_started_at = time.monotonic()
         self._expecting_stop = False
@@ -1065,7 +1094,7 @@ class MPDClientWrapper:
         elif status.get("state") != "play" and key and not self._radio_state.get_cached_url(key):
             # Its URL was dropped as dead; the queue still holds it.
             logger.info("No live URL cached for '%s' on resume — reloading the station", key)
-        elif self._source == "music":
+        elif self._source == "music" and key:
             # Power on means the radio; the queue holds music tracks.
             logger.info("Queue holds music on resume — switching back to the radio")
         elif status.get("state") == "play" and self.is_stream_stalled():

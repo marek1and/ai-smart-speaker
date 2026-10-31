@@ -149,8 +149,10 @@ async def play_music(query: str, kind: str = "track") -> dict:
         kind = "track"
     try:
         selection = await music_provider.find(query, kind)
-    except Exception as e:
-        logger.error("Music search for '%s' failed: %s", query, e)
+    except Exception:
+        # The model must hear that it failed; the traceback tells a network
+        # error from a bug in parsing Mopidy's reply.
+        logger.exception("Music search for '%s' failed", query)
         return {"status": "error", "details": f"{music_provider.label} search failed."}
     if selection is None:
         return {"status": "error", "details": f"Nothing found on {music_provider.label} for '{query}'."}
@@ -173,7 +175,7 @@ async def next_track() -> dict:
     client = _mpd()
     if client.source != "music":
         return {"status": "error", "details": "The radio is playing; it has no next track."}
-    result, song, remaining = await client.next_track()
+    result, song, remaining = await client.next_track(start_ducked=True)
     if result == "no_next":
         return {"status": "no_next", "details": "That was the last track in the queue."}
     if result == "error":

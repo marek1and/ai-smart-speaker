@@ -80,6 +80,12 @@ class FakeProvider:
         return self.selection
 
 
+async def test_play_music_logs_the_traceback(monkeypatch, caplog):
+    monkeypatch.setattr(d, "music_provider", FakeProvider(exc=KeyError("uri")))
+    await d.play_music("x")
+    assert any(r.exc_info for r in caplog.records if "Music search" in r.getMessage())
+
+
 @pytest.mark.parametrize("provider,expected", [
     (None, "not configured"),
     (FakeProvider(exc=OSError("down")), "search failed"),
