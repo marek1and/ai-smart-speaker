@@ -14,6 +14,10 @@ OVERLAYFS_ETC_USE_ORIG_INIT_NAME = "1"
 
 # ext4: the rootfs image that goes into the RAUC bundle (aispeaker-bundle)
 IMAGE_FSTYPES = "wic.bz2 wic.bmap ext4"
+# The A/B partitions are 3G but the ext4 is sized to its content (+30%), and
+# RAUC writes it as is; keep 512 MiB of headroom so new packages fit (deno
+# alone is 82 MB, the rootfs had 97 MB free).
+IMAGE_ROOTFS_EXTRA_SPACE = "524288"
 WKS_FILE = "aispeaker.wks.in"
 do_image_wic[depends] += "aispeaker-bootsel:do_deploy"
 

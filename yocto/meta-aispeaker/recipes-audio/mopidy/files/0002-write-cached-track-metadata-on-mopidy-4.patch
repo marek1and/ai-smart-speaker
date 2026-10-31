@@ -1,0 +1,53 @@
+From: Marek Andrzejewski <marek1and@gmail.com>
+Subject: [PATCH] Write cached track metadata on Mopidy 4
+
+Mopidy 4 dropped ModelJSONEncoder (models are pydantic now), so json.dump
+failed with "Object of type Track is not JSON serializable" for every cached
+track and left an empty .json behind. Dump the pydantic model without the
+"model" discriminator keys, the form lookup_video_track already reads back
+with Track.model_validate. Also reuse the track built just above instead of
+converting the video twice.
+
+Upstream-Status: Pending
+---
+--- a/mopidy_youtube/youtube.py
+--- a/mopidy_youtube/youtube.py
++++ b/mopidy_youtube/youtube.py
+@@ -35,6 +35,14 @@
+ search_last_started = 0.0
+ 
+ 
++def _strip_model_keys(data):
++    if isinstance(data, dict):
++        return {k: _strip_model_keys(v) for k, v in data.items() if k != "model"}
++    if isinstance(data, list):
++        return [_strip_model_keys(v) for v in data]
++    return data
++
++
+ def async_property(func):
+     """
+     decorator for creating async properties using pykka.ThreadingFuture
+@@ -733,13 +741,15 @@
+                         with open(
+                             os.path.join(cache_location, f"{self.id}.json"), "w"
+                         ) as outfile:
+-                            json.dump(
+-                                convert_video_to_track(
+-                                    self, bitrate=int(info.get("tbr", 0))
+-                                ),
+-                                cls=ModelJSONEncoder,
+-                                fp=outfile,
+-                            )
++                            if ModelJSONEncoder:
++                                json.dump(track, cls=ModelJSONEncoder, fp=outfile)
++                            else:
++                                # Mopidy >= 4.0: pydantic models, read back
++                                # with Track.model_validate (no "model" keys)
++                                json.dump(
++                                    _strip_model_keys(track.model_dump(mode="json")),
++                                    fp=outfile,
++                                )
+                 else:
+                     with youtube_dl.YoutubeDL(ytdl_options) as ydl:
+                         info = ydl.extract_info(

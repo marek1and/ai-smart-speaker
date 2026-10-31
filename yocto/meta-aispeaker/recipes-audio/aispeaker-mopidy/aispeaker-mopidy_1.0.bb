@@ -11,6 +11,7 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 SRC_URI = " \
     file://mopidy.conf \
     file://mopidy.service \
+    file://aispeaker-mopidy.conf \
 "
 
 S = "${UNPACKDIR}"
@@ -23,6 +24,9 @@ do_install() {
 
     install -d ${D}${sysconfdir}/systemd/system
     install -m 0644 ${S}/mopidy.service ${D}${sysconfdir}/systemd/system/
+    install -d ${D}${sysconfdir}/tmpfiles.d
+    install -m 0644 ${S}/aispeaker-mopidy.conf ${D}${sysconfdir}/tmpfiles.d/
+
     install -d ${D}${sysconfdir}/systemd/system/multi-user.target.wants
     ln -s ${sysconfdir}/systemd/system/mopidy.service \
         ${D}${sysconfdir}/systemd/system/multi-user.target.wants/mopidy.service

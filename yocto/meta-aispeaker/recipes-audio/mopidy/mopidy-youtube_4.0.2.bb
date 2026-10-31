@@ -5,7 +5,10 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=3b83ef96387f14655fc854ddc3c6bd57"
 
 PYPI_PACKAGE = "mopidy_youtube"
 
-SRC_URI += "file://0001-use-importlib-metadata-for-version.patch"
+SRC_URI += " \
+    file://0001-use-importlib-metadata-for-version.patch \
+    file://0002-write-cached-track-metadata-on-mopidy-4.patch \
+"
 SRC_URI[sha256sum] = "2a00fa704d7479f34fc8fd175a4a52977f3a560c3e69dece82aa3de99189b3bc"
 
 inherit pypi python_setuptools_build_meta

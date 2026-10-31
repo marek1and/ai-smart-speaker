@@ -67,6 +67,10 @@ still has the earlier boot/root/data MBR layout until its next install):
 | p4 / p5 3 GB | rootA / rootB | ext4, **read-only** | the OS of each slot |
 | p6 8 GB | data | ext4 (rw, noatime) | everything mutable, shared by both slots |
 
+The ext4 inside a root slot is only as big as the image (content + 30 % +
+`IMAGE_ROOTFS_EXTRA_SPACE`, 512 MiB), and RAUC writes it as is, so free space in
+`/` comes from that setting, not from the 3 GB partition.
+
 No partition is in `/etc/fstab`: wic would write mount points into its own
 copy of the rootfs only, and the bundle's rootfs would differ from slot A's.
 `/data` is mounted by the overlayfs-etc preinit (by label).
@@ -251,8 +255,32 @@ on boot, and needs no deployment step. GStreamer reaches it through pygobject,
 which is why the distro enables `gobject-introspection-data` (the GStreamer
 typelibs).
 
-**YouTube / YouTube Music work out of the box** (via `yt-dlp` + `ytmusicapi`,
-both baked in). For the authenticated YouTube Music API add headers/keys in
+**YouTube / YouTube Music work without a login**, but only with all of these:
+
+- **Search through YouTube Music** (`musicapi_enabled = true`, ytmusicapi):
+  ~1.5 s on the Pi. The default scraper took 9-16 s and blocks Mopidy's core
+  meanwhile, so MPD `status` times out.
+- **yt-dlp with a JS runtime.** YouTube serves audio only to clients that solve
+  its JS challenges; without one even yt-dlp gets HTTP 403. The image ships
+  `python3-yt-dlp`, `python3-yt-dlp-ejs` (the solver scripts, installed from
+  the wheel because the sdist builds them with npm) and `deno-bin` (official
+  binary, found in `PATH`). Bump `yt-dlp` and `yt-dlp-ejs` together — yt-dlp
+  pins the ejs version — whenever YouTube breaks playback.
+- **`allow_cache = true`.** A googlevideo URL handed to GStreamer gets 403 even
+  when yt-dlp resolved it, because it is tied to the client that fetched it;
+  worse, after one such failure Mopidy answered 403 for the radio too until it
+  was restarted. With the cache, yt-dlp downloads the track to
+  `/data/cache/mopidy/youtube` and Mopidy plays the file, so GStreamer never
+  talks to YouTube. `systemd-tmpfiles` drops files older than 30 days.
+- Two patches to mopidy-youtube 4.0.2 for this stack: `pkg_resources` is gone
+  in setuptools 82, and Mopidy 4 dropped `ModelJSONEncoder` (cached track
+  metadata).
+
+To try a newer yt-dlp before rebuilding: install the wheels with
+`pip install --target` under `/data/tmp`, put deno next to them, and point
+Mopidy at both with a drop-in in `/run/systemd/system/mopidy.service.d/`
+(`PYTHONPATH`, `PATH`); it disappears on reboot. Cookies (YouTube Premium) are
+only needed for the account's own library: `musicapi_cookiefile` in
 `/data/mopidy/mopidy.conf`.
 
 **Spotify needs two more things** and is therefore installed but `enabled =
@@ -267,7 +295,7 @@ false` by default:
    image, set `[spotify] enabled = true` and credentials in
    `/data/mopidy/mopidy.conf`.
 
-So out of the box you get MPD-protocol + radio + YouTube (Music); Spotify is one
+So out of the box you get MPD-protocol + radio + YouTube Music; Spotify is one
 `cargo bitbake` + rebuild away.
 
 > Smoke-test after the swap: there is no `mpc` on the image; speak the MPD
