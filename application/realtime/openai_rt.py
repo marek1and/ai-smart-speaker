@@ -738,11 +738,6 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         """
         call_id = tool_call.get("call_id")
         function_name = tool_call.get("name")
-        DEFERRED_FUNCTIONS = {
-            "play_internet_radio",
-            "play_music",
-            "set_playback_volume",
-        }
 
         try:
             # Arguments are a JSON string
@@ -761,7 +756,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 result = {"status": "success"}
 
             # 2. Deferred execution handling
-            elif function_name in DEFERRED_FUNCTIONS:
+            elif function_name in self.DEFERRED_FUNCTIONS:
                 func = get_function(function_name)
                 # Defer execution by getting metadata from the function call
                 payload = (

@@ -582,11 +582,6 @@ class GeminiRealtimeManager(BaseRealtimeManager):
           to generate its verbal response.
         """
         function_responses = []
-        DEFERRED_FUNCTIONS = {
-            "play_internet_radio",
-            "play_music",
-            "set_playback_volume",
-        }
 
         for function_call in function_calls:
             function_name = function_call.name
@@ -601,7 +596,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     result = {"status": "success"}  # watchdog started by post-loop call below
 
                 # 2. Deferred execution handling
-                elif function_name in DEFERRED_FUNCTIONS:
+                elif function_name in self.DEFERRED_FUNCTIONS:
                     func = get_function(function_name)
                     # Defer execution by getting metadata from the function call
                     payload = (

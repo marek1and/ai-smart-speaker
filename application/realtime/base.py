@@ -27,6 +27,14 @@ class BaseRealtimeManager(ABC):
     - Callbacks for orchestrator events
     """
 
+    # Tools executed by the orchestrator after the spoken reply (playback must
+    # not start under the AI's voice); the model gets "success" plus for_model.
+    DEFERRED_FUNCTIONS = frozenset({
+        "play_internet_radio",
+        "play_music",
+        "set_playback_volume",
+    })
+
     def __init__(
         self,
         input_queue: asyncio.Queue,
