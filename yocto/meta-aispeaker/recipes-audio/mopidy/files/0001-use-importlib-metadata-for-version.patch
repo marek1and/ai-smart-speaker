@@ -1,0 +1,23 @@
+From: Marek Andrzejewski <marek1and@gmail.com>
+Subject: [PATCH] Read the package version with importlib.metadata
+
+setuptools 82 no longer ships pkg_resources, so importing the extension
+fails and Mopidy skips it.
+
+Upstream-Status: Pending
+---
+--- a/mopidy_youtube/__init__.py
++++ b/mopidy_youtube/__init__.py
+@@ -1,10 +1,10 @@
+ import logging
+ import pathlib
++from importlib.metadata import version
+ 
+-import pkg_resources
+ from mopidy import config, ext
+ 
+-__version__ = pkg_resources.get_distribution("Mopidy-YouTube").version
++__version__ = version("Mopidy-YouTube")
+ 
+ logger = logging.getLogger(__name__)
+ 
