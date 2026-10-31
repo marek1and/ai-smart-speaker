@@ -8,6 +8,7 @@ from homeassistant.client import HomeAssistantClient
 from config import get_config
 from mpd_client.client import MPDClientWrapper
 from radio.client import RadioClient
+from music.providers import KINDS, create_provider
 import metrics
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ ACTIVE_SMARTHOME_BACKEND = (
     else "none"
 )
 radio_client = RadioClient(config.radio)
+music_provider = create_provider(config.music)
 
 # MPD client is injected by the orchestrator at startup so all tool functions
 # share the same connection and see the same duck/unduck state.
@@ -89,6 +91,12 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
     The action is deferred and handled by the orchestrator after the AI response.
     """
     if not station_name:
+        if _mpd().source == "music" and _mpd().get_current_station_name():
+            # resume() switches from the music queue back to the last station.
+            return {
+                "action": "play",
+                "for_model": {"already_playing": False, "volume": _mpd().get_restore_volume()},
+            }
         radio_status = await get_radio_status()
         if radio_status.get("is_radio_on_playlist"):
             # The play is deferred, so tell the model now whether it changes anything.
@@ -124,11 +132,59 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
 
 @register_function(name="stop_radio")
 async def stop_radio() -> dict:
-    """Stops the radio playback immediately."""
+    """Stops playback (radio or music) immediately."""
     metrics.AI_TOOL_CALLS.labels(function="stop_radio").inc()
     metrics.RADIO_STOPS.labels(source="ai").inc()
     await _mpd().stop()
-    return {"status": "success", "message": "Radio playback stopped."}
+    return {"status": "success", "message": "Playback stopped."}
+
+
+@register_function(name="play_music")
+async def play_music(query: str, kind: str = "track") -> dict:
+    """Finds music for the query; the orchestrator plays it after the AI response."""
+    metrics.AI_TOOL_CALLS.labels(function="play_music").inc()
+    if music_provider is None:
+        return {"status": "error", "details": "Music playback is not configured."}
+    if kind not in KINDS:
+        kind = "track"
+    try:
+        selection = await music_provider.find(query, kind)
+    except Exception as e:
+        logger.error("Music search for '%s' failed: %s", query, e)
+        return {"status": "error", "details": f"{music_provider.label} search failed."}
+    if selection is None:
+        return {"status": "error", "details": f"Nothing found on {music_provider.label} for '{query}'."}
+    metrics.MUSIC_PLAYS.labels(provider=music_provider.label, kind=kind).inc()
+    return {
+        "uris": selection.uris,
+        "title": selection.title,
+        "for_model": {
+            "title": selection.title,
+            "artist": selection.artist,
+            "tracks": len(selection.uris),
+        },
+    }
+
+
+@register_function(name="next_track")
+async def next_track() -> dict:
+    """Skips to the next track in the music queue, executed immediately."""
+    metrics.AI_TOOL_CALLS.labels(function="next_track").inc()
+    client = _mpd()
+    if client.source != "music":
+        return {"status": "error", "details": "The radio is playing; it has no next track."}
+    result, song = await client.next_track()
+    if result == "no_next":
+        return {"status": "no_next", "details": "That was the last track in the queue."}
+    if result == "error":
+        return {"status": "error", "details": "Could not switch tracks."}
+    status = await client.get_status() or {}
+    return {
+        "status": "success",
+        "title": song.get("title") or "Unknown",
+        "artist": song.get("artist"),
+        "remaining_tracks": client.remaining_tracks(status),
+    }
 
 
 @register_function(name="get_radio_status")
@@ -141,6 +197,18 @@ async def get_radio_status() -> dict:
     client = _mpd()
     status = await client.get_status() or {}
     volume = client.get_restore_volume()
+
+    if client.source == "music":
+        song = await client.get_current_song_info() or {}
+        return {
+            "playback_state": status.get("state"),
+            "volume": volume,
+            "source": "music",
+            "is_radio_on_playlist": False,
+            "current_track_title": song.get("title") or "Unknown",
+            "current_track_artist": song.get("artist"),
+            "remaining_tracks": client.remaining_tracks(status),
+        }
 
     # 1. current_station_key → name from state
     station_name = client.get_current_station_name()
@@ -161,6 +229,7 @@ async def get_radio_status() -> dict:
     return {
         "playback_state": status.get("state"),
         "volume": volume,
+        "source": "radio",
         "is_radio_on_playlist": is_radio_on_playlist,
         "station_name_on_playlist": station_name,
         "current_track_title": station_name or "Unknown",

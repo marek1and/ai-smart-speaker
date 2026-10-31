@@ -82,6 +82,10 @@ RADIO_PLAYS = Counter(
     'speaker_radio_plays_total', 'Radio playback starts',
     ['source', 'station'],  # source: ai_new, ai_resume, mqtt_power, mqtt_station
 )
+MUSIC_PLAYS = Counter(
+    'speaker_music_plays_total', 'Music playback requests that found tracks',
+    ['provider', 'kind'],
+)
 RADIO_STOPS = Counter(
     'speaker_radio_stops_total', 'Radio playback stops',
     ['source'],  # ai, mqtt
@@ -169,7 +173,7 @@ def _pre_register_labels() -> None:
             FALSE_TRIGGERS.labels(reason=reason, mode=mode)
     for reason in ('max_turns', 'inactivity', 'false_trigger'):
         SESSIONS_CLOSED.labels(reason=reason)
-    for fn in ('play_internet_radio', 'stop_radio', 'set_playback_volume',
+    for fn in ('play_internet_radio', 'play_music', 'next_track', 'stop_radio', 'set_playback_volume',
                'get_radio_status', 'set_openhab_item_state', 'watch_tv',
                'get_ha_entity_state', 'set_ha_entity_state', 'get_ha_entities_state',
                'set_ha_entities_state', 'get_openhab_items_state', 'set_openhab_items_state'):

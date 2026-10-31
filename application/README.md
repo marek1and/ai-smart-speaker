@@ -13,6 +13,7 @@ The project is organized into the following directories:
 - `mpd_client/`: MPD-protocol client (MPD or Mopidy) with volume ducking, stream-failure detection and the persisted radio state (`radio_state.json`).
 - `radio/`: Resolves station names to stream URLs (config pins, URL cache, RadioBrowser).
 - `mqtt_bridge/`: Exposes the radio over MQTT (power/station/volume commands and state) for Home Assistant/KNX.
+- `music/`: On-demand music search through Mopidy's JSON-RPC (YouTube; providers are keyed by Mopidy URI scheme).
 - `realtime/`: Manages the real-time communication with the selected API (Gemini or OpenAI).
 - `sounds/`: Stores sound effects for different events (e.g., wake word, end of conversation).
 - `tools/`: Includes utility scripts for tasks like tuning audio delay.

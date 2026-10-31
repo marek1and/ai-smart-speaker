@@ -49,7 +49,12 @@ class MPDClientWrapper:
         self._last_elapsed: Optional[float] = None
         self._position_stalled_since: Optional[float] = None
         self._stall_restarts = 0
+        self._last_songid: Optional[str] = None
         self._mpd_lock = asyncio.Lock()
+
+        # What the queue holds: "radio" (a station) or "music" (tracks from a
+        # music provider). Music is finite and has no station to re-resolve.
+        self._source = "radio"
 
         # Volume state
         self._is_ducked = False
@@ -159,6 +164,12 @@ class MPDClientWrapper:
             elapsed = float(status.get("elapsed"))
         except (TypeError, ValueError):
             elapsed = None
+        songid = status.get("songid")
+        if songid != self._last_songid:
+            # Next track in a music queue: elapsed restarts from 0.
+            self._last_songid = songid
+            self._last_elapsed = None
+            self._position_stalled_since = None
         if status.get("state") != "play" or starting or elapsed is None:
             self._last_elapsed = None
             self._position_stalled_since = None
@@ -191,10 +202,15 @@ class MPDClientWrapper:
         if self._is_ducked:
             # A restart fades to the restore volume — wait for the conversation to end.
             return
-        station = self._radio_state.get_current_name() or "unknown"
         stalled_for = self._stall_duration()
         self._last_elapsed = None
         self._position_stalled_since = None
+        if self._source == "music":
+            logger.error("Music track frozen for %.0fs — stopping playback", stalled_for)
+            metrics.RADIO_STREAM_ERRORS.labels(station="music").inc()
+            await self.stop()
+            return
+        station = self._radio_state.get_current_name() or "unknown"
         metrics.RADIO_STREAM_ERRORS.labels(station=station).inc()
         if self._stall_restarts >= self.config.stream_stall_max_restarts:
             logger.error(
@@ -269,7 +285,7 @@ class MPDClientWrapper:
 
         key = self._started_key
         entry = self._radio_state.get_entry(key) if key else None
-        station = entry.name if entry else "unknown"
+        station = entry.name if entry else ("music" if self._source == "music" else "unknown")
         logger.error(
             "Playback stopped %.1fs after starting %s and MPD reported no error "
             "— treating the stream as dead", played_for, station,
@@ -466,6 +482,7 @@ class MPDClientWrapper:
                 await self._disconnect_unsafe()
                 return
 
+        self._source = "radio"
         effective_key = (
             key
             or self._radio_state.get_key_by_url(url)
@@ -475,55 +492,58 @@ class MPDClientWrapper:
             self._radio_state.set_current(effective_key)
         self._notify(station=station_name)
 
-    async def play_station(
-        self, url: str, station_name: Optional[str] = None, key: Optional[str] = None
-    ) -> None:
-        """Clears the playlist, adds a new station, plays it, and fades the volume in."""
+    async def _start_queue(self, uris: List[str], description: str) -> bool:
+        """Replaces the queue with uris and starts playback at volume 0.
+
+        Returns False when MPD could not be reached; the caller fades in.
+        """
+        async def start() -> None:
+            await asyncio.to_thread(self.client.clear)
+            for uri in uris:
+                await asyncio.to_thread(self.client.add, uri)
+            await self._clear_error_unsafe()
+            await self._set_internal_volume_unsafe(0)
+            await asyncio.to_thread(self.client.play)
+
         async with self._mpd_lock:
             if not await self._connect():
-                return
+                return False
             try:
-                await asyncio.to_thread(self.client.clear)
-                await asyncio.to_thread(self.client.add, url)
-                await self._clear_error_unsafe()
-                await self._set_internal_volume_unsafe(0)
-                await asyncio.to_thread(self.client.play)
-                logger.info("Started playing station: %s", station_name or url)
-                self._is_playing = True
+                await start()
+                logger.info("Started playing %s", description)
             except (BrokenPipeError, ConnectionResetError) as e:
                 logger.warning(
-                    "MPD connection reset during play_station (%s), reconnecting...",
-                    type(e).__name__,
+                    "MPD connection reset while starting %s (%s), reconnecting...",
+                    description, type(e).__name__,
                 )
-                if await self._reconnect_unsafe():
-                    try:
-                        await asyncio.to_thread(self.client.clear)
-                        await asyncio.to_thread(self.client.add, url)
-                        await self._clear_error_unsafe()
-                        await self._set_internal_volume_unsafe(0)
-                        await asyncio.to_thread(self.client.play)
-                        logger.info(
-                            "Started playing station after reconnect: %s",
-                            station_name or url,
-                        )
-                        self._is_playing = True
-                    except (MPDError, IOError) as retry_e:
-                        logger.error(
-                            "Failed to play station after reconnect: %s", retry_e
-                        )
-                        await self._disconnect_unsafe()
-                        return
-                else:
-                    return
+                if not await self._reconnect_unsafe():
+                    return False
+                try:
+                    await start()
+                    logger.info("Started playing %s after reconnect", description)
+                except (MPDError, IOError) as retry_e:
+                    logger.error("Failed to start %s after reconnect: %s", description, retry_e)
+                    await self._disconnect_unsafe()
+                    return False
             except (MPDError, IOError) as e:
-                logger.error("Error playing station: %s", e)
+                logger.error("Error starting %s: %s", description, e)
                 await self._disconnect_unsafe()
-                return
+                return False
+            self._is_playing = True
 
         self._playback_started_at = time.monotonic()
         self._expecting_stop = False
         self._stream_failure_reported = False
         self._seen_play_since_start = False
+        return True
+
+    async def play_station(
+        self, url: str, station_name: Optional[str] = None, key: Optional[str] = None
+    ) -> None:
+        """Clears the playlist, adds a new station, plays it, and fades the volume in."""
+        if not await self._start_queue([url], f"station: {station_name or url}"):
+            return
+        self._source = "radio"
 
         effective_key = (
             key
@@ -541,6 +561,22 @@ class MPDClientWrapper:
 
         # Notify immediately so automation system see state=ON before the fade completes.
         self._notify(state="ON", station=station_name, volume=self._restore_volume)
+        await self._fade_in_after_start()
+
+    async def play_music(self, uris: List[str], title: str) -> None:
+        """Replaces the queue with music tracks and plays them.
+
+        The station topic is left alone: HA models it as a select over the
+        radio stations, and a track title is not one of its options.
+        """
+        if not await self._start_queue(uris, f"music: {title} ({len(uris)} tracks)"):
+            return
+        self._source = "music"
+        self._started_key = None
+        self._notify(state="ON", volume=self._restore_volume)
+        await self._fade_in_after_start()
+
+    async def _fade_in_after_start(self) -> None:
         # Run fade-in outside of the main lock to allow other operations.
         # Fades to _restore_volume, which is the pre-duck level when ducked — so
         # clear _is_ducked here; unduck() would otherwise repeat the same fade.
@@ -548,6 +584,54 @@ class MPDClientWrapper:
         self._is_ducked = False
         metrics.RADIO_PLAYING.set(1)
         metrics.RADIO_VOLUME.set(self._restore_volume)
+
+    @staticmethod
+    def remaining_tracks(status: Dict[str, Any]) -> int:
+        """Tracks queued after the current one (0 when nothing follows)."""
+        try:
+            position = int(status.get("song", -1))
+            length = int(status.get("playlistlength", 0))
+        except (TypeError, ValueError):
+            return 0
+        return max(length - position - 1, 0) if position >= 0 else 0
+
+    async def next_track(self) -> tuple[str, Optional[Dict[str, Any]]]:
+        """Plays the next queued music track, also when playback has stopped.
+
+        Returns ("ok", currentsong), ("no_next", None) or ("error", None).
+        """
+        if self._source != "music":
+            return "no_next", None
+        async with self._mpd_lock:
+            status = await self._get_status_unsafe()
+            if status is None:
+                return "error", None
+            if self.remaining_tracks(status) == 0:
+                return "no_next", None
+            was_playing = status.get("state") == "play"
+            try:
+                await self._run_mpd_cmd(self.client.play, int(status["song"]) + 1)
+                song = await self._run_mpd_cmd(self.client.currentsong)
+            except (MPDError, IOError, MPDConnectionError, asyncio.TimeoutError) as e:
+                logger.error("Error skipping to the next track: %s", e)
+                await self._disconnect_unsafe()
+                return "error", None
+            self._is_playing = True
+        # Mopidy buffers the new track like a fresh start; same grace window.
+        self._playback_started_at = time.monotonic()
+        self._expecting_stop = False
+        self._stream_failure_reported = False
+        self._seen_play_since_start = False
+        logger.info("Skipped to the next track: %s", song.get("title"))
+        if not was_playing:
+            metrics.RADIO_PLAYING.set(1)
+            self._notify(state="ON", volume=self._restore_volume)
+        return "ok", song
+
+    @property
+    def source(self) -> str:
+        """"radio" or "music" — what the queue was last loaded with."""
+        return self._source
 
     @staticmethod
     def _map_volume_to_curve(percentage: int) -> int:
@@ -936,7 +1020,8 @@ class MPDClientWrapper:
         self,
         resolve_station: Callable[[str], Awaitable[Optional[tuple[str, str, str]]]],
     ) -> None:
-        """Resumes playback, reloading the last station when the queue is empty.
+        """Resumes the radio, reloading the last station when the queue is empty
+        or holds music.
 
         Mopidy does not persist its queue across restarts, while the current
         station survives in radio_state.json. A bare play() on the empty queue
@@ -957,6 +1042,9 @@ class MPDClientWrapper:
         elif status.get("state") != "play" and key and not self._radio_state.get_cached_url(key):
             # Its URL was dropped as dead; the queue still holds it.
             logger.info("No live URL cached for '%s' on resume — reloading the station", key)
+        elif self._source == "music":
+            # Power on means the radio; the queue holds music tracks.
+            logger.info("Queue holds music on resume — switching back to the radio")
         elif status.get("state") == "play" and self.is_stream_stalled():
             # play() would skip it as "already playing" and leave the room silent.
             logger.warning(

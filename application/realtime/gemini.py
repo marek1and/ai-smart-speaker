@@ -571,6 +571,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         function_responses = []
         DEFERRED_FUNCTIONS = {
             "play_internet_radio",
+            "play_music",
             "set_playback_volume",
         }
 

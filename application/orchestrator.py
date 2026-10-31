@@ -1193,6 +1193,11 @@ class AudioOrchestrator:
                     ).inc()
                     ran_radio_action = True
 
+            elif action_type == "play_music":
+                logger.info("Executing deferred action: play_music")
+                await self.mpd_client.play_music(payload["uris"], payload.get("title") or "")
+                ran_radio_action = True
+
             elif action_type == "set_playback_volume":
                 logger.info("Executing deferred action: set_playback_volume")
                 if "volume_percentage" in payload:

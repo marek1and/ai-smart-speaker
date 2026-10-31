@@ -714,6 +714,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         function_name = tool_call.get("name")
         DEFERRED_FUNCTIONS = {
             "play_internet_radio",
+            "play_music",
             "set_playback_volume",
         }
 

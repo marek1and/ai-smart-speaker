@@ -288,6 +288,21 @@ class RadioConfig:
 
 
 @dataclass
+class MusicConfig:
+    """On-demand music played through Mopidy (YouTube now, Spotify later)."""
+
+    enabled: bool = False
+    # Key in music.providers.PROVIDERS; the Mopidy extension must be enabled too.
+    provider: str = "youtube"
+    # Mopidy HTTP JSON-RPC endpoint (search goes here; playback stays on MPD).
+    rpc_url: str = "http://localhost:6680/mopidy/rpc"
+    # Mopidy-YouTube answers a search in ~2-5 s; the model waits on this.
+    search_timeout: float = 10.0
+    # Tracks queued for an artist request.
+    artist_tracks: int = 15
+
+
+@dataclass
 class TVConfig:
     """TV control configuration (shared by both backends).
 
@@ -412,6 +427,7 @@ class AppConfig:
     openhab: OpenHabConfig = field(default_factory=OpenHabConfig)
     home_assistant: HomeAssistantConfig = field(default_factory=HomeAssistantConfig)
     radio: RadioConfig = field(default_factory=RadioConfig)
+    music: MusicConfig = field(default_factory=MusicConfig)
     mpd: MPDConfig = field(default_factory=MPDConfig)
     tv: TVConfig = field(default_factory=TVConfig)
     mqtt: MQTTConfig = field(default_factory=MQTTConfig)
@@ -458,6 +474,7 @@ class AppConfig:
             openhab=_dataclass_from(OpenHabConfig, config_data.get("openhab", {}), "openhab"),
             home_assistant=_dataclass_from(HomeAssistantConfig, config_data.get("home_assistant", {}), "home_assistant"),
             radio=radio,
+            music=_dataclass_from(MusicConfig, config_data.get("music", {}), "music"),
             mpd=_dataclass_from(MPDConfig, config_data.get("mpd", {}), "mpd"),
             tv=tv,
             mqtt=_dataclass_from(MQTTConfig, config_data.get("mqtt", {}), "mqtt"),

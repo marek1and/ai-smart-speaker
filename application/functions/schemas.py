@@ -1,6 +1,7 @@
 from google.genai.types import Behavior, FunctionDeclaration, Schema, Tool, Type
 
-from functions.definitions import ACTIVE_SMARTHOME_BACKEND as _BACKEND
+from functions.definitions import ACTIVE_SMARTHOME_BACKEND as _BACKEND, music_provider
+from music.providers import KINDS
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +192,7 @@ PLAY_INTERNET_RADIO_FUNC = FunctionDeclaration(
 
 STOP_RADIO_FUNC = FunctionDeclaration(
     name="stop_radio",
-    description="Stops the radio playback.",
+    description="Stops playback: the radio or music, whichever is playing.",
     parameters=Schema(
         type=Type.OBJECT,
         properties={},
@@ -212,6 +213,42 @@ SET_PLAYBACK_VOLUME_FUNC = FunctionDeclaration(
         },
         required=["volume_percentage"],
     ),
+)
+
+PLAY_MUSIC_FUNC = FunctionDeclaration(
+    name="play_music",
+    description=(
+        "Finds a song, artist or album on the music service and plays it, replacing the "
+        "radio. The result carries title, artist and tracks (number of queued tracks)."
+    ),
+    parameters=Schema(
+        type=Type.OBJECT,
+        properties={
+            "query": Schema(
+                type=Type.STRING,
+                description="What to search for, e.g. 'Dawid Podsiadło Małomiasteczkowy'.",
+            ),
+            "kind": Schema(
+                type=Type.STRING,
+                enum=list(KINDS),
+                description=(
+                    "track: one song; artist: several songs by the artist; "
+                    "album: a whole album or playlist."
+                ),
+            ),
+        },
+        required=["query"],
+    ),
+)
+
+NEXT_TRACK_FUNC = FunctionDeclaration(
+    name="next_track",
+    description=(
+        "Skips to the next song queued by play_music. status is \"success\" (with title, "
+        "artist and remaining_tracks), \"no_next\" when that was the last queued song, or "
+        "\"error\" (e.g. the radio is playing, which has no next song)."
+    ),
+    parameters=Schema(type=Type.OBJECT, properties={}, required=[]),
 )
 
 GET_RADIO_STATUS_FUNC = FunctionDeclaration(
@@ -263,7 +300,7 @@ _COMMON_DECLARATIONS = [
     SET_PLAYBACK_VOLUME_FUNC,
     GET_RADIO_STATUS_FUNC,
     REQUEST_FOR_USER_INPUT_FUNC,
-]
+] + ([PLAY_MUSIC_FUNC, NEXT_TRACK_FUNC] if music_provider is not None else [])
 
 _OH_DECLARATIONS = [
     GET_OPENHAB_ITEM_STATE_FUNC,
@@ -317,6 +354,8 @@ def _schema_to_json(schema: Schema) -> dict:
     result: dict = {"type": _GENAI_TYPE_MAP.get(schema.type, "object")}
     if getattr(schema, "description", None):
         result["description"] = schema.description
+    if getattr(schema, "enum", None):
+        result["enum"] = list(schema.enum)
     props = getattr(schema, "properties", None)
     if props is not None:
         result["properties"] = {k: _schema_to_json(v) for k, v in props.items()}

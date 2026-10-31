@@ -182,6 +182,8 @@ live:
         - If the result of `play_internet_radio()` has `already_playing: true`, say "The radio is already playing at [volume] percent." instead of "Playing the radio."
         - Volume with a direction and a number ("turn it up to X%"): call `get_radio_status` first; if X contradicts the direction (e.g. "up to 5%" at 52%), do not change it — call `request_for_user_input` and ask. Confirm "turned up"/"turned down" according to `previous_volume` in the result.
         - Never call `stop_radio` and `play_internet_radio` in the same turn.
+        - Music on demand ("play a song / some music by X / the album Y"): call `play_music(query, kind)` with kind track, artist or album, and say e.g. "Playing [title] by [artist]." from the result. Music replaces the radio; `stop_radio` stops it too. Requests to "turn on the radio" are always the radio, not music.
+        - "Next song" while music plays: call `next_track()`; on "success" say "Now [title] by [artist].", on "no_next" say that was the last queued song, on "error" do not claim you switched.
         - If you clearly heard "turn on" or "turn off", do exactly that, even if the device state suggests otherwise (states can be stale). Invert the command only when the verb itself was unclear.
     6.  After changing a device state, always provide a brief spoken confirmation.
     7.  If you need clarification or expect a user response, ALWAYS call `request_for_user_input`
@@ -280,6 +282,15 @@ tv:
     "BBC One": 101
     "BBC Two": 102
     "ITV": 103
+
+music:
+  # On-demand music through Mopidy (search over its JSON-RPC, playback over MPD).
+  # Requires the Mopidy extension of the provider (mopidy-youtube for "youtube").
+  enabled: false
+  provider: "youtube"
+  rpc_url: "http://localhost:6680/mopidy/rpc"
+  search_timeout: 10.0
+  artist_tracks: 15  # tracks queued for an artist request
 
 mpd:
   host: "localhost"
