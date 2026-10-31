@@ -12,7 +12,6 @@ This project is a hardware retrofit of the **Edifier D12** 70W Bluetooth speaker
 - [Hardware Implementation](#️-hardware-implementation)
 - [System Configuration](#️-system-configuration)
 - [Smart Home Backend Configuration](#smart-home-backend-configuration)
-- [Future Improvements](#future-improvements)
 
 ## ⚠️ Safety Warning & Disclaimer
 
@@ -40,6 +39,8 @@ The project prioritizes audio quality, low latency, and a modular software desig
 - **Real-time Conversational AI:** Leverages the native streaming APIs from **Google Gemini** and **OpenAI** for low-latency, natural-feeling conversations.
 - **Robust Voice Capture:** The XVF3800 DSP provides hardware beamforming and AEC. Wake word detection runs in the application via [openWakeWord](https://github.com/dscripka/openWakeWord) (ONNX model, custom-trainable).
 - **Smart Home Control via Function Calling:** Integrates with **Home Assistant** and **OpenHAB** to control lights, switches, covers, sensors, and TV.
+- **Radio and Music on Request:** Internet radio with pinned stations, plus songs, artists and albums from YouTube Music ("play something by …", "next song"), all through Mopidy.
+- **Typed Requests over MQTT:** Text sent to `<topic_prefix>/assistant/ask` gets a spoken answer; every turn is published as JSON on `<topic_prefix>/assistant/reply`.
 - **Multi-lingual:** While designed for Polish, the system can be configured for any language supported by the chosen AI provider.
 - **Operational Monitoring:** Built-in Prometheus metrics endpoint with a pre-configured Grafana dashboard.
 
@@ -271,8 +272,3 @@ The active backend is detected automatically at startup by inspecting `config.ym
 - Neither configured → no smarthome functions exposed; any attempt to control devices returns a "not configured" error to the AI
 
 There is no implicit fallback — if a backend section is incomplete, it is ignored.
-
-## Future Improvements
-
-- **Spotify:** Mopidy already plays radio and YouTube Music; Spotify still needs its GStreamer plugin built (see [`yocto/README.md`](./yocto/README.md)).
-- **App in the image:** the application and its venv are deployed to `/data` with `sync-to-rpi.sh`; baking them into the image would let a RAUC update carry the app too.

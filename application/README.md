@@ -285,6 +285,14 @@ the client tolerates the places where Mopidy differs: `clearerror` is not implem
 "output" is the mixer's mute switch with inverted meaning, and its queue does not survive a restart
 (resume reloads the last station). See `yocto/README.md` for the details.
 
+**Music on request** (`music.enabled`, Mopidy only): `play_music(query, kind)` searches one Mopidy
+backend over its JSON-RPC (`core.library.search`, YouTube Music today) and queues one track, an
+artist's top tracks or an album; `next_track()` skips within that queue. Radio and music share the
+queue, so the client tracks what it holds: power-on and "turn on the radio" switch back to the last
+station, a frozen or dead track is never blamed on a station, and the station topic on MQTT is left
+alone while music plays. Another service is one entry in `music/providers.py` plus its Mopidy
+extension.
+
 **Installation (Debian/Raspberry Pi OS):**
 
 ```bash
