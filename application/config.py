@@ -188,6 +188,9 @@ class LiveConfig:
     # API VAD settings (failsafe with long timeout)
     api_vad_timeout: float = 2.0  # API-side silence timeout (failsafe)
     turn_watchdog_timeout: float = 5.0  # Watchdog timeout for turn completion
+    # Gemini: end the turn this long after generation_complete when nothing new
+    # came and turn_complete is still missing (it lagged 4-19 s). 0 disables.
+    generation_complete_grace: float = 1.0
     audio_done_watchdog_timeout: float = 3.0  # Tighter watchdog after audio stream ends (OpenAI response.output_audio.done)
 
     # Output silence detection: RMS threshold below which a received audio chunk is

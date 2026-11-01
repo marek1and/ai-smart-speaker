@@ -573,6 +573,53 @@ async def test_both_backends_report_deferred_actions_as_they_are_queued(gemini, 
         assert seen == mgr.pending_actions and seen[0]["type"] == "set_playback_volume", type(mgr).__name__
 
 
+def server(**content):
+    return SimpleNamespace(server_content=SimpleNamespace(**content))
+
+
+async def test_gemini_turn_ends_after_generation_complete_when_turn_complete_lags(gemini, monkeypatch):
+    # measured 01.11.2026: turn_complete 4-19 s after generation_complete
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.05)
+    ended = []
+    gemini.set_callbacks(on_turn_complete=lambda: ended.append(True))
+    gemini._chunks_received = 5
+    gemini._frames_sent, gemini._response_started = 1000, True  # a turn with real audio
+    gemini._waiting_for_turn_complete = True
+    await gemini._process_api_response(server(generation_complete=True))
+    await asyncio.sleep(0.1)
+    assert ended == [True] and gemini._waiting_for_turn_complete is False
+    # the late turn_complete must not end the next turn, which is waiting already
+    gemini._waiting_for_turn_complete = True
+    await gemini._process_api_response(server(turn_complete=True))
+    assert ended == [True] and gemini._waiting_for_turn_complete is True
+    await gemini._process_api_response(server(turn_complete=True))  # the next turn's own
+    assert ended == [True, True]
+
+
+async def test_gemini_turn_complete_within_the_grace_ends_the_turn_once(gemini, monkeypatch):
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.2)
+    ended = []
+    gemini.set_callbacks(on_turn_complete=lambda: ended.append(True))
+    gemini._chunks_received = 5
+    gemini._frames_sent, gemini._response_started = 1000, True  # a turn with real audio
+    await gemini._process_api_response(server(generation_complete=True))
+    await gemini._process_api_response(server(turn_complete=True))
+    await asyncio.sleep(0.3)
+    assert ended == [True] and gemini._late_turn_completes == 0
+
+
+async def test_gemini_more_content_after_generation_complete_keeps_the_turn(gemini, monkeypatch):
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.05)
+    ended = []
+    gemini.set_callbacks(on_turn_complete=lambda: ended.append(True))
+    gemini._chunks_received = 5
+    gemini._frames_sent, gemini._response_started = 1000, True  # a turn with real audio
+    await gemini._process_api_response(server(generation_complete=True))
+    await gemini._process_api_response(SimpleNamespace(server_content=None, tool_call=SimpleNamespace(function_calls=[])))
+    await asyncio.sleep(0.1)
+    assert ended == []
+
+
 def test_deferred_tools_exist():
     from realtime.base import BaseRealtimeManager
     assert BaseRealtimeManager.DEFERRED_FUNCTIONS <= set(FUNCTIONS)

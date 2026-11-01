@@ -70,6 +70,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         # session instead of an error (no error sound, no state reset).
         self._go_away_received: bool = False
 
+        # generation_complete often comes many seconds before turn_complete
+        # (measured 4-19 s on 01.11.2026): see _end_turn_after_generation.
+        self._generation_end_task: Optional[asyncio.Task] = None
+        self._late_turn_completes: int = 0
+
     def _silence_run_is_notable(self, run_length: int) -> bool:
         """Is this silent-chunk run long enough to warrant a warning?
 
@@ -187,6 +192,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             except asyncio.CancelledError:
                 pass
         self._conversation_task = None
+        self._cancel_generation_end()
+        self._late_turn_completes = 0
 
     async def send_activity_start(self) -> None:
         """Send activity_start signal to API (manual VAD: speech started).
@@ -275,6 +282,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     ) as session:
                         self._session = session
                         self._session_active = True
+                        self._late_turn_completes = 0
                         self._go_away_received = False
                         logger.info("Session opened successfully.")
 
@@ -410,6 +418,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             # Handle model turn (audio data)
             if hasattr(sc, "model_turn") and sc.model_turn:
                 mt = sc.model_turn
+                if mt.parts:
+                    self._cancel_generation_end()  # the model is still talking
 
                 if mt.parts:
                     for part in mt.parts:
@@ -517,8 +527,25 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 ):
                     self._ai_transcript += sc.output_transcription.text
 
+            if (
+                getattr(sc, "generation_complete", False)
+                and self._chunks_received > 0  # the model answered this turn
+                and self.live_cfg.generation_complete_grace > 0
+            ):
+                self._cancel_generation_end()
+                self._generation_end_task = asyncio.create_task(
+                    self._end_turn_after_generation(), name="generation_end"
+                )
+
             # Handle turn complete
             if hasattr(sc, "turn_complete") and sc.turn_complete:
+                self._cancel_generation_end()
+                if self._late_turn_completes:
+                    # Belongs to a turn already ended after generation_complete; it
+                    # must not end (or unblock) the turn that may be running now.
+                    self._late_turn_completes -= 1
+                    logger.info("Late turn_complete of a turn already ended — ignored")
+                    return
                 self._waiting_for_turn_complete = False
 
                 # Ignore turn_complete if we haven't sent enough audio yet — likely a
@@ -537,13 +564,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
                 # Cancel watchdog only for a real (non-stale) turn_complete
                 self.cancel_watchdog()
-
-                # Log full transcripts at end of turn
-                if self._user_transcript.strip():
-                    logger.info("📝 USER: %s", self._user_transcript.strip())
-                if self._ai_transcript.strip():
-                    logger.info("🤖 AI: %s", self._ai_transcript.strip())
-
+                self._log_transcripts()
                 logger.info("API: turn_complete")
                 if self._on_turn_complete:
                     self._on_turn_complete()
@@ -565,9 +586,41 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             logger.debug("API: setup_complete")
 
         elif hasattr(response, "tool_call") and response.tool_call:
+            self._cancel_generation_end()
             logger.info("API: tool_call received")
             if response.tool_call.function_calls:
                 await self._handle_tool_calls(response.tool_call.function_calls)
+
+    def _log_transcripts(self) -> None:
+        if self._user_transcript.strip():
+            logger.info("📝 USER: %s", self._user_transcript.strip())
+        if self._ai_transcript.strip():
+            logger.info("🤖 AI: %s", self._ai_transcript.strip())
+
+    def _cancel_generation_end(self) -> None:
+        if self._generation_end_task and not self._generation_end_task.done():
+            self._generation_end_task.cancel()
+        self._generation_end_task = None
+
+    async def _end_turn_after_generation(self) -> None:
+        """Ends the turn when turn_complete lags behind generation_complete.
+
+        The model has finished speaking, but turn_complete often arrives 4-19 s
+        later (01.11.2026). Meanwhile the speaker sat in silence and dropped
+        the next activity_start. After generation_complete_grace with nothing
+        new from the model, the turn ends here and the late turn_complete is
+        ignored when it comes.
+        """
+        grace = self.live_cfg.generation_complete_grace
+        await asyncio.sleep(grace)
+        self._generation_end_task = None
+        self._late_turn_completes += 1
+        self._waiting_for_turn_complete = False
+        self.cancel_watchdog()
+        self._log_transcripts()
+        logger.info("API: generation_complete, no turn_complete within %.1fs — ending the turn", grace)
+        if self._on_turn_complete:
+            self._on_turn_complete()
 
     async def _handle_tool_calls(self, function_calls: list[FunctionCall]):
         """

@@ -215,6 +215,9 @@ live:
   # Give the API room past its own latency tail (measured 7s and 13s outliers).
   # When this fires first, the turn is closed before the answer arrives.
   turn_watchdog_timeout: 10.0
+  # Gemini: end the turn this long after generation_complete when turn_complete
+  # lags behind (measured 4-19 s). 0 disables.
+  generation_complete_grace: 1.0
 
   # Gemini-specific settings
   model: "gemini-3.8-live"
