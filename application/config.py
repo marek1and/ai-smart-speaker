@@ -306,6 +306,11 @@ class MusicConfig:
     # An artist request with fewer collection tracks than this (e.g. only a
     # guest appearance) goes to the provider, which has more of them.
     local_min_artist_tracks: int = 3
+    # Mopidy-Local's media_dir as this host sees it (an NFS share). A collection
+    # hit whose file is not reachable within local_media_timeout goes to the
+    # provider instead. Empty: not checked.
+    local_media_dir: str = ""
+    local_media_timeout: float = 2.0
     # Mopidy-YouTube's allow_cache directory. A track found there starts at
     # once, others download first (~8 s); empty: not reported to the model.
     cache_dir: str = ""

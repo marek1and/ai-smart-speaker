@@ -9,7 +9,9 @@ import logging
 import os
 import random
 import re
+import time
 import unicodedata
+import urllib.parse
 from dataclasses import dataclass
 from typing import Optional
 
@@ -20,6 +22,8 @@ from config import MusicConfig
 logger = logging.getLogger(__name__)
 
 KINDS = ("track", "artist", "album")
+# Poll interval while waiting for a prefetched track to finish downloading.
+_READY_POLL_SECONDS = 0.5
 # Untitled CD rips ("AudioTrack 05", "Track 3"): queued only when nothing else is.
 UNTITLED = re.compile(r"^(audio ?)?track\s*\d+$", re.I)
 # Extensions Mopidy-YouTube looks for when it checks its cache.
@@ -72,17 +76,48 @@ class MopidyMusicProvider:
             for ext in CACHED_EXTENSIONS
         )
 
-    async def prefetch(self, uri: str) -> None:
+    async def prefetch(self, uri: str) -> Optional[int]:
         """Queues uri right after the current track, so the backend starts
         fetching it while the AI is still speaking.
 
         Mopidy-YouTube downloads the tracks around the current one when the
-        queue changes (~8 s each); the deferred play_music then finds the
-        first track ready. The entry goes when play_music replaces the queue.
+        queue changes (~8 s each). Returns the entry's tlid: play_music
+        replaces the queue, and drop() removes the entry when it never ran.
         """
         current = await self._rpc("core.tracklist.index", {})
         position = 0 if current is None else current + 1
-        await self._rpc("core.tracklist.add", {"uris": [uri], "at_position": position})
+        added = await self._rpc("core.tracklist.add", {"uris": [uri], "at_position": position})
+        return added[0].get("tlid") if added else None
+
+    async def drop(self, tlids: list[int]) -> None:
+        """Removes prefetched entries that are still queued."""
+        await self._rpc("core.tracklist.remove", {"criteria": {"tlid": tlids}})
+
+    async def wait_ready(self, uri: str, timeout: float) -> bool:
+        """Waits until a prefetched track is downloaded, so MPD play does not
+        block Mopidy's core (and our MPD lock) for the download.
+
+        Done when Mopidy-YouTube wrote the track's .json (after the audio and
+        the cover) or the audio file stopped growing (a failed cover leaves
+        no .json). False when cache_dir is unset or on timeout.
+        """
+        if not self._config.cache_dir:
+            return False
+        track_id = uri.rsplit(":", 1)[-1]
+        base = os.path.join(self._config.cache_dir, track_id)
+        deadline = time.monotonic() + timeout
+        last_size = None
+        while time.monotonic() < deadline:
+            meta = base + ".json"
+            if os.path.exists(meta) and os.path.getsize(meta) > 0:
+                return True
+            sizes = [os.path.getsize(f"{base}.{ext}") for ext in CACHED_EXTENSIONS if os.path.exists(f"{base}.{ext}")]
+            size = sizes[0] if sizes else None
+            if size and size == last_size:
+                return True
+            last_size = size
+            await asyncio.sleep(_READY_POLL_SECONDS)
+        return False
 
     async def _pick(
         self, kind: str, tracks: list[dict], albums: list[dict], query: str = ""
@@ -136,10 +171,32 @@ class LocalCollectionProvider(MopidyMusicProvider):
     def is_cached(self, uri: str) -> Optional[bool]:
         return True
 
-    async def prefetch(self, uri: str) -> None:
+    async def prefetch(self, uri: str) -> Optional[int]:
         return None
 
+    async def wait_ready(self, uri: str, timeout: float) -> bool:
+        return True
+
+    async def _reachable(self, uri: str) -> bool:
+        """Whether the track's file is readable: the index lives on /data, the
+        files on the NAS, so a NAS outage still returns hits."""
+        if not self._config.local_media_dir:
+            return True
+        relpath = urllib.parse.unquote(uri.split(":", 2)[-1])
+        path = os.path.join(self._config.local_media_dir, relpath)
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(os.path.exists, path), self._config.local_media_timeout)
+        except asyncio.TimeoutError:
+            return False
+
     async def find(self, query: str, kind: str) -> Optional[MusicSelection]:
+        selection = await self._find(query, kind)
+        if selection and not await self._reachable(selection.uris[0]):
+            logger.warning("Collection file for '%s' is not reachable (NAS down?), trying the next provider", query)
+            return None
+        return selection
+
+    async def _find(self, query: str, kind: str) -> Optional[MusicSelection]:
         query = _plain_words(query)
         words = _fold(query).split()
         if not words:
@@ -222,8 +279,14 @@ class FallbackProvider:
     def is_cached(self, uri: str) -> Optional[bool]:
         return self._owner(uri).is_cached(uri)
 
-    async def prefetch(self, uri: str) -> None:
-        await self._owner(uri).prefetch(uri)
+    async def prefetch(self, uri: str) -> Optional[int]:
+        return await self._owner(uri).prefetch(uri)
+
+    async def drop(self, tlids: list[int]) -> None:
+        await self._providers[-1].drop(tlids)  # one Mopidy, one tracklist
+
+    async def wait_ready(self, uri: str, timeout: float) -> bool:
+        return await self._owner(uri).wait_ready(uri, timeout)
 
 
 def _untitled(track: dict) -> bool:

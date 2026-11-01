@@ -159,9 +159,13 @@ async def play_music(query: str, kind: str = "track") -> dict:
     metrics.MUSIC_PLAYS.labels(provider=selection.source or music_provider.label, kind=kind).inc()
     # Before prefetch, which creates the file.
     cached = music_provider.is_cached(selection.uris[0])
+    prefetched = False
     try:
         if not cached:
-            await music_provider.prefetch(selection.uris[0])
+            tlid = await music_provider.prefetch(selection.uris[0])
+            if tlid is not None:
+                _prefetched_tlids.append(tlid)
+                prefetched = True
     except Exception:
         # Deliberately not an error for the model: the track still resolves
         # on play, only later.
@@ -175,7 +179,33 @@ async def play_music(query: str, kind: str = "track") -> dict:
         for_model["source"] = selection.source
     if cached is not None:
         for_model["starts"] = "now" if cached else "in_a_few_seconds"
-    return {"uris": selection.uris, "title": selection.title, "for_model": for_model}
+    return {"uris": selection.uris, "title": selection.title, "prefetched": prefetched, "for_model": for_model}
+
+
+# Queue entries added by prefetch; removed at the end of the turn in case the
+# deferred play never ran (a barge-in, a follow-up question).
+_prefetched_tlids: list[int] = []
+
+
+async def wait_for_music(uri: str, timeout: float) -> bool:
+    """Waits until the provider has the first track ready to play."""
+    if music_provider is None:
+        return True
+    return await music_provider.wait_ready(uri, timeout)
+
+
+async def drop_prefetched() -> None:
+    """Removes prefetched entries left in Mopidy's queue (a no-op once
+    play_music replaced the queue)."""
+    if not _prefetched_tlids or music_provider is None:
+        return
+    tlids = list(_prefetched_tlids)
+    _prefetched_tlids.clear()
+    try:
+        await music_provider.drop(tlids)
+    except Exception:
+        # Deliberately only logged: a stray entry plays after the radio ends, nothing worse.
+        logger.warning("Could not remove prefetched entries %s", tlids, exc_info=True)
 
 
 @register_function(name="next_track")

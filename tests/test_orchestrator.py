@@ -52,6 +52,7 @@ class FakeMPD:
         self.playing = playing
         self.calls = []
         self.music_starts = True
+        self.playback_generation = 0
 
     async def is_playing(self):
         return self.playing
@@ -300,6 +301,69 @@ async def test_turn_is_published_as_it_was_when_a_barge_in_clears_it(make):
     o._dispatch_deferred_actions = dispatch_with_barge_in
     await o._execute_post_response_actions()
     assert o._mqtt_bridge.turns[-1] == {"source": "voice", "request": "puść Dżem", "reply": "Puszczam."}
+
+
+PREFETCHED = {"type": "play_music", "payload": {"uris": ["youtube:video:a"], "title": "T", "prefetched": True}}
+
+
+async def test_prefetched_music_waits_for_the_download_then_plays(make, monkeypatch):
+    waited = []
+
+    async def wait(uri, timeout):
+        waited.append((uri, timeout))
+        return True
+
+    monkeypatch.setattr(orch, "wait_for_music", wait)
+    o = make()
+    o._api_manager.pending_actions.append(dict(PREFETCHED))
+    o._state = SpeakerState.RESPONDING
+    await o._execute_post_response_actions()
+    assert waited == [("youtube:video:a", o.config.music.start_timeout)]
+    assert ("play_music", ("youtube:video:a",), "T") in o.mpd_client.calls
+
+
+@pytest.mark.parametrize("interrupt", ["stop", "barge_in"])
+async def test_music_start_is_dropped_when_superseded_while_downloading(make, monkeypatch, interrupt):
+    o = make()
+
+    async def wait(uri, timeout):
+        if interrupt == "stop":
+            o.mpd_client.playback_generation += 1   # "stop" or another playback meanwhile
+        else:
+            o._state = SpeakerState.LISTENING       # the user spoke over the reply
+        return True
+
+    monkeypatch.setattr(orch, "wait_for_music", wait)
+    o._api_manager.pending_actions.append(dict(PREFETCHED))
+    o._state = SpeakerState.RESPONDING
+    await o._execute_post_response_actions()
+    assert not any(c[0] == "play_music" for c in o.mpd_client.calls if isinstance(c, tuple))
+    assert SoundEvent.ERROR not in o._sound_player.played
+
+
+async def test_cached_music_does_not_wait(make, monkeypatch):
+    async def wait(uri, timeout):
+        raise AssertionError("must not wait for a track that was not prefetched")
+
+    monkeypatch.setattr(orch, "wait_for_music", wait)
+    o = make()
+    o._api_manager.pending_actions.append({"type": "play_music", "payload": {"uris": ["local:track:a"], "title": "T"}})
+    o._state = SpeakerState.RESPONDING
+    await o._execute_post_response_actions()
+    assert ("play_music", ("local:track:a",), "T") in o.mpd_client.calls
+
+
+async def test_turn_end_drops_leftover_prefetched_entries(make, monkeypatch):
+    dropped = []
+
+    async def drop():
+        dropped.append(True)
+
+    monkeypatch.setattr(orch, "drop_prefetched", drop)
+    o = make()
+    o._state = SpeakerState.RESPONDING
+    await o._finish_turn()
+    assert dropped == [True]
 
 
 def test_every_deferred_tool_has_a_dispatch_branch():

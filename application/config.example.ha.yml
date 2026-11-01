@@ -295,6 +295,10 @@ music:
   # library); the provider above plays what the collection does not have.
   local_first: false
   local_min_artist_tracks: 3  # fewer collection tracks of an artist: use the provider
+  # The collection's files as this host sees them (Mopidy-Local media_dir); a hit
+  # whose file is unreachable (NAS down) goes to the provider. Empty: no check.
+  local_media_dir: ""  # e.g. "/mnt/music"
+  local_media_timeout: 2.0
   # Mopidy-YouTube's allow_cache directory: the model then says whether the
   # first track starts at once or after a download. Empty: not reported.
   cache_dir: ""  # e.g. "/data/cache/mopidy/youtube"

@@ -276,6 +276,14 @@ async def test_music_play_timeout_is_a_failed_start(client, mopidy):
     assert mopidy.names()[-1] == "stop" and client.events[-1] == {"state": "OFF"}
 
 
+async def test_every_start_and_stop_bumps_the_playback_generation(client, mopidy, eska):
+    g = client.playback_generation
+    await client.play_station(*eska)
+    await client.stop()
+    await client.play_music(["local:track:a"], "Song")
+    assert client.playback_generation == g + 3
+
+
 async def test_music_that_reports_play_a_moment_later_is_started(client, mopidy):
     # seen on the speaker 01.11.2026: status right after play said "stop" for every start
     mopidy.play_settles_after = 2

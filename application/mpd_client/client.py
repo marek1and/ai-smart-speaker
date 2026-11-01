@@ -28,6 +28,7 @@ class MPDClientWrapper:
         self.client.timeout = config.connection_timeout
         self.is_connected = False
         self._fade_task: Optional[asyncio.Task] = None
+        self._playback_generation = 0
 
         # Stream-failure detection. MPD reports a dead stream in status.error,
         # but Mopidy (mopidy-mpd) never sets that field, so a second signal is
@@ -519,6 +520,12 @@ class MPDClientWrapper:
             self._radio_state.set_current(effective_key)
         self._notify(station=station_name)
 
+    @property
+    def playback_generation(self) -> int:
+        """Bumped by every start and stop, so a delayed start can tell that a
+        newer command (e.g. "stop" while it waited) superseded it."""
+        return self._playback_generation
+
     async def _start_queue(
         self, uris: List[str], description: str, play_timeout: Optional[float] = None
     ) -> bool:
@@ -529,6 +536,8 @@ class MPDClientWrapper:
         download.
         Returns False when MPD could not be reached; the caller fades in.
         """
+        self._playback_generation += 1
+
         async def start() -> None:
             await asyncio.to_thread(self.client.clear)
             for uri in uris:
@@ -1016,6 +1025,7 @@ class MPDClientWrapper:
 
     async def stop(self):
         """Stops MPD playback."""
+        self._playback_generation += 1
         if self._is_playing is False:
             logger.debug("Already stopped, skipping stop command.")
             return

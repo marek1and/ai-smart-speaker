@@ -87,6 +87,10 @@ class FakeProvider:
         self.prefetched.append(uri)
         if self.prefetch_exc:
             raise self.prefetch_exc
+        return 41
+
+    async def drop(self, tlids):
+        self.dropped = tlids
 
 
 async def test_play_music_logs_the_traceback(monkeypatch, caplog):
@@ -127,6 +131,16 @@ async def test_play_music_tells_the_model_when_it_starts(monkeypatch, cached, st
     monkeypatch.setattr(d, "music_provider", p)
     result = await d.play_music("x")
     assert result["for_model"].get("starts") == starts
+
+
+async def test_prefetched_entry_is_remembered_and_dropped_once(monkeypatch):
+    p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=False)
+    monkeypatch.setattr(d, "music_provider", p)
+    monkeypatch.setattr(d, "_prefetched_tlids", [])
+    result = await d.play_music("x")
+    assert result["prefetched"] is True and d._prefetched_tlids == [41]
+    await d.drop_prefetched()
+    assert p.dropped == [41] and d._prefetched_tlids == []
 
 
 async def test_cached_track_is_not_prefetched(monkeypatch):
@@ -236,6 +250,42 @@ def test_cache_check_matches_mopidy_youtube_file_names(tmp_path):
     assert p.is_cached("youtube:video:abc") is True
     assert p.is_cached("youtube:video:other") is False
     assert provider().is_cached("youtube:video:abc") is None  # no cache_dir
+
+
+async def test_prefetch_returns_the_entry_and_drop_removes_it(rpc):
+    rpc.replies["core.tracklist.index"] = {"result": 0}
+    rpc.replies["core.tracklist.add"] = {"result": [{"tlid": 7, "track": {}}]}
+    rpc.replies["core.tracklist.remove"] = {"result": []}
+    assert await provider().prefetch("youtube:video:z") == 7
+    await provider().drop([7])
+    assert rpc.sent[-1]["params"] == {"criteria": {"tlid": [7]}}
+
+
+def youtube_with_cache(tmp_path):
+    return providers.MopidyMusicProvider("YouTube", "youtube:", MusicConfig(enabled=True, cache_dir=str(tmp_path)))
+
+
+async def test_wait_ready_on_metadata_or_a_finished_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(providers, "_READY_POLL_SECONDS", 0.01)
+    (tmp_path / "abc.json").write_text("{}")
+    assert await youtube_with_cache(tmp_path).wait_ready("youtube:video:abc", 1.0)
+    (tmp_path / "def.webm").write_bytes(b"x" * 10)  # no cover, so no .json; size stays
+    assert await youtube_with_cache(tmp_path).wait_ready("youtube:video:def", 1.0)
+    assert not await youtube_with_cache(tmp_path).wait_ready("youtube:video:none", 0.05)
+    assert not await provider().wait_ready("youtube:video:abc", 0.05)  # no cache_dir
+
+
+async def test_unreachable_collection_file_goes_to_the_next_provider(rpc, tmp_path):
+    (tmp_path / "Dżem").mkdir()
+    (tmp_path / "Dżem" / "whisky.mp3").write_bytes(b"")
+    present = local_track("local:track:D%C5%BCem/whisky.mp3", "Whisky", "Dżem")
+    gone = local_track("local:track:D%C5%BCem/gone.mp3", "Whisky", "Dżem")
+    cfg = MusicConfig(enabled=True, local_media_dir=str(tmp_path))
+    p = providers.LocalCollectionProvider("collection", "local:", cfg)
+    rpc.replies["core.library.search"] = {"result": [{"tracks": [present]}]}
+    assert (await p.find("Dżem Whisky", "track")).uris == [present["uri"]]
+    rpc.replies["core.library.search"] = {"result": [{"tracks": [gone]}]}
+    assert await p.find("Dżem Whisky", "track") is None
 
 
 async def test_rpc_error_raises(rpc):
