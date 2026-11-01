@@ -61,15 +61,15 @@ do_install() {
     install -m 0644 ${S}/10-aispeaker-volatile-lib.conf \
         ${D}${systemd_system_unitdir}/systemd-timesyncd.service.d/
 
-    # mount point for the NFS share; the rootfs is read-only, so systemd
-    # cannot create it at boot
-    install -d ${D}/mnt/nas
+    # mount points for the NFS shares (logs/updates, music collection); the
+    # rootfs is read-only, so systemd cannot create them at boot
+    install -d ${D}/mnt/nas ${D}/mnt/music
     # NFS mount/automount units are NOT baked here — scripts/provision-data.sh
     # generates them from yocto/local/nfs.env (server, mount point, options are
     # all site-specific) into the /etc overlay on /data.
 }
 
-FILES:${PN} = "${sysconfdir} ${sbindir} ${systemd_system_unitdir} /mnt/nas"
+FILES:${PN} = "${sysconfdir} ${sbindir} ${systemd_system_unitdir} /mnt/nas /mnt/music"
 
 RDEPENDS:${PN} = "networkmanager"
 RRECOMMENDS:${PN} = "kernel-module-zram"

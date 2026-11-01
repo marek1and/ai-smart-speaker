@@ -35,4 +35,4 @@ do_install() {
 FILES:${PN} = "${sysconfdir}"
 
 # the server + the extensions we bake in (all system recipes now)
-RDEPENDS:${PN} = "mopidy mopidy-mpd mopidy-youtube mopidy-spotify"
+RDEPENDS:${PN} = "mopidy mopidy-mpd mopidy-youtube mopidy-spotify mopidy-local"

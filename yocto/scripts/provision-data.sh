@@ -2,12 +2,13 @@
 # After flashing the image (bmaptool/dd) — seeds the 'data' partition with
 # site-specific configuration that is deliberately kept out of git:
 #  - NetworkManager WiFi profile (keyfile in the /etc overlay)
-#  - optional NFS share for recordings (generated mount+automount units)
+#  - optional NFS shares: logs/updates and the music collection (generated mount+automount units)
 #  - application directory skeleton
 #
 # Site config lives in the git-ignored yocto/local/ directory:
 #   local/wifi.env:  WIFI_SSID="..."  WIFI_PSK="..."
-#   local/nfs.env:   NFS_EXPORT + NFS_MOUNTPOINT + NFS_OPTIONS   (optional)
+#   local/nfs.env:   NFS_EXPORT + NFS_MOUNTPOINT + NFS_OPTIONS   (optional),
+#                    MUSIC_NFS_EXPORT [+ MUSIC_NFS_OPTIONS] -> /mnt/music (optional)
 #
 # Usage: sudo ./provision-data.sh /dev/sdX
 #        sudo ./provision-data.sh /dev/sdX "SSID" "psk"   (overrides wifi.env)
@@ -62,50 +63,57 @@ EOF
 chmod 600 "$NM_DIR/home-wifi.nmconnection"
 echo "WiFi profile '$WIFI_SSID' written"
 
-# optional NFS share — generate the mount + automount units from nfs.env into
-# the /etc overlay. The unit filename must match the mount point, so it is
-# derived from NFS_MOUNTPOINT via systemd-escape.
-if [ -f "$LOCAL_DIR/nfs.env" ]; then
-    # shellcheck source=/dev/null
-    . "$LOCAL_DIR/nfs.env"
-    if [ -n "${NFS_EXPORT:-}" ]; then
-        # the mount point must exist in the image (read-only rootfs)
-        MP="${NFS_MOUNTPOINT:-/mnt/nas}"
-        OPTS="${NFS_OPTIONS:-vers=4,soft,timeo=50,retrans=2,noatime,_netdev}"
-        base=$(systemd-escape -p "$MP")           # /mnt/nas -> mnt-nas
-        SYSD="$UPPER/systemd/system"
-        mkdir -p "$SYSD/multi-user.target.wants"
+# optional NFS shares — generate the mount + automount units into the /etc
+# overlay. The unit filename must match the mount point, so it is derived via
+# systemd-escape. The mount point must exist in the image (read-only rootfs):
+# /mnt/nas and /mnt/music do.
+nfs_share() {  # export mountpoint options
+    local export="$1" mp="$2" opts="$3" base sysd
+    base=$(systemd-escape -p "$mp")           # /mnt/nas -> mnt-nas
+    sysd="$UPPER/systemd/system"
+    mkdir -p "$sysd/multi-user.target.wants"
 
-        cat > "$SYSD/${base}.mount" <<EOF
+    cat > "$sysd/${base}.mount" <<EOF
 [Unit]
-Description=NFS share ${NFS_EXPORT} (site-specific, from nfs.env)
+Description=NFS share ${export} (site-specific, from nfs.env)
 
 [Mount]
-What=${NFS_EXPORT}
-Where=${MP}
+What=${export}
+Where=${mp}
 Type=nfs
-Options=${OPTS}
+Options=${opts}
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-        cat > "$SYSD/${base}.automount" <<EOF
+    cat > "$sysd/${base}.automount" <<EOF
 [Unit]
-Description=Automount for ${MP}
+Description=Automount for ${mp}
 
 [Automount]
-Where=${MP}
+Where=${mp}
 TimeoutIdleSec=300
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-        # enable the automount (lazy mount on first access — keeps boot NAS-free)
-        ln -sf "/etc/systemd/system/${base}.automount" \
-            "$SYSD/multi-user.target.wants/${base}.automount"
-        echo "NFS share configured: ${NFS_EXPORT} -> ${MP}  (unit ${base}.mount)"
+    # enable the automount (lazy mount on first access — keeps boot NAS-free)
+    ln -sf "/etc/systemd/system/${base}.automount" \
+        "$sysd/multi-user.target.wants/${base}.automount"
+    echo "NFS share configured: ${export} -> ${mp}  (unit ${base}.mount)"
+}
+
+if [ -f "$LOCAL_DIR/nfs.env" ]; then
+    # shellcheck source=/dev/null
+    . "$LOCAL_DIR/nfs.env"
+    DEFAULT_OPTS="vers=4,soft,timeo=50,retrans=2,noatime,_netdev"
+    if [ -n "${NFS_EXPORT:-}" ]; then
+        nfs_share "$NFS_EXPORT" "${NFS_MOUNTPOINT:-/mnt/nas}" "${NFS_OPTIONS:-$DEFAULT_OPTS}"
+    fi
+    if [ -n "${MUSIC_NFS_EXPORT:-}" ]; then
+        nfs_share "$MUSIC_NFS_EXPORT" /mnt/music "${MUSIC_NFS_OPTIONS:-ro,$DEFAULT_OPTS}"
     fi
 fi
 
