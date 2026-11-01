@@ -219,7 +219,9 @@ PLAY_MUSIC_FUNC = FunctionDeclaration(
     name="play_music",
     description=(
         "Finds a song, artist or album on the music service and plays it, replacing the "
-        "radio. The result carries title, artist and tracks (number of queued tracks)."
+        "radio. The result carries title, artist, tracks (number of queued tracks) and "
+        "starts: \"now\", or \"in_a_few_seconds\" when the first track still has to "
+        "download. Playback begins after your reply."
     ),
     parameters=Schema(
         type=Type.OBJECT,

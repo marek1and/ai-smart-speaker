@@ -1231,19 +1231,21 @@ class AudioOrchestrator:
 
         await self._execute_post_response_actions()
 
-    async def _dispatch_deferred_actions(self) -> bool:
+    async def _dispatch_deferred_actions(self) -> tuple[bool, Optional[str]]:
         """Execute and clear all pending deferred tool actions.
 
-        Returns True if a radio play/stop action was executed (signals turn should end
-        without the end-conversation sound).
+        Returns (ran_radio_action, error): ran_radio_action is True if a radio
+        play/stop action was executed (the turn ends without the end-conversation
+        sound); error names an action that failed after the AI had confirmed it.
         """
         if not self._api_manager or not self._api_manager.pending_actions:
-            return False
+            return False, None
 
         actions = list(self._api_manager.pending_actions)
         self._api_manager.pending_actions.clear()
 
         ran_radio_action = False
+        error = None
         for action in actions:
             action_type = action.get("type")
             payload = action.get("payload", {})
@@ -1274,7 +1276,17 @@ class AudioOrchestrator:
 
             elif action_type == "play_music":
                 logger.info("Executing deferred action: play_music")
-                await self.mpd_client.play_music(payload["uris"], payload.get("title") or "")
+                started = await self.mpd_client.play_music(
+                    payload["uris"],
+                    payload.get("title") or "",
+                    self.config.music.start_timeout,
+                )
+                if not started:
+                    # The AI already said it is playing; without a sound the
+                    # room just stays silent.
+                    error = "music_start_failed"
+                    if self._sound_player:
+                        self._sound_player.play(SoundEvent.ERROR)
                 ran_radio_action = True
 
             elif action_type == "set_playback_volume":
@@ -1282,18 +1294,20 @@ class AudioOrchestrator:
                 if "volume_percentage" in payload:
                     await self.mpd_client.set_volume(payload["volume_percentage"])
 
-        return ran_radio_action
+        return ran_radio_action, error
 
     async def _execute_post_response_actions(self) -> None:
         """Execute deferred actions and decide the next state after AI response."""
+        # Before publishing: the turn carries the error of a deferred action.
+        turn_should_end, error = await self._dispatch_deferred_actions()
         if self._api_manager is not None:
             self._publish_turn(
                 "text" if self._text_turn is not None else "voice",
                 self._text_turn or self._api_manager.user_transcript.strip(),
                 self._api_manager.ai_transcript.strip(),
+                error,
             )
         self._text_turn = None
-        turn_should_end = await self._dispatch_deferred_actions()
 
         if turn_should_end:
             logger.info("Radio action performed, ending turn.")

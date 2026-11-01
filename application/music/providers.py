@@ -6,6 +6,7 @@ track URIs that Mopidy can queue.
 """
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -16,6 +17,8 @@ from config import MusicConfig
 logger = logging.getLogger(__name__)
 
 KINDS = ("track", "artist", "album")
+# Extensions Mopidy-YouTube looks for when it checks its cache.
+CACHED_EXTENSIONS = ("webm", "m4a", "mp3", "ogg")
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,28 @@ class MopidyMusicProvider:
         tracks = [t for r in result or [] for t in r.get("tracks") or []]
         albums = [a for r in result or [] for a in r.get("albums") or []]
         return await self._pick(kind, tracks, albums)
+
+    def is_cached(self, uri: str) -> Optional[bool]:
+        """Whether the track is already downloaded; None without cache_dir."""
+        if not self._config.cache_dir:
+            return None
+        track_id = uri.rsplit(":", 1)[-1]
+        return any(
+            os.path.exists(os.path.join(self._config.cache_dir, f"{track_id}.{ext}"))
+            for ext in CACHED_EXTENSIONS
+        )
+
+    async def prefetch(self, uri: str) -> None:
+        """Queues uri right after the current track, so the backend starts
+        fetching it while the AI is still speaking.
+
+        Mopidy-YouTube downloads the tracks around the current one when the
+        queue changes (~8 s each); the deferred play_music then finds the
+        first track ready. The entry goes when play_music replaces the queue.
+        """
+        current = await self._rpc("core.tracklist.index", {})
+        position = 0 if current is None else current + 1
+        await self._rpc("core.tracklist.add", {"uris": [uri], "at_position": position})
 
     async def _pick(
         self, kind: str, tracks: list[dict], albums: list[dict]

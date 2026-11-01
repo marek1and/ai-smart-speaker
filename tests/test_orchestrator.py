@@ -51,6 +51,7 @@ class FakeMPD:
     def __init__(self, playing=False):
         self.playing = playing
         self.calls = []
+        self.music_starts = True
 
     async def is_playing(self):
         return self.playing
@@ -65,9 +66,11 @@ class FakeMPD:
         self.calls.append(("play_station", url, name, key))
         self.playing = True
 
-    async def play_music(self, uris, title):
+    async def play_music(self, uris, title, start_timeout=None):
         self.calls.append(("play_music", tuple(uris), title))
-        self.playing = True
+        self.start_timeout = start_timeout
+        self.playing = self.music_starts
+        return self.music_starts
 
     async def resume(self, resolve):
         self.calls.append("resume")
@@ -254,6 +257,29 @@ async def test_playback_actions_run_and_end_the_turn_quietly(make, action, expec
     assert o.state == SpeakerState.IDLE
     assert SoundEvent.END_CONVERSATION not in o._sound_player.played
     assert o._api_manager.pending_actions == []
+
+
+async def test_music_gets_the_configured_start_timeout(make):
+    o = make()
+    o._api_manager.pending_actions.append({"type": "play_music", "payload": {"uris": ["youtube:video:a"], "title": "T"}})
+    o._state = SpeakerState.RESPONDING
+    await o._execute_post_response_actions()
+    assert o.mpd_client.start_timeout == o.config.music.start_timeout
+    assert "error" not in o._mqtt_bridge.turns[-1]
+    assert SoundEvent.ERROR not in o._sound_player.played
+
+
+async def test_music_that_fails_to_start_sounds_and_reports_an_error(make):
+    # The AI has already said "Puszczam ..."; the room must not just stay silent.
+    o = make()
+    o.mpd_client.music_starts = False
+    o._api_manager.pending_actions.append({"type": "play_music", "payload": {"uris": ["youtube:video:a"], "title": "T"}})
+    o._state = SpeakerState.RESPONDING
+    await o._execute_post_response_actions()
+    assert SoundEvent.ERROR in o._sound_player.played
+    assert SoundEvent.END_CONVERSATION not in o._sound_player.played
+    assert o._mqtt_bridge.turns[-1]["error"] == "music_start_failed"
+    assert o.state == SpeakerState.IDLE
 
 
 def test_every_deferred_tool_has_a_dispatch_branch():

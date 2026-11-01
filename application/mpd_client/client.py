@@ -517,9 +517,14 @@ class MPDClientWrapper:
             self._radio_state.set_current(effective_key)
         self._notify(station=station_name)
 
-    async def _start_queue(self, uris: List[str], description: str) -> bool:
+    async def _start_queue(
+        self, uris: List[str], description: str, play_timeout: Optional[float] = None
+    ) -> bool:
         """Replaces the queue with uris and starts playback at volume 0.
 
+        play_timeout: socket timeout for the play command only. Mopidy answers
+        play once the first track resolves, which for a YouTube track means a
+        download.
         Returns False when MPD could not be reached; the caller fades in.
         """
         async def start() -> None:
@@ -528,7 +533,13 @@ class MPDClientWrapper:
                 await asyncio.to_thread(self.client.add, uri)
             await self._clear_error_unsafe()
             await self._set_internal_volume_unsafe(0)
-            await asyncio.to_thread(self.client.play)
+            previous = self.client.timeout
+            if play_timeout is not None:
+                self.client.timeout = play_timeout
+            try:
+                await asyncio.to_thread(self.client.play)
+            finally:
+                self.client.timeout = previous
 
         async with self._mpd_lock:
             if not await self._connect():
@@ -589,18 +600,28 @@ class MPDClientWrapper:
         self._notify(state="ON", station=station_name, volume=self._restore_volume)
         await self._fade_in_after_start()
 
-    async def play_music(self, uris: List[str], title: str) -> None:
+    async def play_music(
+        self, uris: List[str], title: str, start_timeout: Optional[float] = None
+    ) -> bool:
         """Replaces the queue with music tracks and plays them.
 
+        Returns False when playback did not start: MPD unreachable, play timed
+        out, or Mopidy skipped every track as unplayable and stayed stopped.
         The station topic is left alone: HA models it as a select over the
         radio stations, and a track title is not one of its options.
         """
-        if not await self._start_queue(uris, f"music: {title} ({len(uris)} tracks)"):
-            return
+        description = f"music: {title} ({len(uris)} tracks)"
+        if not await self._start_queue(uris, description, play_timeout=start_timeout):
+            return False
+        status = await self.get_status()
+        if (status or {}).get("state") != "play":
+            logger.error("Music did not start (%s): state %s", description, (status or {}).get("state"))
+            return False
         self._source = "music"
         self._started_key = None
         self._notify(state="ON", volume=self._restore_volume)
         await self._fade_in_after_start()
+        return True
 
     async def _fade_in_after_start(self) -> None:
         # Run fade-in outside of the main lock to allow other operations.

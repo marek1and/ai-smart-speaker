@@ -262,6 +262,25 @@ async def test_play_music_queues_all_tracks_and_leaves_station_alone(client, mop
     assert client.events[-1] == {"state": "ON", "volume": 50}  # no "station": HA select
 
 
+async def test_music_play_gets_a_longer_timeout_only_for_play(client, mopidy):
+    # Mopidy answers play once the first YouTube track is downloaded (~8 s).
+    assert await client.play_music(["youtube:video:a"], "Song", start_timeout=30.0)
+    assert mopidy.play_timeouts == [30.0] and mopidy.timeout == 5
+
+
+async def test_music_play_timeout_is_a_failed_start(client, mopidy):
+    mopidy.fail_next["play"] = TimeoutError("timed out")
+    assert not await client.play_music(["youtube:video:a"], "Song", start_timeout=30.0)
+    assert client.source != "music" and mopidy.timeout == 5
+
+
+async def test_music_skipped_as_unplayable_is_a_failed_start(client, mopidy):
+    mopidy.unplayable = True
+    assert not await client.play_music(["youtube:video:a", "youtube:video:b"], "Song")
+    assert client.source != "music"
+    assert not any(e.get("state") == "ON" for e in client.events)
+
+
 async def test_load_station_marks_the_queue_as_radio(client):
     await client.play_music(["youtube:video:a"], "Song")
     await client.load_station("http://x/s.mp3", "Radio Zet", key="zet")

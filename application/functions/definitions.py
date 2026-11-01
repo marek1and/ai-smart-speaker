@@ -157,15 +157,22 @@ async def play_music(query: str, kind: str = "track") -> dict:
     if selection is None:
         return {"status": "error", "details": f"Nothing found on {music_provider.label} for '{query}'."}
     metrics.MUSIC_PLAYS.labels(provider=music_provider.label, kind=kind).inc()
-    return {
-        "uris": selection.uris,
+    # Before prefetch, which creates the file.
+    cached = music_provider.is_cached(selection.uris[0])
+    try:
+        await music_provider.prefetch(selection.uris[0])
+    except Exception:
+        # Deliberately not an error for the model: the track still resolves
+        # on play, only later.
+        logger.warning("Prefetch of %s failed", selection.uris[0], exc_info=True)
+    for_model = {
         "title": selection.title,
-        "for_model": {
-            "title": selection.title,
-            "artist": selection.artist,
-            "tracks": len(selection.uris),
-        },
+        "artist": selection.artist,
+        "tracks": len(selection.uris),
     }
+    if cached is not None:
+        for_model["starts"] = "now" if cached else "in_a_few_seconds"
+    return {"uris": selection.uris, "title": selection.title, "for_model": for_model}
 
 
 @register_function(name="next_track")

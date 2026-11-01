@@ -33,6 +33,8 @@ class FakeMopidy:
         self.volume = 100
         self.muted = False
         self.fail_next: dict[str, BaseException] = {}
+        self.play_timeouts: list = []  # socket timeout seen by each play
+        self.unplayable = False  # Mopidy skipped every track and stays stopped
 
     def _rec(self, name, *args):
         exc = self.fail_next.pop(name, None)
@@ -78,8 +80,9 @@ class FakeMopidy:
         self.volume = int(v)
 
     def play(self, pos=None):
+        self.play_timeouts.append(self.timeout)
         self._rec("play", pos)
-        if not self.queue:
+        if not self.queue or self.unplayable:
             return
         self.song = 0 if pos is None else int(pos)
         self.state = "play"

@@ -70,14 +70,23 @@ async def test_status_while_music_plays(mpd, mopidy):
 class FakeProvider:
     label = "YouTube"
 
-    def __init__(self, selection=None, exc=None):
+    def __init__(self, selection=None, exc=None, prefetch_exc=None, cached=None):
         self.selection, self.exc, self.kinds = selection, exc, []
+        self.prefetch_exc, self.prefetched, self.cached = prefetch_exc, [], cached
+
+    def is_cached(self, uri):
+        return self.cached
 
     async def find(self, query, kind):
         self.kinds.append(kind)
         if self.exc:
             raise self.exc
         return self.selection
+
+    async def prefetch(self, uri):
+        self.prefetched.append(uri)
+        if self.prefetch_exc:
+            raise self.prefetch_exc
 
 
 async def test_play_music_logs_the_traceback(monkeypatch, caplog):
@@ -103,6 +112,32 @@ async def test_play_music_unknown_kind_falls_back_to_track(monkeypatch):
     result = await d.play_music("x", kind="podcast")
     assert p.kinds == ["track"] and result["uris"] == ["youtube:video:a"]
     assert result["for_model"] == {"title": "T", "artist": "A", "tracks": 1}
+
+
+async def test_play_music_prefetches_only_the_first_track(monkeypatch):
+    p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a", "youtube:video:b"], "T", "A"))
+    monkeypatch.setattr(d, "music_provider", p)
+    await d.play_music("x", kind="artist")
+    assert p.prefetched == ["youtube:video:a"]
+
+
+@pytest.mark.parametrize("cached,starts", [(True, "now"), (False, "in_a_few_seconds"), (None, None)])
+async def test_play_music_tells_the_model_when_it_starts(monkeypatch, cached, starts):
+    p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=cached)
+    monkeypatch.setattr(d, "music_provider", p)
+    result = await d.play_music("x")
+    assert result["for_model"].get("starts") == starts
+
+
+async def test_failed_prefetch_still_plays_and_is_logged(monkeypatch, caplog):
+    p = FakeProvider(
+        selection=providers.MusicSelection(["youtube:video:a"], "T", "A"),
+        prefetch_exc=OSError("mopidy down"),
+    )
+    monkeypatch.setattr(d, "music_provider", p)
+    result = await d.play_music("x")
+    assert result["uris"] == ["youtube:video:a"] and "status" not in result
+    assert any(r.exc_info for r in caplog.records if "Prefetch" in r.getMessage())
 
 
 async def test_next_track_tool(mpd, mopidy, eska):
@@ -167,6 +202,24 @@ async def test_album_is_expanded_and_falls_back_to_tracks_when_empty(rpc):
 async def test_nothing_found(rpc, result):
     rpc.replies["core.library.search"] = {"result": result}
     assert await provider().find("q", "track") is None
+
+
+@pytest.mark.parametrize("current,position", [(None, 0), (0, 1), (6, 7)])
+async def test_prefetch_queues_right_after_the_current_track(rpc, current, position):
+    # Mopidy-YouTube fetches only the tracks next to the current one, so an
+    # entry at the end of a long music queue would never be fetched early.
+    rpc.replies["core.tracklist.index"] = {"result": current}
+    rpc.replies["core.tracklist.add"] = {"result": []}
+    await provider().prefetch("youtube:video:z")
+    assert rpc.sent[-1]["params"] == {"uris": ["youtube:video:z"], "at_position": position}
+
+
+def test_cache_check_matches_mopidy_youtube_file_names(tmp_path):
+    (tmp_path / "abc.webm").write_bytes(b"")
+    p = providers.MopidyMusicProvider("YouTube", "youtube:", MusicConfig(enabled=True, cache_dir=str(tmp_path)))
+    assert p.is_cached("youtube:video:abc") is True
+    assert p.is_cached("youtube:video:other") is False
+    assert provider().is_cached("youtube:video:abc") is None  # no cache_dir
 
 
 async def test_rpc_error_raises(rpc):

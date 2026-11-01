@@ -300,6 +300,12 @@ class MusicConfig:
     search_timeout: float = 10.0
     # Tracks queued for an artist request.
     artist_tracks: int = 15
+    # Mopidy-YouTube's allow_cache directory. A track found there starts at
+    # once, others download first (~8 s); empty: not reported to the model.
+    cache_dir: str = ""
+    # MPD play blocks until the first track is downloaded (~8 s, longer when
+    # Mopidy skips unplayable tracks); after this the start counts as failed.
+    start_timeout: float = 30.0
 
 
 @dataclass
