@@ -179,7 +179,14 @@ async def play_music(query: str, kind: str = "track") -> dict:
         for_model["source"] = selection.source
     if cached is not None:
         for_model["starts"] = "now" if cached else "in_a_few_seconds"
-    return {"uris": selection.uris, "title": selection.title, "prefetched": prefetched, "for_model": for_model}
+    return {
+        "uris": selection.uris,
+        "title": selection.title,
+        "prefetched": prefetched,
+        # a stop or another playback before the deferred start cancels it
+        "generation": _mpd().playback_generation,
+        "for_model": for_model,
+    }
 
 
 # Queue entries added by prefetch; removed at the end of the turn in case the

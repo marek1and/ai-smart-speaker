@@ -1278,18 +1278,20 @@ class AudioOrchestrator:
 
             elif action_type == "play_music":
                 logger.info("Executing deferred action: play_music")
+                # Taken when the tool ran: a "stop" while the AI was still
+                # speaking (or while the track downloaded) cancels the start.
+                generation = payload.get("generation", self.mpd_client.playback_generation)
+                state = self._state
                 if payload.get("prefetched"):
                     # Wait for the download outside the MPD lock: play would
                     # otherwise hold it (and Mopidy's core) until it is done.
-                    generation = self.mpd_client.playback_generation
-                    state = self._state
                     if not await wait_for_music(payload["uris"][0], self.config.music.start_timeout):
                         logger.warning("First track not downloaded within %.0fs, playing anyway",
                                        self.config.music.start_timeout)
-                    if self.mpd_client.playback_generation != generation or self._state != state:
-                        logger.info("Music start superseded while it downloaded (stop, new playback or barge-in)")
-                        ran_radio_action = True
-                        continue
+                if self.mpd_client.playback_generation != generation or self._state != state:
+                    logger.info("Music start superseded (stop, new playback or barge-in)")
+                    ran_radio_action = True
+                    continue
                 started = await self.mpd_client.play_music(
                     payload["uris"],
                     payload.get("title") or "",

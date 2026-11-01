@@ -341,6 +341,17 @@ async def test_music_start_is_dropped_when_superseded_while_downloading(make, mo
     assert SoundEvent.ERROR not in o._sound_player.played
 
 
+async def test_stop_while_the_ai_still_speaks_cancels_the_music(make):
+    # seen live 01.11.2026: power OFF before the deferred start, music played anyway
+    o = make()
+    o._api_manager.pending_actions.append(
+        {"type": "play_music", "payload": {"uris": ["local:track:a"], "title": "T", "generation": 4}})
+    o.mpd_client.playback_generation = 5  # the stop came after the tool call
+    o._state = SpeakerState.RESPONDING
+    await o._execute_post_response_actions()
+    assert not any(isinstance(c, tuple) and c[0] == "play_music" for c in o.mpd_client.calls)
+
+
 async def test_cached_music_does_not_wait(make, monkeypatch):
     async def wait(uri, timeout):
         raise AssertionError("must not wait for a track that was not prefetched")

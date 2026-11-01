@@ -67,6 +67,14 @@ async def test_status_while_music_plays(mpd, mopidy):
 
 # --- music tools -----------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def music_needs_mpd(request, monkeypatch):
+    """play_music reads the playback generation; tests that use the real
+    client inject it through the mpd fixture."""
+    if "mpd" not in request.fixturenames:
+        monkeypatch.setattr(d, "_mpd_client", SimpleNamespace(playback_generation=0))
+
+
 class FakeProvider:
     label = "YouTube"
 
@@ -137,8 +145,10 @@ async def test_prefetched_entry_is_remembered_and_dropped_once(monkeypatch):
     p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=False)
     monkeypatch.setattr(d, "music_provider", p)
     monkeypatch.setattr(d, "_prefetched_tlids", [])
+    monkeypatch.setattr(d, "_mpd_client", SimpleNamespace(playback_generation=9))
     result = await d.play_music("x")
     assert result["prefetched"] is True and d._prefetched_tlids == [41]
+    assert result["generation"] == 9
     await d.drop_prefetched()
     assert p.dropped == [41] and d._prefetched_tlids == []
 
