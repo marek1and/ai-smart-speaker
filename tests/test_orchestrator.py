@@ -269,7 +269,7 @@ async def test_music_gets_the_configured_start_timeout(make):
     o._api_manager.pending_actions.append({"type": "play_music", "payload": {"uris": ["youtube:video:a"], "title": "T"}})
     o._state = SpeakerState.RESPONDING
     await o._execute_post_response_actions()
-    assert o.mpd_client.start_timeout == o.config.music.start_timeout
+    assert abs(o.mpd_client.start_timeout - o.config.music.start_timeout) < 1.0
     assert o.mpd_client.confirm_timeout == o.config.music.start_confirm_timeout
     assert "error" not in o._mqtt_bridge.turns[-1]
     assert SoundEvent.ERROR not in o._sound_player.played
@@ -444,6 +444,91 @@ async def test_room_audio_is_not_sent_while_the_reply_is_awaited(make):
     o._api_manager.awaiting_reply = True  # activity_end sent / a typed request
     await o._process_listening_audio(frame, frame.tobytes())
     assert len(sent) == 1
+
+
+async def test_a_newer_music_request_wins_over_one_still_downloading(make, monkeypatch):
+    # review 01.11.2026: "nie, puść Y" over the reply played X and dropped Y
+    o = make()
+    o._state = SpeakerState.RESPONDING
+    release = asyncio.Event()
+
+    async def wait(uri, timeout):
+        if uri == "youtube:video:x":
+            await release.wait()  # X is still downloading
+        return True
+
+    monkeypatch.setattr(orch, "wait_for_music", wait)
+    x = {"type": "play_music", "payload": {"uris": ["youtube:video:x"], "title": "X", "prefetched": True}}
+    o._on_deferred_action(x)
+    o._api_manager.start_new_turn = lambda: None
+    y = {"type": "play_music", "payload": {"uris": ["youtube:video:y"], "title": "Y", "prefetched": True}}
+    o._on_deferred_action(y)
+    assert await y["task"] is True
+    release.set()
+    assert await x["task"] is None
+    played = [c[2] for c in o.mpd_client.calls if isinstance(c, tuple) and c[0] == "play_music"]
+    assert played == ["Y"]
+
+
+async def test_radio_asked_before_music_in_one_turn_does_not_replace_it(make):
+    o = make()
+    o._state = SpeakerState.RESPONDING
+    radio = {"type": "play_internet_radio", "payload": {"url": "http://u", "name": "Zet", "key": "zet"}}
+    music = {"type": "play_music", "payload": {"uris": ["local:track:a"], "title": "T"}}
+    for a in (radio, music):
+        o._api_manager.pending_actions.append(a)
+        o._on_deferred_action(a)
+    await o._execute_post_response_actions()
+    assert not any(isinstance(c, tuple) and c[0] == "play_station" for c in o.mpd_client.calls)
+    assert ("play_music", ("local:track:a",), "T") in o.mpd_client.calls
+
+
+async def test_play_gets_only_the_time_left_after_the_download_wait(make, monkeypatch):
+    # review: 30 s wait + 30 s play + confirm held the turn ~63 s
+    o = make()
+    o._state = SpeakerState.RESPONDING
+    monkeypatch.setattr(o.config.music, "start_timeout", 30.0)
+
+    async def wait(uri, timeout):
+        await asyncio.sleep(0.8)  # part of the deadline spent on the download
+        return False
+
+    monkeypatch.setattr(orch, "wait_for_music", wait)
+    await o._start_music({"uris": ["youtube:video:x"], "title": "X", "prefetched": True})
+    assert 28.5 < o.mpd_client.start_timeout < 29.5  # the rest of the 30 s, not another 30 s
+
+
+async def test_a_radio_call_that_changes_nothing_does_not_cancel_the_music(make, monkeypatch):
+    # review 2: play_internet_radio() with the radio already playing has no url/action
+    o = make()
+    o._state = SpeakerState.RESPONDING
+    music = {"type": "play_music", "payload": {"uris": ["local:track:a"], "title": "T"}}
+    noop_radio = {"type": "play_internet_radio", "payload": {"for_model": {"already_playing": True}}}
+    for a in (music, noop_radio):
+        o._api_manager.pending_actions.append(a)
+        o._on_deferred_action(a)
+    await o._execute_post_response_actions()
+    assert ("play_music", ("local:track:a",), "T") in o.mpd_client.calls
+
+
+async def test_a_failing_music_start_does_not_break_the_turn_end(make):
+    # review 2: the exception went through await task into the state machine
+    o = make()
+    o._state = SpeakerState.RESPONDING
+
+    async def boom(*a, **k):
+        raise RuntimeError("mopidy says no")
+
+    o.mpd_client.play_music = boom
+    action = {"type": "play_music", "payload": {"uris": ["local:track:a"], "title": "T"}}
+    vol = {"type": "set_playback_volume", "payload": {"volume_percentage": 30}}
+    for a in (action, vol):
+        o._api_manager.pending_actions.append(a)
+        o._on_deferred_action(a)
+    await o._execute_post_response_actions()
+    assert SoundEvent.ERROR in o._sound_player.played
+    assert ("set_volume", 30) in o.mpd_client.calls  # the rest of the turn still ran
+    assert o._mqtt_bridge.turns[-1]["error"] == "music_start_failed"
 
 
 def test_every_deferred_tool_has_a_dispatch_branch():

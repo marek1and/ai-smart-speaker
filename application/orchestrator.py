@@ -197,6 +197,9 @@ class AudioOrchestrator:
         # MPD watcher). The event loop keeps only weak refs — an unreferenced
         # task can be garbage-collected mid-flight and silently disappear.
         self._bg_tasks: set[asyncio.Task] = set()
+        # Numbers the deferred playback requests (music, radio): only the
+        # latest may start, whatever order their starts finish in.
+        self._playback_request = 0
 
         self._is_tty = sys.stdout.isatty()
 
@@ -1246,13 +1249,39 @@ class AudioOrchestrator:
         """Starts music as soon as the tool ran, not after the reply: Gemini
         often takes 10-20 s to finish speaking after a tool call (01.11.2026).
         The turn end only waits for this task."""
+        payload = action.get("payload", {})
+        starts_playback = action.get("type") == "play_music" or (
+            action.get("type") == "play_internet_radio"
+            and payload.get("status") != "error"
+            and (payload.get("url") or payload.get("action") == "play")
+        )
+        if starts_playback:
+            # a radio call that changes nothing (already playing) must not cancel music
+            self._playback_request += 1
+            action["request"] = self._playback_request
         if action.get("type") == "play_music":
-            action["task"] = asyncio.create_task(self._start_music(action.get("payload", {})))
+            # "nie, puść Y" over the reply: start_new_turn drops the action, not
+            # this task; the request number makes it give way to Y.
+            action["task"] = self._spawn(
+                self._start_music(payload, action["request"]), name="music_start"
+            )
 
-    async def _start_music(self, payload: dict) -> Optional[bool]:
-        """Returns True/False for started/failed, None when superseded."""
+    async def _start_music(self, payload: dict, request: Optional[int] = None) -> Optional[bool]:
+        """Returns True/False for started/failed, None when superseded. Never
+        raises: the turn end awaits it inside the state machine."""
+        try:
+            return await self._start_music_unsafe(payload, request)
+        except Exception:
+            logger.exception("Music start failed")
+            if self._sound_player:
+                self._sound_player.play(SoundEvent.ERROR)
+            return False
+
+    async def _start_music_unsafe(self, payload: dict, request: Optional[int]) -> Optional[bool]:
         # Taken when the tool ran: a "stop" (or another playback) meanwhile cancels the start.
         generation = payload.get("generation", self.mpd_client.playback_generation)
+        # One deadline for the download and the play command together.
+        deadline = time.monotonic() + self.config.music.start_timeout
         if payload.get("prefetched"):
             # Wait for the download outside the MPD lock: play would
             # otherwise hold it (and Mopidy's core) until it is done.
@@ -1262,12 +1291,17 @@ class AudioOrchestrator:
         if self.mpd_client.playback_generation != generation:
             logger.info("Music start superseded (stop or another playback)")
             return None
+        if request is not None and request != self._playback_request:
+            logger.info("Music start superseded by a later playback request")
+            return None
         # While the AI is still speaking the music starts at the duck level.
         in_turn = self._state in (SpeakerState.LISTENING, SpeakerState.RESPONDING)
+        # what is left of the deadline, but at least one ordinary MPD command
+        play_timeout = max(deadline - time.monotonic(), float(self.config.mpd.connection_timeout))
         started = await self.mpd_client.play_music(
             payload["uris"],
             payload.get("title") or "",
-            self.config.music.start_timeout,
+            play_timeout,
             self.config.music.start_confirm_timeout,
             start_ducked=in_turn,
         )
@@ -1295,6 +1329,10 @@ class AudioOrchestrator:
             action_type = action.get("type")
             payload = action.get("payload", {})
 
+            if action_type == "play_internet_radio" and action.get("request") not in (None, self._playback_request):
+                # music asked for later in this turn already started early
+                logger.info("Deferred play_internet_radio superseded by a later music request")
+                continue
             if action_type == "play_internet_radio":
                 if payload.get("status") == "error":
                     logger.warning(

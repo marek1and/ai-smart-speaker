@@ -168,7 +168,9 @@ async def play_music(query: str, kind: str = "track") -> dict:
             tlid = await music_provider.prefetch(selection.uris[0])
             if tlid is not None:
                 _prefetched_tlids.append(tlid)
-                prefetched = True
+                # Without cache_dir (cached is None) readiness cannot be seen:
+                # the start does not wait, play blocks for the rest as before.
+                prefetched = cached is False
     except Exception:
         # Deliberately not an error for the model: the track still resolves
         # on play, only later.
@@ -758,10 +760,12 @@ async def set_ha_entities_state(
 
 
 _PROMPT_STATE_HEADER = (
-    "Stan urządzeń odczytany z Home Assistant przy otwarciu tej rozmowy. Na pytania "
-    "o te urządzenia odpowiadaj z tego odczytu, bez narzędzi; po własnych poleceniach "
-    "przyjmij stan, który ustawiłaś. Wyraźne polecenie wykonuj zawsze, także gdy "
-    "według odczytu nic nie trzeba zmieniać (reguła 5)."
+    "Stan urządzeń odczytany z Home Assistant przy otwarciu tej rozmowy (mógł się "
+    "od tego czasu zmienić, np. z włącznika). Na zwykłe pytania o te urządzenia "
+    "odpowiadaj z tego odczytu; gdy użytkownik prosi, żeby sprawdzić, albo odczyt "
+    "przeczy temu, co mówi, sprawdź narzędziem. Po własnych poleceniach przyjmij stan, "
+    "który ustawiłaś. Wyraźne polecenie wykonuj zawsze, także gdy według odczytu nic "
+    "nie trzeba zmieniać (reguła 5)."
 )
 
 

@@ -77,9 +77,11 @@ class HomeAssistantClient:
             response = self._request(
                 "GET", f"{self.base_url}/states/{entity_id}", 'get'
             )
+            state = response.json().get("state")
             metrics.HA_REQUESTS.labels(method='get', status='ok').inc()
-            return response.json().get("state")
-        except requests.exceptions.RequestException as e:
+            return state
+        except (requests.exceptions.RequestException, ValueError) as e:
+            # ValueError: not JSON, e.g. an error page while HA restarts
             logger.error("Error getting entity state for %s: %s", entity_id, e)
             metrics.HA_REQUESTS.labels(method='get', status='error').inc()
             return None
@@ -87,12 +89,14 @@ class HomeAssistantClient:
     def _all_states(self) -> list[dict]:
         try:
             response = self._request("GET", f"{self.base_url}/states", 'get')
+            states = response.json()
             metrics.HA_REQUESTS.labels(method='get', status='ok').inc()
-        except requests.exceptions.RequestException as e:
+        except (requests.exceptions.RequestException, ValueError) as e:
+            # ValueError: not JSON, e.g. an error page while HA restarts
             logger.error("Error listing entity states: %s", e)
             metrics.HA_REQUESTS.labels(method='get', status='error').inc()
             return []
-        return response.json()
+        return states
 
     def get_state_objects(self, entity_ids: list[str]) -> list[dict]:
         """Full state objects (state + attributes) for the given entities, one call."""

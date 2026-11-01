@@ -167,6 +167,15 @@ async def test_stop_during_the_search_still_cancels(monkeypatch):
     assert (await d.play_music("x"))["generation"] == 3
 
 
+async def test_without_cache_info_the_start_does_not_wait(monkeypatch):
+    # review: cache_dir unset -> wait_ready returned at once and play blocked anyway
+    p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=None)
+    monkeypatch.setattr(d, "music_provider", p)
+    monkeypatch.setattr(d, "_prefetched_tlids", [])
+    result = await d.play_music("x")
+    assert p.prefetched == ["youtube:video:a"] and result["prefetched"] is False
+
+
 async def test_cached_track_is_not_prefetched(monkeypatch):
     p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=True)
     monkeypatch.setattr(d, "music_provider", p)
@@ -820,6 +829,21 @@ async def test_session_starts_without_states_when_they_are_not_available(prompt_
     if case == "disabled":
         monkeypatch.setattr(d.config.home_assistant, "prompt_state_domains", [])
     assert await d.prompt_state_context() == ""
+
+
+def test_ha_client_treats_a_non_json_reply_as_no_states(monkeypatch):
+    from homeassistant.client import HomeAssistantClient
+    from config import HomeAssistantConfig
+    client = HomeAssistantClient(HomeAssistantConfig(url="http://ha", api_key="k"))
+
+    class Page:
+        status_code = 200
+        def json(self):
+            raise ValueError("not JSON")
+
+    monkeypatch.setattr(client, "_request", lambda *a, **k: Page())
+    assert client._all_states() == []
+    assert client.get_entity_state("light.salon_glowne") is None  # review 2: same for one entity
 
 
 def test_both_backends_append_the_session_context_to_the_instruction():
