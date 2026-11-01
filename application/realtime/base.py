@@ -302,6 +302,12 @@ class BaseRealtimeManager(ABC):
         self._on_error = on_error
         self._on_deferred = on_deferred
 
+    @property
+    def awaiting_reply(self) -> bool:
+        """The user's part of the turn is over (activity_end sent, or a typed
+        request) and the model has not finished answering yet."""
+        return self._waiting_for_turn_complete
+
     def _instructions(self) -> str:
         """System instruction for a new session, with the session context."""
         base = self.live_cfg.system_instruction or ""

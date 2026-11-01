@@ -3,6 +3,7 @@ Past bugs: a handler exception left the speaker deaf in RESPONDING until the
 API dropped the session; a deferred radio play waited for the next wake word."""
 import asyncio
 
+import numpy as np
 import pytest
 
 import orchestrator as orch
@@ -23,6 +24,7 @@ class FakeApi:
         self.activity_started = False
         self.chunks_received = 0
         self.closed = 0
+        self.awaiting_reply = False
         self.watchdogs = []
 
     async def open_session(self):
@@ -424,6 +426,24 @@ async def test_a_new_session_gets_the_current_device_states(make, monkeypatch):
     o._api_manager.open_session = open_session
     await o._open_session_and_listen()
     assert seen == ["Stan: light.salon_glowne: on"]
+
+
+async def test_room_audio_is_not_sent_while_the_reply_is_awaited(make):
+    # music from the room after activity_end made Gemini stream ~20 s of silence
+    o = make()
+    o._api_manager.session_active = True
+    o._hybrid_vad = None
+    sent = []
+
+    async def forward(audio):
+        sent.append(audio)
+
+    o._forward_audio_to_api = forward
+    frame = np.zeros(512, dtype=np.int16)
+    await o._process_listening_audio(frame, frame.tobytes())
+    o._api_manager.awaiting_reply = True  # activity_end sent / a typed request
+    await o._process_listening_audio(frame, frame.tobytes())
+    assert len(sent) == 1
 
 
 def test_every_deferred_tool_has_a_dispatch_branch():

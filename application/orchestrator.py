@@ -627,6 +627,12 @@ class AudioOrchestrator:
                 logger.info("VAD: Speech ended - sending activity_end")
                 await self._api_manager.send_activity_end()
 
+        if self._api_manager.awaiting_reply:
+            # The utterance is complete. Room audio sent now (radio, TV, our own
+            # music) made Gemini produce up to ~20 s of silence before it ended
+            # its reply: 5 of 32 probe turns with music, 0 of 30 with no audio
+            # or digital silence (01.11.2026).
+            return
         await self._forward_audio_to_api(mono_bytes)
 
     async def _process_followup_audio(
