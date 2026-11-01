@@ -94,6 +94,11 @@ class HomeAssistantClient:
             return []
         return response.json()
 
+    def get_state_objects(self, entity_ids: list[str]) -> list[dict]:
+        """Full state objects (state + attributes) for the given entities, one call."""
+        wanted = set(entity_ids)
+        return [s for s in self._all_states() if s["entity_id"] in wanted]
+
     def get_states(self, entity_ids: list[str]) -> dict[str, str]:
         """Returns {entity_id: state} for the given entities via a single HA API call."""
         wanted = set(entity_ids)

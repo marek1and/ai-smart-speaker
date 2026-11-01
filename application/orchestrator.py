@@ -39,6 +39,7 @@ from functions.definitions import (
     drop_prefetched,
     get_radio_client,
     inject_mpd_client,
+    prompt_state_context,
     wait_for_music,
 )
 import metrics
@@ -1080,6 +1081,7 @@ class AudioOrchestrator:
         if text is None:
             self._drop_queued_text()
         if not self._api_manager.session_active:
+            self._api_manager.session_context = await prompt_state_context()
             await self._api_manager.open_session()
             if not self._api_manager.session_active:
                 logger.error(

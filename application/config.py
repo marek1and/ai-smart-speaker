@@ -261,6 +261,15 @@ class HomeAssistantConfig:
     power_guard_domains: list[str] = field(
         default_factory=lambda: ["light", "switch", "fan"]
     )
+    # States of these domains, for the entities the system prompt lists, are
+    # added to the prompt at every session open (one GET /api/states), so the
+    # model needs no tool call for "is it on?". Empty: off. Sensors, windows
+    # and covers stay behind the tools.
+    prompt_state_domains: list[str] = field(
+        default_factory=lambda: ["light", "switch", "fan", "media_player"]
+    )
+    # A slower HA does not hold the session open: it starts without the states.
+    prompt_state_timeout: float = 1.0
 
 
 @dataclass

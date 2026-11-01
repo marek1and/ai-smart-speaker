@@ -408,6 +408,24 @@ async def test_turn_end_drops_leftover_prefetched_entries(make, monkeypatch):
     assert dropped == [True]
 
 
+async def test_a_new_session_gets_the_current_device_states(make, monkeypatch):
+    async def states():
+        return "Stan: light.salon_glowne: on"
+
+    monkeypatch.setattr(orch, "prompt_state_context", states)
+    o = make()
+    seen = []
+    real_open = o._api_manager.open_session
+
+    async def open_session():
+        seen.append(o._api_manager.session_context)
+        await real_open()
+
+    o._api_manager.open_session = open_session
+    await o._open_session_and_listen()
+    assert seen == ["Stan: light.salon_glowne: on"]
+
+
 def test_every_deferred_tool_has_a_dispatch_branch():
     import inspect
     from realtime.base import BaseRealtimeManager

@@ -127,7 +127,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
         return LiveConnectConfig(
             response_modalities=list(self.live_cfg.response_modalities),
-            system_instruction=self.live_cfg.system_instruction,
+            system_instruction=self._instructions(),
             temperature=self.live_cfg.temperature,
             realtime_input_config=RealtimeInputConfig(
                 automatic_activity_detection=AutomaticActivityDetection(

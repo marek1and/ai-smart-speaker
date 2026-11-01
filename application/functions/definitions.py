@@ -1,4 +1,5 @@
 import asyncio
+import re
 import logging
 from typing import Optional
 from datetime import datetime
@@ -754,3 +755,48 @@ async def set_ha_entities_state(
         "message": "Home Assistant did not execute the command for: " + ", ".join(failed),
         "results": dict(zip(entity_ids, results)),
     }
+
+
+_PROMPT_STATE_HEADER = (
+    "Stan urządzeń odczytany z Home Assistant przy otwarciu tej rozmowy. Na pytania "
+    "o te urządzenia odpowiadaj z tego odczytu, bez narzędzi; po własnych poleceniach "
+    "przyjmij stan, który ustawiłaś. Wyraźne polecenie wykonuj zawsze, także gdy "
+    "według odczytu nic nie trzeba zmieniać (reguła 5)."
+)
+
+
+def _prompt_state_entities() -> list[str]:
+    """Entity ids of the configured domains, as the system prompt lists them."""
+    domains = config.home_assistant.prompt_state_domains
+    if not domains:
+        return []
+    pattern = r"\b(?:" + "|".join(re.escape(d) for d in domains) + r")\.[a-z0-9_]+"
+    return sorted(set(re.findall(pattern, config.live.system_instruction or "")))
+
+
+def _describe_state(item: dict) -> str:
+    state = item.get("state", "unknown")
+    brightness = (item.get("attributes") or {}).get("brightness")
+    if item["entity_id"].startswith("light.") and state == "on" and brightness is not None:
+        return f"on, jasność {round(brightness * 100 / 255)}%"
+    return state
+
+
+async def prompt_state_context() -> str:
+    """The prompt block with current states, or "" (no HA, disabled, HA too slow)."""
+    entity_ids = _prompt_state_entities()
+    if ha_client is None or not entity_ids:
+        return ""
+    try:
+        items = await asyncio.wait_for(
+            asyncio.to_thread(ha_client.get_state_objects, entity_ids),
+            config.home_assistant.prompt_state_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("HA states not read within %.1fs, session starts without them",
+                       config.home_assistant.prompt_state_timeout)
+        return ""
+    if not items:
+        return ""
+    lines = [f"- {i['entity_id']}: {_describe_state(i)}" for i in sorted(items, key=lambda i: i["entity_id"])]
+    return _PROMPT_STATE_HEADER + "\n" + "\n".join(lines)

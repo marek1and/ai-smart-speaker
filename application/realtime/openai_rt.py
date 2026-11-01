@@ -414,7 +414,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             "type": "realtime",
             "model": self.live_cfg.openai_model,
             "output_modalities": ["audio"],
-            "instructions": self.live_cfg.system_instruction,
+            "instructions": self._instructions(),
             "tools": TOOLS,
             "audio": {
                 "input": audio_input,

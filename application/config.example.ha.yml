@@ -18,6 +18,10 @@ home_assistant:
   # one that would change nothing is not sent and the model is told "no_change"
   # (a misheard turn on/off). Leave out domains with an unreliable state (TV).
   # power_guard_domains: ["light", "switch", "fan"]
+  # States of these domains, for the entities the system prompt lists, go into the
+  # prompt at every session open (one GET /api/states). [] turns it off.
+  # prompt_state_domains: ["light", "switch", "fan", "media_player"]
+  # prompt_state_timeout: 1.0  # slower HA: the session starts without the states
 
 audio:
   # Input settings (microphone)

@@ -620,6 +620,61 @@ async def test_gemini_more_content_after_generation_complete_keeps_the_turn(gemi
     assert ended == []
 
 
+# --- device states in the system prompt ------------------------------------------
+
+class StatesHA:
+    def __init__(self, items, delay=0.0):
+        self.items, self.delay, self.asked = items, delay, None
+
+    def get_state_objects(self, entity_ids):
+        import time
+        time.sleep(self.delay)
+        self.asked = entity_ids
+        return [i for i in self.items if i["entity_id"] in entity_ids]
+
+
+PROMPT = "Encje: light.salon_glowne, switch.fontanna, media_player.telewizor_salon, binary_sensor.okno, cover.roleta."
+ITEMS = [
+    {"entity_id": "light.salon_glowne", "state": "on", "attributes": {"brightness": 128}},
+    {"entity_id": "switch.fontanna", "state": "off", "attributes": {}},
+    {"entity_id": "media_player.telewizor_salon", "state": "on", "attributes": {}},
+]
+
+
+@pytest.fixture
+def prompt_cfg(monkeypatch):
+    monkeypatch.setattr(d.config.live, "system_instruction", PROMPT)
+    monkeypatch.setattr(d.config.home_assistant, "prompt_state_domains", ["light", "switch", "fan", "media_player"])
+    monkeypatch.setattr(d.config.home_assistant, "prompt_state_timeout", 0.2)
+
+
+async def test_prompt_states_cover_the_switchable_entities_the_prompt_lists(prompt_cfg, monkeypatch):
+    ha = StatesHA(ITEMS)
+    monkeypatch.setattr(d, "ha_client", ha)
+    block = await d.prompt_state_context()
+    assert sorted(ha.asked) == ["light.salon_glowne", "media_player.telewizor_salon", "switch.fontanna"]
+    assert "- light.salon_glowne: on, jasność 50%" in block and "- switch.fontanna: off" in block
+    assert "binary_sensor" not in block and "cover" not in block  # windows, covers: through the tools
+
+
+@pytest.mark.parametrize("case", ["slow_ha", "disabled", "no_ha"])
+async def test_session_starts_without_states_when_they_are_not_available(prompt_cfg, monkeypatch, case):
+    monkeypatch.setattr(d, "ha_client", None if case == "no_ha" else StatesHA(ITEMS, delay=0.5 if case == "slow_ha" else 0))
+    if case == "disabled":
+        monkeypatch.setattr(d.config.home_assistant, "prompt_state_domains", [])
+    assert await d.prompt_state_context() == ""
+
+
+def test_both_backends_append_the_session_context_to_the_instruction():
+    from realtime.openai_rt import OpenAIRealtimeManager
+    for cls in (GeminiRealtimeManager, OpenAIRealtimeManager):
+        mgr = cls(get_config(), asyncio.Queue(), asyncio.Queue())
+        base = mgr.live_cfg.system_instruction or ""
+        assert mgr._instructions() == base
+        mgr.session_context = "Stan: light.x: on"
+        assert mgr._instructions().endswith("\n\nStan: light.x: on") and mgr._instructions().startswith(base)
+
+
 def test_deferred_tools_exist():
     from realtime.base import BaseRealtimeManager
     assert BaseRealtimeManager.DEFERRED_FUNCTIONS <= set(FUNCTIONS)

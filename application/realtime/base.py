@@ -52,6 +52,9 @@ class BaseRealtimeManager(ABC):
         self._on_turn_timeout: Optional[Callable[[], None]] = None
         self._on_error: Optional[Callable[[], None]] = None
         self._on_deferred: Optional[Callable[[dict], None]] = None
+        # Appended to the system instruction when a session opens (current
+        # device states); set by the orchestrator before open_session().
+        self.session_context: str = ""
 
         # State tracking
         self._running: bool = False
@@ -298,6 +301,11 @@ class BaseRealtimeManager(ABC):
         self._on_turn_timeout = on_turn_timeout
         self._on_error = on_error
         self._on_deferred = on_deferred
+
+    def _instructions(self) -> str:
+        """System instruction for a new session, with the session context."""
+        base = self.live_cfg.system_instruction or ""
+        return f"{base}\n\n{self.session_context}" if self.session_context else base
 
     def _defer(self, function_name: str, payload: dict) -> None:
         """Queues a deferred tool action for the orchestrator."""
