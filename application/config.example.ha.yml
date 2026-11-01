@@ -222,6 +222,11 @@ live:
   # Gemini: end the turn this long after generation_complete when turn_complete
   # lags behind (measured 4-19 s). 0 disables.
   generation_complete_grace: 1.0
+  # Gemini: this much silence held after speech also ends the turn. 0 disables.
+  trailing_silence_end: 3.0
+  max_played_pause: 1.0  # Gemini: longer silence inside an answer is cut to this
+  # One log line per turn with every message to/from the Gemini API (debugging).
+  trace_api_events: false
 
   # Gemini-specific settings
   model: "gemini-3.8-live"

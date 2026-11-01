@@ -596,6 +596,108 @@ async def test_gemini_turn_ends_after_generation_complete_when_turn_complete_lag
     assert ended == [True, True]
 
 
+async def test_gemini_logs_the_turn_timeline_when_turn_complete_comes(gemini, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.05)
+    gemini.set_callbacks(on_turn_complete=lambda: None)
+    gemini._frames_sent, gemini._response_started, gemini._chunks_received = 1000, True, 5
+    gemini._timing_start()
+    gemini._timing["audio"], gemini._timing["silent"] = 12.0, 10.0
+    gemini._timing_mark("first_voice")
+    await gemini._process_api_response(server(generation_complete=True))
+    await asyncio.sleep(0.1)                          # the turn ends early...
+    await gemini._process_api_response(server(turn_complete=True))  # ...its turn_complete comes late
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Turn timing")]
+    assert len(lines) == 1 and lines[0].startswith("Turn timing (late)") and "silent=10.0s" in lines[0]
+
+
+def audio_msg(level):
+    import numpy as np
+    pcm = (np.ones(2400) * level).astype(np.int16).tobytes()
+    part = SimpleNamespace(inline_data=SimpleNamespace(data=pcm), text=None)
+    return server(model_turn=SimpleNamespace(parts=[part]))
+
+
+async def test_gemini_trailing_silence_is_not_played_pauses_are(gemini, monkeypatch):
+    # on the speaker Gemini sent ~2 s of speech and 12-20 s of silence, all of it
+    # before generation_complete (01.11.2026)
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 5.0)
+    gemini._frames_sent, gemini._response_started = 1000, True
+    out = gemini._output_queue
+    await gemini._process_api_response(audio_msg(0))      # leading silence: held...
+    await gemini._process_api_response(audio_msg(8000))   # ...and played before the voice
+    await gemini._process_api_response(audio_msg(0))      # a pause inside the answer
+    await gemini._process_api_response(audio_msg(8000))
+    assert out.qsize() == 4
+    for _ in range(5):
+        await gemini._process_api_response(audio_msg(0))  # trailing padding
+    assert out.qsize() == 4
+    await gemini._process_api_response(server(generation_complete=True))
+    assert out.qsize() == 4 and gemini._held_silence == []
+    gemini._cancel_generation_end()
+
+
+async def test_gemini_trace_logs_one_line_per_turn_with_runs_merged(gemini, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(gemini.live_cfg, "trace_api_events", True)
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 5.0)
+    gemini._frames_sent, gemini._response_started = 1000, True
+    gemini._trace_event("→audio", 0.032)
+    gemini._trace_event("→audio", 0.032)
+    gemini._timing_start()
+    gemini._trace_event("→activity_end")
+    for level in (8000, 8000, 0, 0, 0):
+        await gemini._process_api_response(audio_msg(level))
+    await gemini._process_api_response(server(generation_complete=True))
+    await gemini._process_api_response(server(turn_complete=True))
+    gemini._cancel_generation_end()
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Turn trace")]
+    assert len(lines) == 1
+    line = lines[0]
+    assert "→audio x2" in line and "→activity_end" in line and "←voice x2" in line and "←silence x3" in line
+    assert line.index("←voice") < line.index("←silence") < line.index("←generation_complete") < line.index("←turn_complete")
+
+
+def test_gemini_trace_is_off_by_default(gemini):
+    gemini._trace_event("→text")
+    assert gemini._trace == []
+
+
+async def test_gemini_long_silence_after_speech_ends_the_turn_once(gemini, monkeypatch):
+    # once 76 s of silence came before generation_complete
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.05)
+    monkeypatch.setattr(gemini.live_cfg, "trailing_silence_end", 0.3)  # 0.1 s per chunk below
+    ended = []
+    gemini.set_callbacks(on_turn_complete=lambda: ended.append(True))
+    gemini._frames_sent, gemini._response_started = 1000, True
+    gemini._timing_start()
+    await gemini._process_api_response(audio_msg(8000))
+    for _ in range(6):
+        await gemini._process_api_response(audio_msg(0))
+    await asyncio.sleep(0.1)
+    assert ended == [True] and gemini._output_queue.qsize() == 1  # silence not played
+    await gemini._process_api_response(server(generation_complete=True))  # comes later
+    await asyncio.sleep(0.1)
+    assert ended == [True]  # not a second end
+
+
+async def test_gemini_long_pause_before_more_speech_is_cut(gemini, monkeypatch):
+    monkeypatch.setattr(gemini.live_cfg, "max_played_pause", 0.25)  # 2.5 chunks of 0.1 s
+    monkeypatch.setattr(gemini.live_cfg, "trailing_silence_end", 0)
+    gemini._frames_sent, gemini._response_started = 1000, True
+    await gemini._process_api_response(audio_msg(8000))
+    for _ in range(10):
+        await gemini._process_api_response(audio_msg(0))   # 1 s of silence...
+    await gemini._process_api_response(audio_msg(8000))   # ...then a blip
+    played = []
+    while not gemini._output_queue.empty():
+        played.append(len(gemini._output_queue.get_nowait()))
+    silence = sum(played[1:-1]) / 2 / 24000
+    assert abs(silence - 0.25) < 0.01
+
+
 async def test_gemini_turn_complete_within_the_grace_ends_the_turn_once(gemini, monkeypatch):
     monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.2)
     ended = []
@@ -673,6 +775,15 @@ def test_both_backends_append_the_session_context_to_the_instruction():
         assert mgr._instructions() == base
         mgr.session_context = "Stan: light.x: on"
         assert mgr._instructions().endswith("\n\nStan: light.x: on") and mgr._instructions().startswith(base)
+
+
+def test_both_backends_await_the_reply_after_activity_end_and_a_typed_request():
+    from realtime.openai_rt import OpenAIRealtimeManager
+    for cls in (GeminiRealtimeManager, OpenAIRealtimeManager):
+        mgr = cls(get_config(), asyncio.Queue(), asyncio.Queue())
+        assert mgr.awaiting_reply is False
+        mgr._begin_text_turn("hej")
+        assert mgr.awaiting_reply is True, cls.__name__
 
 
 def test_deferred_tools_exist():

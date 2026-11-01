@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import logging
+import time
 import traceback
 from typing import Optional
 
@@ -74,6 +75,18 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         # (measured 4-19 s on 01.11.2026): see _end_turn_after_generation.
         self._generation_end_task: Optional[asyncio.Task] = None
         self._late_turn_completes: int = 0
+        # Per-turn timeline (seconds from the end of the user's input), logged
+        # when turn_complete arrives: where a slow turn spends its time.
+        self._timing: dict = {}
+        self._late_timing_logged: int = 0  # late turn_completes whose timing went out already
+        # live.trace_api_events: every message to and from the API, one line per turn
+        self._trace: list[list] = []  # [kind, first, last (monotonic), count, seconds of audio]
+        self._trace_ref: Optional[float] = None  # end of the user's input: time 0 in the trace
+        # Silent chunks are held back until the model speaks again (then they
+        # play: a pause) or generation_complete comes (then they were trailing
+        # padding: up to 20 s of it on the speaker, 01.11.2026).
+        self._held_silence: list[bytes] = []
+        self._ended_early: bool = False  # this turn already ended before turn_complete
 
     def _silence_run_is_notable(self, run_length: int) -> bool:
         """Is this silent-chunk run long enough to warrant a warning?
@@ -111,6 +124,60 @@ class GeminiRealtimeManager(BaseRealtimeManager):
     def start_new_turn(self) -> None:
         super().start_new_turn()
         self._consecutive_silent_chunks = 0
+        self._held_silence = []
+        self._ended_early = False
+
+    def _trace_event(self, kind: str, audio_seconds: float = 0.0) -> None:
+        """Records an API event; consecutive events of one kind become one entry."""
+        if not self.live_cfg.trace_api_events:
+            return
+        now = time.monotonic()
+        if self._trace and self._trace[-1][0] == kind:
+            last = self._trace[-1]
+            last[2], last[3], last[4] = now, last[3] + 1, last[4] + audio_seconds
+        else:
+            self._trace.append([kind, now, now, 1, audio_seconds])
+
+    def _trace_flush(self) -> None:
+        if not self._trace:
+            return
+        ref = self._trace_ref or self._trace[0][1]
+        parts = []
+        for kind, a, b, n, sec in self._trace:
+            a, b = round(a - ref, 2), round(b - ref, 2)
+            span = f"{a}s" if n == 1 else f"{a}-{b}s"
+            extra = f" x{n}" if n > 1 else ""
+            extra += f" ({sec:.1f}s audio)" if sec else ""
+            parts.append(f"{span} {kind}{extra}")
+        self._trace = []
+        logger.info("Turn trace: %s", " | ".join(parts))
+
+    def _timing_start(self) -> None:
+        if self._timing:
+            # the previous turn ended early and its turn_complete has not come yet
+            self._timing_log("next input before its turn_complete")
+            if self._late_turn_completes:
+                self._late_timing_logged += 1
+        self._timing = {"t0": time.monotonic(), "audio": 0.0, "silent": 0.0}
+        self._trace_ref = self._timing["t0"]
+
+    def _timing_mark(self, key: str) -> None:
+        if self._timing and key not in self._timing:
+            self._timing[key] = round(time.monotonic() - self._timing["t0"], 1)
+
+    def _timing_log(self, how: str) -> None:
+        t = self._timing
+        if not t:
+            return
+        self._trace_flush()
+        self._timing = {}
+        logger.info(
+            "Turn timing (%s): first_audio=%ss first_voice=%ss generation_complete=%ss "
+            "turn_complete=%.1fs audio=%.1fs of which silent=%.1fs, trailing silence not played=%.1fs",
+            how, t.get("first_audio", "-"), t.get("first_voice", "-"),
+            t.get("generation_complete", "-"), time.monotonic() - t["t0"], t["audio"], t["silent"],
+            t.get("trimmed", 0.0),
+        )
 
     def _get_session_config(self) -> LiveConnectConfig:
         """Build the LiveConnectConfig for API sessions.
@@ -213,6 +280,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
         try:
             await self._session.send_realtime_input(activity_start=ActivityStart())
+            self._trace_event("→activity_start")
             self._activity_started = True
             logger.info("Sent activity_start to API")
         except ConnectionClosed as e:
@@ -240,6 +308,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             await self._session.send_realtime_input(activity_end=ActivityEnd())
             self._activity_started = False
             self._waiting_for_turn_complete = True
+            self._timing_start()
+            self._trace_event("→activity_end")
             logger.info("Sent activity_end to API")
         except ConnectionClosed as e:
             # The session can be closed between the checks above and the send
@@ -253,6 +323,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         if not self._session_active or self._session is None:
             return False
         self._begin_text_turn(text)
+        self._timing_start()
+        self._trace_event("→text")
         try:
             await self._session.send_realtime_input(text=text)
             logger.info("Sent text turn to API")
@@ -350,6 +422,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     audio={"data": frame.data, "mime_type": frame.mime_type}
                 )
                 self._frames_sent += 1
+                self._trace_event("→audio", len(frame.data) / 2 / 16000)
 
                 if self._frames_sent == 1:
                     logger.info("Streaming audio to API...")
@@ -393,6 +466,46 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     self._on_turn_complete()
                 break
 
+    def _trace_response(self, response: LiveServerMessage) -> None:
+        if not self.live_cfg.trace_api_events:
+            return
+        if getattr(response, "setup_complete", None):
+            self._trace_event("←setup_complete")
+        calls = getattr(getattr(response, "tool_call", None), "function_calls", None)
+        if calls:
+            self._trace_event("←tool_call " + ",".join(str(getattr(c, "name", "?")) for c in calls))
+        if getattr(response, "go_away", None):
+            self._trace_event("←go_away")
+        if getattr(response, "session_resumption_update", None):
+            self._trace_event("←resumption_update")
+        um = getattr(response, "usage_metadata", None)
+        if um:
+            self._trace_event(f"←usage(prompt={getattr(um, 'prompt_token_count', None)} "
+                              f"out={getattr(um, 'response_token_count', None)} "
+                              f"thoughts={getattr(um, 'thoughts_token_count', None)})")
+        sc = getattr(response, "server_content", None)
+        if not sc:
+            return
+        mt = getattr(sc, "model_turn", None)
+        if mt and getattr(mt, "parts", None):
+            for part in mt.parts:
+                data = getattr(part, "inline_data", None)
+                if data and isinstance(data.data, bytes) and data.data:
+                    rms = self._pcm16_rms(data.data)
+                    kind = "←silence" if rms < self.live_cfg.output_silence_rms_threshold else "←voice"
+                    self._trace_event(kind, len(data.data) / 2 / self.config.audio.output_sample_rate)
+                elif getattr(part, "text", None):
+                    self._trace_event("←text")
+        if getattr(getattr(sc, "input_transcription", None), "text", None):
+            self._trace_event("←in_transcript")
+        if getattr(getattr(sc, "output_transcription", None), "text", None):
+            self._trace_event("←out_transcript")
+        for flag in ("generation_complete", "turn_complete", "interrupted", "waiting_for_input"):
+            if getattr(sc, flag, None):
+                self._trace_event("←" + flag)
+        if getattr(sc, "grounding_metadata", None):
+            self._trace_event("←grounding")
+
     async def _process_api_response(self, response: LiveServerMessage) -> None:
         """Process a single response from the Gemini API.
 
@@ -401,6 +514,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         indefinitely by transcription updates or empty heartbeats when Gemini has
         already finished speaking but hasn't sent turn_complete yet.
         """
+        self._trace_response(response)
         if getattr(response, "go_away", None):
             # Server announces imminent session termination (e.g. max session
             # duration). Mark it so the coming connection close is handled as a
@@ -418,8 +532,6 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             # Handle model turn (audio data)
             if hasattr(sc, "model_turn") and sc.model_turn:
                 mt = sc.model_turn
-                if mt.parts:
-                    self._cancel_generation_end()  # the model is still talking
 
                 if mt.parts:
                     for part in mt.parts:
@@ -448,6 +560,14 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
                                 rms = self._pcm16_rms(data.data)
                                 is_silent = rms < self.live_cfg.output_silence_rms_threshold
+                                seconds = len(data.data) / 2 / self.config.audio.output_sample_rate
+                                if self._timing:
+                                    self._timing["audio"] += seconds
+                                    self._timing_mark("first_audio")
+                                    if is_silent:
+                                        self._timing["silent"] += seconds
+                                    else:
+                                        self._timing_mark("first_voice")
 
                                 if is_silent:
                                     self._consecutive_silent_chunks += 1
@@ -492,6 +612,21 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                                 elif not is_silent:
                                     self.reset_watchdog_if_running()  # extends watchdog
 
+                                if is_silent:
+                                    self._held_silence.append(data.data)
+                                    self._end_turn_on_long_silence()
+                                    continue
+                                self._cancel_generation_end()  # the model is still talking
+                                # A pause in the speech plays, but at most max_played_pause:
+                                # 6 s of silence came before a 0.1 s blip (01.11.2026).
+                                budget = int(self.live_cfg.max_played_pause * self.config.audio.output_sample_rate * 2)
+                                for held in self._held_silence:
+                                    if budget <= 0:
+                                        break
+                                    await self._output_queue.put(held[:budget])
+                                    budget -= len(held)
+                                self._held_silence = []
+
                                 await self._output_queue.put(data.data)
                                 if self._chunks_received == 1:
                                     logger.info("Receiving audio response (chunk_bytes=%d, rms=%.5f)...", len(data.data), rms)
@@ -527,15 +662,17 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 ):
                     self._ai_transcript += sc.output_transcription.text
 
+            if getattr(sc, "generation_complete", False):
+                self._timing_mark("generation_complete")
+                if self._held_silence and self._timing:
+                    self._timing["trimmed"] = sum(len(c) for c in self._held_silence) / 2 / self.config.audio.output_sample_rate
+                self._held_silence = []  # trailing padding: not played
             if (
                 getattr(sc, "generation_complete", False)
                 and self._chunks_received > 0  # the model answered this turn
                 and self.live_cfg.generation_complete_grace > 0
             ):
-                self._cancel_generation_end()
-                self._generation_end_task = asyncio.create_task(
-                    self._end_turn_after_generation(), name="generation_end"
-                )
+                self._schedule_turn_end()
 
             # Handle turn complete
             if hasattr(sc, "turn_complete") and sc.turn_complete:
@@ -545,6 +682,10 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                     # must not end (or unblock) the turn that may be running now.
                     self._late_turn_completes -= 1
                     logger.info("Late turn_complete of a turn already ended — ignored")
+                    if self._late_timing_logged:
+                        self._late_timing_logged -= 1
+                    else:
+                        self._timing_log("late")
                     return
                 self._waiting_for_turn_complete = False
 
@@ -566,6 +707,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 self.cancel_watchdog()
                 self._log_transcripts()
                 logger.info("API: turn_complete")
+                self._timing_log("on time")
                 if self._on_turn_complete:
                     self._on_turn_complete()
 
@@ -602,6 +744,28 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             self._generation_end_task.cancel()
         self._generation_end_task = None
 
+    def _schedule_turn_end(self) -> None:
+        if self._ended_early:
+            return
+        self._cancel_generation_end()
+        self._generation_end_task = asyncio.create_task(
+            self._end_turn_after_generation(), name="generation_end"
+        )
+
+    def _end_turn_on_long_silence(self) -> None:
+        """Treat a long run of silence after speech like generation_complete:
+        once Gemini generated 76 s of silence and sent generation_complete
+        only after 12 s (01.11.2026)."""
+        limit = self.live_cfg.trailing_silence_end
+        if not limit or self._ended_early or self._generation_end_task:
+            return
+        if "first_voice" not in self._timing:
+            return  # nothing said yet: leading silence
+        held = sum(len(c) for c in self._held_silence) / 2 / self.config.audio.output_sample_rate
+        if held >= limit:
+            logger.info("%.1fs of silence after the answer — treating it as its end", held)
+            self._schedule_turn_end()
+
     async def _end_turn_after_generation(self) -> None:
         """Ends the turn when turn_complete lags behind generation_complete.
 
@@ -614,6 +778,10 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         grace = self.live_cfg.generation_complete_grace
         await asyncio.sleep(grace)
         self._generation_end_task = None
+        self._ended_early = True
+        if self._held_silence and self._timing:
+            self._timing["trimmed"] = sum(len(c) for c in self._held_silence) / 2 / self.config.audio.output_sample_rate
+        self._held_silence = []  # trailing padding: not played
         self._late_turn_completes += 1
         self._waiting_for_turn_complete = False
         self.cancel_watchdog()
@@ -726,6 +894,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         logger.debug(f"Sending tool responses to API: {function_responses}")
         try:
             await self._session.send_tool_response(function_responses=function_responses)
+            self._trace_event("→tool_response " + ",".join(r.name for r in function_responses))
         except Exception as e:
             logger.error("Failed to send tool responses: %s", e)
             return
