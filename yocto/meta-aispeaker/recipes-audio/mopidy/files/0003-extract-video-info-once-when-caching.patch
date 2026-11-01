@@ -1,0 +1,63 @@
+From: Marek Andrzejewski <marek1and@gmail.com>
+Subject: [PATCH] Extract video info once when caching
+
+With allow_cache, audio_url ran yt-dlp's extraction twice per track: once
+to check for a live stream and again to download. On a Raspberry Pi 5 one
+extraction takes ~4 s (deno solves the JS challenge each time), so the
+first track of a new request started ~12.5 s after play instead of ~8 s.
+Extract the raw info once, check it for a live stream, then process and
+download that same result.
+
+Upstream-Status: Pending
+---
+--- a/mopidy_youtube/youtube.py
++++ b/mopidy_youtube/youtube.py
+@@ -632,20 +632,6 @@
+                         fileUri = f"file://{(os.path.join(cache_location, cached[0]))}"
+                         self._audio_url.set(fileUri)
+                     else:
+-                        with youtube_dl.YoutubeDL(ytdl_options) as ydl:
+-                            probe_info = ydl.extract_info(
+-                                **ytdl_extract_info_options,
+-                                download=False,
+-                            )
+-
+-                        if is_live_info(probe_info):
+-                            logger.info(
+-                                "Skipping YouTube live/upcoming playback resolution: %s",
+-                                self.id,
+-                            )
+-                            self._audio_url.set(None)
+-                            return
+-
+                         logger.debug(f"caching track {self.id}")
+                         ytdl_options["outtmpl"] = os.path.join(
+                             cache_location, "%(id)s.%(ext)s"
+@@ -654,12 +640,14 @@
+                         ytdl_options["progress_hooks"] = [my_hook]
+ 
+                         with youtube_dl.YoutubeDL(ytdl_options) as ydl:
+-                            info = ydl.extract_info(
+-                                **ytdl_extract_info_options,
+-                                download=True,
++                            # Extract once: the live check needs only the raw
++                            # result, and a second extraction costs ~4 s.
++                            probe_info = ydl.extract_info(
++                                **{**ytdl_extract_info_options, "process": False},
++                                download=False,
+                             )
+ 
+-                            if is_live_info(info):
++                            if is_live_info(probe_info):
+                                 logger.info(
+                                     "Skipping YouTube live/upcoming playback resolution: %s",
+                                     self.id,
+@@ -667,6 +655,8 @@
+                                 self._audio_url.set(None)
+                                 return
+ 
++                            info = ydl.process_ie_result(probe_info, download=True)
++
+                             # get info about audio format, for debugging
+                             logger.debug(
+                                 {

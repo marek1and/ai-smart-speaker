@@ -1,0 +1,63 @@
+From: Marek Andrzejewski <marek1and@gmail.com>
+Subject: [PATCH] Add prefetch_tracks to resolve only the next tracks
+
+On every tracklist change YouTubeCoreListener resolved the audio of every
+YouTube track in the queue, one by one in its own actor. With allow_cache
+that is a full yt-dlp download per track (~8 s on a Raspberry Pi 5), so a
+15-track queue kept the actor busy for about two minutes, and a track
+queued in that time waited behind the whole list before playing.
+
+prefetch_tracks = N resolves only the current track (the first one when
+stopped) and the N after it, and moves the window when a track starts.
+Left empty, the whole queue is resolved as before.
+
+Upstream-Status: Pending
+---
+--- a/mopidy_youtube/__init__.py
++++ b/mopidy_youtube/__init__.py
+@@ -20,6 +20,7 @@
+     def get_config_schema(self):
+         schema = super().get_config_schema()
+         schema["allow_cache"] = config.String(optional=True)
++        schema["prefetch_tracks"] = config.Integer(minimum=0, optional=True)
+         schema["youtube_api_key"] = config.String(optional=True)
+         schema["search_results"] = config.Integer(minimum=1)
+         schema["playlist_max_videos"] = config.Integer(minimum=1)
+--- a/mopidy_youtube/backend.py
++++ b/mopidy_youtube/backend.py
+@@ -61,6 +61,13 @@
+         # audio url for. There must be a better way.
+ 
+         tracks = self.core.tracklist.get_tracks().get()
++        ahead = self.config["youtube"]["prefetch_tracks"]
++        if ahead is not None:
++            # Only the current track (the first when stopped) and the next
++            # `ahead`: resolving the whole queue blocks this actor for minutes,
++            # and a track queued meanwhile waits behind it.
++            start = self.core.tracklist.index().get() or 0
++            tracks = tracks[start : start + 1 + ahead]
+         video_ids = [
+             extract_video_id(track.uri)
+             for track in tracks
+@@ -69,6 +76,11 @@
+         ]
+         [youtube.Video.get(video_id).audio_url for video_id in video_ids]
+ 
++    def track_playback_started(self, tl_track):
++        # With a prefetch window, move it along as playback advances.
++        if self.config["youtube"]["prefetch_tracks"] is not None:
++            self.tracklist_changed()
++
+     # used for add to playback history function
+     # stolen from mopidy-ytmusic (https://github.com/OzymandiasTheGreat/mopidy-ytmusic/blob/master/mopidy_ytmusic/scrobble_fe.py)
+     # who stole it from mopidy-gmusic
+--- a/mopidy_youtube/ext.conf
++++ b/mopidy_youtube/ext.conf
+@@ -1,6 +1,7 @@
+ [youtube]
+ enabled = true
+ allow_cache = 
++prefetch_tracks =
+ youtube_api_key =
+ channel_id =
+ search_results = 15
