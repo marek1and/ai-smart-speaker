@@ -141,12 +141,14 @@ async def stop_radio() -> dict:
 
 @register_function(name="play_music")
 async def play_music(query: str, kind: str = "track") -> dict:
-    """Finds music for the query; the orchestrator plays it after the AI response."""
+    """Finds music for the query; the orchestrator starts it at once, ducked under the reply."""
     metrics.AI_TOOL_CALLS.labels(function="play_music").inc()
     if music_provider is None:
         return {"status": "error", "details": "Music playback is not configured."}
     if kind not in KINDS:
         kind = "track"
+    # Before the search: a "stop" while it runs or while the AI speaks cancels the start.
+    generation = _mpd().playback_generation
     try:
         selection = await music_provider.find(query, kind)
     except Exception:
@@ -183,8 +185,7 @@ async def play_music(query: str, kind: str = "track") -> dict:
         "uris": selection.uris,
         "title": selection.title,
         "prefetched": prefetched,
-        # a stop or another playback before the deferred start cancels it
-        "generation": _mpd().playback_generation,
+        "generation": generation,
         "for_model": for_model,
     }
 

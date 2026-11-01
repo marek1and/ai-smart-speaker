@@ -352,6 +352,7 @@ class AudioOrchestrator:
             on_interrupted=self._on_interrupted,
             on_turn_timeout=self._on_turn_timeout,
             on_error=self._on_api_error,
+            on_deferred=self._on_deferred_action,
         )
 
         # Initialize ReSpeaker LEDs
@@ -1233,6 +1234,40 @@ class AudioOrchestrator:
 
         await self._execute_post_response_actions()
 
+    def _on_deferred_action(self, action: dict) -> None:
+        """Starts music as soon as the tool ran, not after the reply: Gemini
+        often takes 10-20 s to finish speaking after a tool call (01.11.2026).
+        The turn end only waits for this task."""
+        if action.get("type") == "play_music":
+            action["task"] = asyncio.create_task(self._start_music(action.get("payload", {})))
+
+    async def _start_music(self, payload: dict) -> Optional[bool]:
+        """Returns True/False for started/failed, None when superseded."""
+        # Taken when the tool ran: a "stop" (or another playback) meanwhile cancels the start.
+        generation = payload.get("generation", self.mpd_client.playback_generation)
+        if payload.get("prefetched"):
+            # Wait for the download outside the MPD lock: play would
+            # otherwise hold it (and Mopidy's core) until it is done.
+            if not await wait_for_music(payload["uris"][0], self.config.music.start_timeout):
+                logger.warning("First track not downloaded within %.0fs, playing anyway",
+                               self.config.music.start_timeout)
+        if self.mpd_client.playback_generation != generation:
+            logger.info("Music start superseded (stop or another playback)")
+            return None
+        # While the AI is still speaking the music starts at the duck level.
+        in_turn = self._state in (SpeakerState.LISTENING, SpeakerState.RESPONDING)
+        started = await self.mpd_client.play_music(
+            payload["uris"],
+            payload.get("title") or "",
+            self.config.music.start_timeout,
+            self.config.music.start_confirm_timeout,
+            start_ducked=in_turn,
+        )
+        if not started and self._sound_player:
+            # The AI already said it is playing; without a sound the room just stays silent.
+            self._sound_player.play(SoundEvent.ERROR)
+        return started
+
     async def _dispatch_deferred_actions(self) -> tuple[bool, Optional[str]]:
         """Execute and clear all pending deferred tool actions.
 
@@ -1277,33 +1312,11 @@ class AudioOrchestrator:
                     ran_radio_action = True
 
             elif action_type == "play_music":
-                logger.info("Executing deferred action: play_music")
-                # Taken when the tool ran: a "stop" while the AI was still
-                # speaking (or while the track downloaded) cancels the start.
-                generation = payload.get("generation", self.mpd_client.playback_generation)
-                state = self._state
-                if payload.get("prefetched"):
-                    # Wait for the download outside the MPD lock: play would
-                    # otherwise hold it (and Mopidy's core) until it is done.
-                    if not await wait_for_music(payload["uris"][0], self.config.music.start_timeout):
-                        logger.warning("First track not downloaded within %.0fs, playing anyway",
-                                       self.config.music.start_timeout)
-                if self.mpd_client.playback_generation != generation or self._state != state:
-                    logger.info("Music start superseded (stop, new playback or barge-in)")
-                    ran_radio_action = True
-                    continue
-                started = await self.mpd_client.play_music(
-                    payload["uris"],
-                    payload.get("title") or "",
-                    self.config.music.start_timeout,
-                    self.config.music.start_confirm_timeout,
-                )
-                if not started:
-                    # The AI already said it is playing; without a sound the
-                    # room just stays silent.
+                task = action.get("task")
+                logger.info("Deferred play_music: %s", "waiting for the early start" if task else "starting")
+                started = await task if task else await self._start_music(payload)
+                if started is False:
                     error = "music_start_failed"
-                    if self._sound_player:
-                        self._sound_player.play(SoundEvent.ERROR)
                 ran_radio_action = True
 
             elif action_type == "set_playback_volume":

@@ -613,7 +613,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                         result = payload
                     else:
                         # Add to the queue for the orchestrator to handle later
-                        self.pending_actions.append({"type": function_name, "payload": payload})
+                        self._defer(function_name, payload)
                         logger.info(
                             f"Deferring '{function_name}' for post-response execution. Payload: {payload}"
                         )

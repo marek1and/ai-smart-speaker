@@ -284,6 +284,14 @@ async def test_every_start_and_stop_bumps_the_playback_generation(client, mopidy
     assert client.playback_generation == g + 3
 
 
+async def test_music_started_mid_turn_stays_ducked_for_unduck(client, mopidy):
+    assert await client.play_music(["local:track:a"], "Song", start_ducked=True)
+    duck = min(client.config.volume_duck_percentage, client.get_restore_volume())
+    assert mopidy.volume == client._map_volume_to_curve(duck)
+    await client.unduck()
+    assert client._is_ducked is False
+
+
 async def test_music_that_reports_play_a_moment_later_is_started(client, mopidy):
     # seen on the speaker 01.11.2026: status right after play said "stop" for every start
     mopidy.play_settles_after = 2

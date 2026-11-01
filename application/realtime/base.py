@@ -27,8 +27,9 @@ class BaseRealtimeManager(ABC):
     - Callbacks for orchestrator events
     """
 
-    # Tools executed by the orchestrator after the spoken reply (playback must
-    # not start under the AI's voice); the model gets "success" plus for_model.
+    # Tools executed by the orchestrator, the model gets "success" plus
+    # for_model. Radio and volume run after the spoken reply; play_music starts
+    # at once through on_deferred, ducked under the reply.
     DEFERRED_FUNCTIONS = frozenset({
         "play_internet_radio",
         "play_music",
@@ -50,6 +51,7 @@ class BaseRealtimeManager(ABC):
         self._on_interrupted: Optional[Callable[[], None]] = None
         self._on_turn_timeout: Optional[Callable[[], None]] = None
         self._on_error: Optional[Callable[[], None]] = None
+        self._on_deferred: Optional[Callable[[dict], None]] = None
 
         # State tracking
         self._running: bool = False
@@ -285,11 +287,21 @@ class BaseRealtimeManager(ABC):
         on_interrupted: Optional[Callable[[], None]] = None,
         on_turn_timeout: Optional[Callable[[], None]] = None,
         on_error: Optional[Callable[[], None]] = None,
+        on_deferred: Optional[Callable[[dict], None]] = None,
     ) -> None:
-        """Set callbacks for API events."""
+        """Set callbacks for API events. on_deferred gets each deferred action
+        as it is queued (play_music starts before the reply ends)."""
         self._on_audio_received = on_audio_received
         self._on_text_received = on_text_received
         self._on_turn_complete = on_turn_complete
         self._on_interrupted = on_interrupted
         self._on_turn_timeout = on_turn_timeout
         self._on_error = on_error
+        self._on_deferred = on_deferred
+
+    def _defer(self, function_name: str, payload: dict) -> None:
+        """Queues a deferred tool action for the orchestrator."""
+        action = {"type": function_name, "payload": payload}
+        self.pending_actions.append(action)
+        if self._on_deferred:
+            self._on_deferred(action)

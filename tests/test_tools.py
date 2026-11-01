@@ -153,6 +153,20 @@ async def test_prefetched_entry_is_remembered_and_dropped_once(monkeypatch):
     assert p.dropped == [41] and d._prefetched_tlids == []
 
 
+async def test_stop_during_the_search_still_cancels(monkeypatch):
+    # seen live 01.11.2026 (OpenAI): power OFF while the search ran
+    client = SimpleNamespace(playback_generation=3)
+
+    class Slow(FakeProvider):
+        async def find(self, query, kind):
+            client.playback_generation += 1  # the stop arrives meanwhile
+            return await super().find(query, kind)
+
+    monkeypatch.setattr(d, "_mpd_client", client)
+    monkeypatch.setattr(d, "music_provider", Slow(selection=providers.MusicSelection(["local:track:a"], "T", "A")))
+    assert (await d.play_music("x"))["generation"] == 3
+
+
 async def test_cached_track_is_not_prefetched(monkeypatch):
     p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=True)
     monkeypatch.setattr(d, "music_provider", p)
@@ -537,6 +551,26 @@ async def test_immediate_tool_result_and_exceptions_reach_the_model(gemini, monk
 async def test_request_for_user_input_sets_the_follow_up_flag(gemini):
     await gemini._handle_tool_calls([call("request_for_user_input")])
     assert gemini.request_for_user_input is True
+
+
+async def test_both_backends_report_deferred_actions_as_they_are_queued(gemini, mpd):
+    # the orchestrator starts music from this callback, before the reply ends
+    from realtime.openai_rt import OpenAIRealtimeManager
+    openai = OpenAIRealtimeManager(get_config(), asyncio.Queue(), asyncio.Queue())
+
+    async def ws_send(event):
+        pass
+
+    openai._ws_send = ws_send
+    for mgr, run in (
+        (gemini, lambda: gemini._handle_tool_calls([call("set_playback_volume", volume_percentage=30)])),
+        (openai, lambda: openai._handle_tool_call(
+            {"call_id": "c1", "name": "set_playback_volume", "arguments": '{"volume_percentage": 30}'})),
+    ):
+        seen = []
+        mgr.set_callbacks(on_deferred=seen.append)
+        await run()
+        assert seen == mgr.pending_actions and seen[0]["type"] == "set_playback_volume", type(mgr).__name__
 
 
 def test_deferred_tools_exist():

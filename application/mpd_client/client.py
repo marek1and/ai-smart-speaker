@@ -617,8 +617,12 @@ class MPDClientWrapper:
         title: str,
         start_timeout: Optional[float] = None,
         confirm_timeout: float = 3.0,
+        start_ducked: bool = False,
     ) -> bool:
         """Replaces the queue with music tracks and plays them.
+
+        start_ducked: the AI is still speaking. The music starts at the duck
+        level and unduck() at the end of the turn fades it in.
 
         Returns False when playback did not start: MPD unreachable, play timed
         out, or Mopidy skipped every track as unplayable and stayed stopped.
@@ -637,7 +641,16 @@ class MPDClientWrapper:
         self._source = "music"
         self._started_key = None
         self._notify(state="ON", volume=self._restore_volume)
-        await self._fade_in_after_start()
+        if start_ducked:
+            async with self._mpd_lock:
+                if await self._connect():
+                    await self._set_internal_volume_unsafe(
+                        min(self.config.volume_duck_percentage, self._restore_volume)
+                    )
+            self._is_ducked = True
+            metrics.RADIO_PLAYING.set(1)
+        else:
+            await self._fade_in_after_start()
         return True
 
     async def _abandon_music_start(self) -> None:

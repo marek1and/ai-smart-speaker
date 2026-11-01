@@ -221,7 +221,8 @@ PLAY_MUSIC_FUNC = FunctionDeclaration(
         "Finds a song, artist or album on the music service and plays it, replacing the "
         "radio. The result carries title, artist, tracks (number of queued tracks) and "
         "starts: \"now\", or \"in_a_few_seconds\" when the first track still has to "
-        "download. Playback begins after your reply. source says where it was found: "
+        "download. It starts quietly under your reply and gets louder when you finish. "
+        "source says where it was found: "
         "\"collection\" (the user's own music collection) or the music service."
     ),
     parameters=Schema(

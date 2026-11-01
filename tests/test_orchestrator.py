@@ -67,10 +67,11 @@ class FakeMPD:
         self.calls.append(("play_station", url, name, key))
         self.playing = True
 
-    async def play_music(self, uris, title, start_timeout=None, confirm_timeout=None):
+    async def play_music(self, uris, title, start_timeout=None, confirm_timeout=None, start_ducked=False):
         self.calls.append(("play_music", tuple(uris), title))
         self.start_timeout = start_timeout
         self.confirm_timeout = confirm_timeout
+        self.start_ducked = start_ducked
         self.playing = self.music_starts
         return self.music_starts
 
@@ -322,15 +323,11 @@ async def test_prefetched_music_waits_for_the_download_then_plays(make, monkeypa
     assert ("play_music", ("youtube:video:a",), "T") in o.mpd_client.calls
 
 
-@pytest.mark.parametrize("interrupt", ["stop", "barge_in"])
-async def test_music_start_is_dropped_when_superseded_while_downloading(make, monkeypatch, interrupt):
+async def test_music_start_is_dropped_when_a_stop_comes_while_downloading(make, monkeypatch):
     o = make()
 
     async def wait(uri, timeout):
-        if interrupt == "stop":
-            o.mpd_client.playback_generation += 1   # "stop" or another playback meanwhile
-        else:
-            o._state = SpeakerState.LISTENING       # the user spoke over the reply
+        o.mpd_client.playback_generation += 1   # "stop" or another playback meanwhile
         return True
 
     monkeypatch.setattr(orch, "wait_for_music", wait)
@@ -339,6 +336,40 @@ async def test_music_start_is_dropped_when_superseded_while_downloading(make, mo
     await o._execute_post_response_actions()
     assert not any(c[0] == "play_music" for c in o.mpd_client.calls if isinstance(c, tuple))
     assert SoundEvent.ERROR not in o._sound_player.played
+
+
+async def test_music_starts_at_the_tool_call_ducked_and_the_turn_end_waits_for_it(make, monkeypatch):
+    # Gemini often needs 10-20 s to finish the reply after a tool call
+    o = make()
+    o._state = SpeakerState.RESPONDING
+    action = {"type": "play_music", "payload": {"uris": ["local:track:a"], "title": "T"}}
+    o._api_manager.pending_actions.append(action)
+    o._on_deferred_action(action)
+    await action["task"]
+    assert ("play_music", ("local:track:a",), "T") in o.mpd_client.calls and o.mpd_client.start_ducked
+    await o._execute_post_response_actions()
+    assert [c for c in o.mpd_client.calls if isinstance(c, tuple) and c[0] == "play_music"] == \
+        [("play_music", ("local:track:a",), "T")]  # started once
+    assert o.state == SpeakerState.IDLE and SoundEvent.END_CONVERSATION not in o._sound_player.played
+
+
+async def test_music_that_starts_after_the_turn_fades_in_normally(make):
+    o = make()
+    o._state = SpeakerState.IDLE  # the reply ended before the download did
+    await o._start_music({"uris": ["local:track:a"], "title": "T"})
+    assert o.mpd_client.start_ducked is False
+
+
+async def test_early_start_that_fails_sounds_and_reports(make):
+    o = make()
+    o.mpd_client.music_starts = False
+    o._state = SpeakerState.RESPONDING
+    action = {"type": "play_music", "payload": {"uris": ["local:track:a"], "title": "T"}}
+    o._api_manager.pending_actions.append(action)
+    o._on_deferred_action(action)
+    await o._execute_post_response_actions()
+    assert SoundEvent.ERROR in o._sound_player.played
+    assert o._mqtt_bridge.turns[-1]["error"] == "music_start_failed"
 
 
 async def test_stop_while_the_ai_still_speaks_cancels_the_music(make):

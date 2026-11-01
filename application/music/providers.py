@@ -25,7 +25,7 @@ KINDS = ("track", "artist", "album")
 # Poll interval while waiting for a prefetched track to finish downloading.
 _READY_POLL_SECONDS = 0.5
 # Untitled CD rips ("AudioTrack 05", "Track 3"): queued only when nothing else is.
-UNTITLED = re.compile(r"^(audio ?)?track\s*\d+$", re.I)
+UNTITLED = re.compile(r"^((audio ?)?track\s*\d+|\d+)$", re.I)
 # Extensions Mopidy-YouTube looks for when it checks its cache.
 CACHED_EXTENSIONS = ("webm", "m4a", "mp3", "ogg")
 
