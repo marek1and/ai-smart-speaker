@@ -35,6 +35,8 @@ class FakeMopidy:
         self.fail_next: dict[str, BaseException] = {}
         self.play_timeouts: list = []  # socket timeout seen by each play
         self.unplayable = False  # Mopidy skipped every track and stays stopped
+        self.play_settles_after = 0  # status calls that still say "stop" after play
+        self._settling = 0
 
     def _rec(self, name, *args):
         exc = self.fail_next.pop(name, None)
@@ -70,6 +72,7 @@ class FakeMopidy:
         self._rec("clear")
         self.queue = []
         self.song = None
+        self.state = "stop"  # removing the playing track stops Mopidy
 
     def add(self, uri):
         self._rec("add", uri)
@@ -86,13 +89,18 @@ class FakeMopidy:
             return
         self.song = 0 if pos is None else int(pos)
         self.state = "play"
+        self._settling = self.play_settles_after
 
     def stop(self):
         self._rec("stop")
         self.state = "stop"
 
     def status(self):
-        st = {"volume": str(self.volume), "state": self.state,
+        state = self.state
+        if self._settling:
+            self._settling -= 1
+            state = "stop"  # Mopidy answers play before its state changes
+        st = {"volume": str(self.volume), "state": state,
               "playlistlength": str(len(self.queue))}
         if self.song is not None and self.state != "stop":
             st["song"] = str(self.song)

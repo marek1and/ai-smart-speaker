@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 # mopidy-mpd fakes a single audio output called "Mute" whose "enabled" state is
 # the mixer's mute flag — see _ensure_outputs_enabled_unsafe.
 _MOPIDY_MUTE_OUTPUT = "Mute"
+# Poll interval while waiting for Mopidy to report a started track.
+_START_POLL_SECONDS = 0.1
 
 
 class MPDClientWrapper:
@@ -601,7 +603,11 @@ class MPDClientWrapper:
         await self._fade_in_after_start()
 
     async def play_music(
-        self, uris: List[str], title: str, start_timeout: Optional[float] = None
+        self,
+        uris: List[str],
+        title: str,
+        start_timeout: Optional[float] = None,
+        confirm_timeout: float = 3.0,
     ) -> bool:
         """Replaces the queue with music tracks and plays them.
 
@@ -612,16 +618,39 @@ class MPDClientWrapper:
         """
         description = f"music: {title} ({len(uris)} tracks)"
         if not await self._start_queue(uris, description, play_timeout=start_timeout):
+            await self._abandon_music_start()
             return False
-        status = await self.get_status()
-        if (status or {}).get("state") != "play":
-            logger.error("Music did not start (%s): state %s", description, (status or {}).get("state"))
+        state = await self._wait_for_play(confirm_timeout)
+        if state != "play":
+            logger.error("Music did not start (%s): state %s after %.1fs", description, state, confirm_timeout)
+            await self._abandon_music_start()
             return False
         self._source = "music"
         self._started_key = None
         self._notify(state="ON", volume=self._restore_volume)
         await self._fade_in_after_start()
         return True
+
+    async def _abandon_music_start(self) -> None:
+        """After a failed start the queue holds the music at volume 0, and after
+        a play timeout Mopidy may still start it later. Stop it and mark the
+        queue as music, so power ON / "włącz radio" reloads the station."""
+        self._source = "music"
+        self._is_playing = None  # unknown: stop() must not skip
+        await self.stop()
+
+    async def _wait_for_play(self, timeout: float) -> Optional[str]:
+        """Polls the state until "play" or timeout; returns the last state seen.
+
+        Mopidy answers play before its state changes, so the first status
+        after play still says "stop".
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            state = (await self.get_status() or {}).get("state")
+            if state == "play" or time.monotonic() >= deadline:
+                return state
+            await asyncio.sleep(_START_POLL_SECONDS)
 
     async def _fade_in_after_start(self) -> None:
         # Run fade-in outside of the main lock to allow other operations.

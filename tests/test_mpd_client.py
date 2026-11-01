@@ -271,14 +271,31 @@ async def test_music_play_gets_a_longer_timeout_only_for_play(client, mopidy):
 async def test_music_play_timeout_is_a_failed_start(client, mopidy):
     mopidy.fail_next["play"] = TimeoutError("timed out")
     assert not await client.play_music(["youtube:video:a"], "Song", start_timeout=30.0)
-    assert client.source != "music" and mopidy.timeout == 5
+    assert mopidy.timeout == 5
+    # Mopidy may still start the queue after the timeout: it is stopped
+    assert mopidy.names()[-1] == "stop" and client.events[-1] == {"state": "OFF"}
+
+
+async def test_music_that_reports_play_a_moment_later_is_started(client, mopidy):
+    # seen on the speaker 01.11.2026: status right after play said "stop" for every start
+    mopidy.play_settles_after = 2
+    assert await client.play_music(["local:track:a"], "Song", confirm_timeout=1.0)
+    assert client.source == "music" and client.events[-1]["state"] == "ON"
 
 
 async def test_music_skipped_as_unplayable_is_a_failed_start(client, mopidy):
     mopidy.unplayable = True
-    assert not await client.play_music(["youtube:video:a", "youtube:video:b"], "Song")
-    assert client.source != "music"
+    assert not await client.play_music(["youtube:video:a", "youtube:video:b"], "Song", confirm_timeout=0.2)
     assert not any(e.get("state") == "ON" for e in client.events)
+
+
+async def test_after_a_failed_start_power_on_goes_back_to_the_radio(client, mopidy, eska):
+    await client.play_station(*eska)
+    mopidy.unplayable = True
+    assert not await client.play_music(["youtube:video:a"], "Song", confirm_timeout=0.2)
+    mopidy.unplayable = False
+    await client.resume(resolve_eska)
+    assert mopidy.queue == [eska[0]] and client.source == "radio"
 
 
 async def test_load_station_marks_the_queue_as_radio(client):

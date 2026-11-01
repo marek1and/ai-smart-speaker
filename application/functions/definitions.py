@@ -160,7 +160,8 @@ async def play_music(query: str, kind: str = "track") -> dict:
     # Before prefetch, which creates the file.
     cached = music_provider.is_cached(selection.uris[0])
     try:
-        await music_provider.prefetch(selection.uris[0])
+        if not cached:
+            await music_provider.prefetch(selection.uris[0])
     except Exception:
         # Deliberately not an error for the model: the track still resolves
         # on play, only later.

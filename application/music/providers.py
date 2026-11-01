@@ -49,6 +49,10 @@ class MopidyMusicProvider:
         self._config = config
 
     async def find(self, query: str, kind: str) -> Optional[MusicSelection]:
+        tracks, albums = await self._search(query)
+        return await self._pick(kind, tracks, albums, query)
+
+    async def _search(self, query: str) -> tuple[list[dict], list[dict]]:
         result = await self._rpc(
             "core.library.search",
             {"query": {"any": [query]}, "uris": [self.uri_scheme]},
@@ -56,7 +60,7 @@ class MopidyMusicProvider:
         # One SearchResult per backend that answered.
         tracks = [t for r in result or [] for t in r.get("tracks") or []]
         albums = [a for r in result or [] for a in r.get("albums") or []]
-        return await self._pick(kind, tracks, albums)
+        return tracks, albums
 
     def is_cached(self, uri: str) -> Optional[bool]:
         """Whether the track is already downloaded; None without cache_dir."""
@@ -81,7 +85,7 @@ class MopidyMusicProvider:
         await self._rpc("core.tracklist.add", {"uris": [uri], "at_position": position})
 
     async def _pick(
-        self, kind: str, tracks: list[dict], albums: list[dict]
+        self, kind: str, tracks: list[dict], albums: list[dict], query: str = ""
     ) -> Optional[MusicSelection]:
         if kind == "album" and albums:
             album = albums[0]
@@ -91,6 +95,11 @@ class MopidyMusicProvider:
                 return MusicSelection(uris, album.get("name", ""), _first_artist(album), self.label)
         if not tracks:
             return None
+        if kind == "track" and query:
+            # the service's first hit is often another song of the artist
+            words = _fold(query).split()
+            best = max(tracks, key=lambda t: _matches(words, f"{t.get('name', '')} {_artists(t)}"))
+            tracks = [best] + [t for t in tracks if t is not best]
         count = self._config.artist_tracks if kind == "artist" else 1
         picked = tracks[:count]
         first = picked[0]
@@ -116,11 +125,12 @@ class MopidyMusicProvider:
 class LocalCollectionProvider(MopidyMusicProvider):
     """The Mopidy-Local collection. Its files play at once: nothing to prefetch.
 
-    Mopidy-Local answers "any" with tracks only: every word must occur in some
-    field (substring, the file path included), at most max_search_results. A
-    hit counts only when every word of the request is in the track's own tags,
-    so a request the collection does not really have falls through to the next
-    provider instead of playing whatever matched the path.
+    Mopidy-Local answers "any" with an SQLite full-text MATCH: whole words,
+    in any field (the file path included), case folded for ASCII only, at most
+    max_search_results tracks. A hit counts only when every word of the
+    request is in the track's own tags, so a request the collection does not
+    really have falls through to the next provider instead of playing
+    whatever matched the path.
     """
 
     def is_cached(self, uri: str) -> Optional[bool]:
@@ -130,21 +140,20 @@ class LocalCollectionProvider(MopidyMusicProvider):
         return None
 
     async def find(self, query: str, kind: str) -> Optional[MusicSelection]:
-        result = await self._rpc(
-            "core.library.search", {"query": {"any": [query]}, "uris": [self.uri_scheme]}
-        )
-        tracks = [t for r in result or [] for t in r.get("tracks") or []]
+        query = _plain_words(query)
         words = _fold(query).split()
         if not words:
             return None
+        tracks, _ = await self._search(query)
         if kind == "artist":
-            hits = [t for t in tracks if _has_all(words, _artists(t) + " " + _artists(t.get("album") or {}))]
-            if len(hits) < self._config.local_min_artist_tracks:
+            # whole words: "Queen" must not take Queensrÿche
+            hits = [t for t in tracks if _has_all_words(words, _artists(t) + " " + _artists(t.get("album") or {}))]
+            if not hits or len(hits) < self._config.local_min_artist_tracks:
                 return None
             # titled tracks first (the model announces the first one), rips fill up
             titled = [t for t in hits if not _untitled(t)]
             rips = [t for t in hits if _untitled(t)]
-            picked = (random.sample(titled, len(titled)) + random.sample(rips, len(rips)))[: self._config.artist_tracks]
+            picked = (random.sample(titled, len(titled)) + random.sample(rips, len(rips)))[: max(1, self._config.artist_tracks)]
             return MusicSelection(
                 [t["uri"] for t in picked], picked[0].get("name", ""), _first_artist(picked[0]), self.label
             )
@@ -249,6 +258,18 @@ def _matches(words: list[str], text: str) -> int:
 
 def _has_all(words: list[str], text: str) -> bool:
     return _matches(words, text) == len(words)
+
+
+def _has_all_words(words: list[str], text: str) -> bool:
+    tokens = set(re.findall(r"\w+", _fold(text)))
+    return all(w in tokens for w in words)
+
+
+def _plain_words(query: str) -> str:
+    """Drops what SQLite full-text search reads as syntax (quotes, a leading
+    "-", "*", parentheses, upper-case AND/OR/NOT/NEAR) and keeps the words."""
+    words = re.findall(r"\w+", query)
+    return " ".join(w.lower() if w in ("AND", "OR", "NOT", "NEAR") else w for w in words)
 
 
 def _first_artist(item: dict) -> Optional[str]:

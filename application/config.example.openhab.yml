@@ -247,6 +247,7 @@ music:
   # first track starts at once or after a download. Empty: not reported.
   cache_dir: ""  # e.g. "/data/cache/mopidy/youtube"
   start_timeout: 30.0  # seconds MPD play may take to download the first track
+  start_confirm_timeout: 3.0  # seconds to wait for Mopidy to report play
 
 mpd:
   host: "localhost"

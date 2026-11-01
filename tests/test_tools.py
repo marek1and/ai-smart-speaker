@@ -129,6 +129,13 @@ async def test_play_music_tells_the_model_when_it_starts(monkeypatch, cached, st
     assert result["for_model"].get("starts") == starts
 
 
+async def test_cached_track_is_not_prefetched(monkeypatch):
+    p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=True)
+    monkeypatch.setattr(d, "music_provider", p)
+    await d.play_music("x")
+    assert p.prefetched == []
+
+
 async def test_failed_prefetch_still_plays_and_is_logged(monkeypatch, caplog):
     p = FakeProvider(
         selection=providers.MusicSelection(["youtube:video:a"], "T", "A"),
@@ -187,6 +194,15 @@ async def test_track_and_artist_pick(rpc, kind, count):
     rpc.replies["core.library.search"] = {"result": [{"tracks": TRACKS, "albums": [ALBUM]}]}
     sel = await provider().find("q", kind)
     assert len(sel.uris) == count and sel.title == "T0" and sel.artist == "Artist"
+
+
+async def test_track_pick_prefers_the_hit_that_matches_the_words(rpc):
+    # seen 01.11.2026: "Harlem mój dom" played the service's first hit, another song
+    hits = [{"uri": "youtube:video:b", "name": "Biegnę (O tobie sen błękitny)", "artists": [{"name": "Harlem"}]},
+            {"uri": "youtube:video:d", "name": "Mój dom", "artists": [{"name": "Harlem"}]}]
+    rpc.replies["core.library.search"] = {"result": [{"tracks": hits}]}
+    assert (await provider().find("Harlem mój dom", "track")).uris == ["youtube:video:d"]
+    assert (await provider().find("Harlem", "track")).uris == ["youtube:video:b"]  # tie keeps the first
 
 
 async def test_album_is_expanded_and_falls_back_to_tracks_when_empty(rpc):
@@ -288,6 +304,24 @@ async def test_local_prefers_titled_tracks_over_untitled_rips(rpc):
     assert len((await local(n=2).find("Hey", "artist")).uris) == 2
     rpc.replies["core.library.search"] = {"result": [{"tracks": rips}]}
     assert len((await local(n=15).find("Hey", "artist")).uris) == 3
+
+
+async def test_local_artist_matches_whole_words(rpc):
+    rpc.replies["core.library.search"] = {"result": [{"tracks": [
+        local_track(f"local:track:q{i}", f"Song {i}", "Queensrÿche") for i in range(5)]}]}
+    assert await local().find("Queen", "artist") is None
+
+
+async def test_local_query_drops_full_text_syntax(rpc):
+    rpc.replies["core.library.search"] = {"result": [{"tracks": COLLECTION}]}
+    await local().find('"Dżem" -Whisky OR (Cegła)*', "track")
+    assert rpc.sent[0]["params"]["query"] == {"any": ["Dżem Whisky or Cegła"]}
+
+
+async def test_local_artist_threshold_zero_does_not_crash(rpc):
+    rpc.replies["core.library.search"] = {"result": [{"tracks": []}]}
+    p = providers.LocalCollectionProvider("collection", "local:", MusicConfig(enabled=True, local_min_artist_tracks=0))
+    assert await p.find("Nikt", "artist") is None
 
 
 async def test_local_album_plays_in_disc_and_track_order(rpc):

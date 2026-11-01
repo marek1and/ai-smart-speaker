@@ -1280,6 +1280,7 @@ class AudioOrchestrator:
                     payload["uris"],
                     payload.get("title") or "",
                     self.config.music.start_timeout,
+                    self.config.music.start_confirm_timeout,
                 )
                 if not started:
                     # The AI already said it is playing; without a sound the
@@ -1298,16 +1299,19 @@ class AudioOrchestrator:
 
     async def _execute_post_response_actions(self) -> None:
         """Execute deferred actions and decide the next state after AI response."""
-        # Before publishing: the turn carries the error of a deferred action.
-        turn_should_end, error = await self._dispatch_deferred_actions()
+        # Read the turn first: a barge-in during the deferred actions starts a
+        # new turn and clears the transcripts. Publish after them, with their error.
+        turn = None
         if self._api_manager is not None:
-            self._publish_turn(
+            turn = (
                 "text" if self._text_turn is not None else "voice",
                 self._text_turn or self._api_manager.user_transcript.strip(),
                 self._api_manager.ai_transcript.strip(),
-                error,
             )
         self._text_turn = None
+        turn_should_end, error = await self._dispatch_deferred_actions()
+        if turn is not None:
+            self._publish_turn(*turn, error)
 
         if turn_should_end:
             logger.info("Radio action performed, ending turn.")

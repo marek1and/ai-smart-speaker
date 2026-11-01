@@ -312,6 +312,9 @@ class MusicConfig:
     # MPD play blocks until the first track is downloaded (~8 s, longer when
     # Mopidy skips unplayable tracks); after this the start counts as failed.
     start_timeout: float = 30.0
+    # Mopidy answers play before it reports "play" (~0.1 s for a local file);
+    # the state is polled this long before the start counts as failed.
+    start_confirm_timeout: float = 3.0
 
 
 @dataclass

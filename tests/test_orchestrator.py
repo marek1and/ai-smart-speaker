@@ -66,9 +66,10 @@ class FakeMPD:
         self.calls.append(("play_station", url, name, key))
         self.playing = True
 
-    async def play_music(self, uris, title, start_timeout=None):
+    async def play_music(self, uris, title, start_timeout=None, confirm_timeout=None):
         self.calls.append(("play_music", tuple(uris), title))
         self.start_timeout = start_timeout
+        self.confirm_timeout = confirm_timeout
         self.playing = self.music_starts
         return self.music_starts
 
@@ -265,6 +266,7 @@ async def test_music_gets_the_configured_start_timeout(make):
     o._state = SpeakerState.RESPONDING
     await o._execute_post_response_actions()
     assert o.mpd_client.start_timeout == o.config.music.start_timeout
+    assert o.mpd_client.confirm_timeout == o.config.music.start_confirm_timeout
     assert "error" not in o._mqtt_bridge.turns[-1]
     assert SoundEvent.ERROR not in o._sound_player.played
 
@@ -280,6 +282,24 @@ async def test_music_that_fails_to_start_sounds_and_reports_an_error(make):
     assert SoundEvent.END_CONVERSATION not in o._sound_player.played
     assert o._mqtt_bridge.turns[-1]["error"] == "music_start_failed"
     assert o.state == SpeakerState.IDLE
+
+
+async def test_turn_is_published_as_it_was_when_a_barge_in_clears_it(make):
+    # the deferred play can take seconds; a barge-in meanwhile starts a new turn
+    o = make()
+    o._api_manager.user_transcript, o._api_manager.ai_transcript = "puść Dżem", "Puszczam."
+    o._api_manager.pending_actions.append({"type": "play_music", "payload": {"uris": ["local:track:a"], "title": "T"}})
+    o._state = SpeakerState.RESPONDING
+    real = o._dispatch_deferred_actions
+
+    async def dispatch_with_barge_in():
+        result = await real()
+        o._api_manager.user_transcript = o._api_manager.ai_transcript = ""
+        return result
+
+    o._dispatch_deferred_actions = dispatch_with_barge_in
+    await o._execute_post_response_actions()
+    assert o._mqtt_bridge.turns[-1] == {"source": "voice", "request": "puść Dżem", "reply": "Puszczam."}
 
 
 def test_every_deferred_tool_has_a_dispatch_branch():
