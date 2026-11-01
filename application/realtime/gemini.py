@@ -86,7 +86,9 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         # play: a pause) or generation_complete comes (then they were trailing
         # padding: up to 20 s of it on the speaker, 01.11.2026).
         self._held_silence: list[bytes] = []
+        self._held_bytes: int = 0
         self._ended_early: bool = False  # this turn already ended before turn_complete
+        self._voice_seen: bool = False  # the model said something this turn
 
     def _silence_run_is_notable(self, run_length: int) -> bool:
         """Is this silent-chunk run long enough to warrant a warning?
@@ -124,8 +126,42 @@ class GeminiRealtimeManager(BaseRealtimeManager):
     def start_new_turn(self) -> None:
         super().start_new_turn()
         self._consecutive_silent_chunks = 0
-        self._held_silence = []
+        # A grace timer of the previous turn must not end this one (barge-in).
+        # Its generation_complete came, so its turn_complete is still to come.
+        if self._generation_end_task and not self._generation_end_task.done():
+            self._late_turn_completes += 1
+        self._cancel_generation_end()
+        self._held_silence, self._held_bytes = [], 0
         self._ended_early = False
+        self._voice_seen = False
+
+    def _on_watchdog_timeout(self) -> None:
+        # The turn ended without turn_complete: a late one expected for an
+        # earlier turn did not come either, so stop waiting for it.
+        if self._late_turn_completes:
+            logger.info("Dropping %d expected late turn_complete(s) after the watchdog", self._late_turn_completes)
+            self._late_turn_completes = 0
+
+    def _seconds(self, nbytes: int) -> float:
+        """Duration of PCM16 output audio."""
+        return nbytes / 2 / self.config.audio.output_sample_rate
+
+    def _drop_held_silence(self) -> None:
+        """Trailing silence: not played."""
+        if self._held_bytes and self._timing:
+            self._timing["trimmed"] = self._seconds(self._held_bytes)
+        self._held_silence, self._held_bytes = [], 0
+
+    async def _release_held_silence(self) -> None:
+        """Speech follows: the held silence was a pause. It plays, cut to
+        max_played_pause (6 s of silence came before a 0.1 s blip, 01.11.2026)."""
+        budget = int(self.live_cfg.max_played_pause * self.config.audio.output_sample_rate) * 2
+        for held in self._held_silence:
+            if budget <= 0:
+                break
+            await self._output_queue.put(held[:budget])
+            budget -= len(held)
+        self._held_silence, self._held_bytes = [], 0
 
     def _trace_event(self, kind: str, audio_seconds: float = 0.0) -> None:
         """Records an API event; consecutive events of one kind become one entry."""
@@ -493,7 +529,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 if data and isinstance(data.data, bytes) and data.data:
                     rms = self._pcm16_rms(data.data)
                     kind = "←silence" if rms < self.live_cfg.output_silence_rms_threshold else "←voice"
-                    self._trace_event(kind, len(data.data) / 2 / self.config.audio.output_sample_rate)
+                    self._trace_event(kind, self._seconds(len(data.data)))
                 elif getattr(part, "text", None):
                     self._trace_event("←text")
         if getattr(getattr(sc, "input_transcription", None), "text", None):
@@ -560,7 +596,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
                                 rms = self._pcm16_rms(data.data)
                                 is_silent = rms < self.live_cfg.output_silence_rms_threshold
-                                seconds = len(data.data) / 2 / self.config.audio.output_sample_rate
+                                seconds = self._seconds(len(data.data))
                                 if self._timing:
                                     self._timing["audio"] += seconds
                                     self._timing_mark("first_audio")
@@ -614,18 +650,15 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
                                 if is_silent:
                                     self._held_silence.append(data.data)
+                                    self._held_bytes += len(data.data)
                                     self._end_turn_on_long_silence()
                                     continue
+                                if self._ended_early:
+                                    # Measures how often trailing_silence_end cuts an answer.
+                                    logger.warning("Speech after the turn already ended early")
+                                self._voice_seen = True
                                 self._cancel_generation_end()  # the model is still talking
-                                # A pause in the speech plays, but at most max_played_pause:
-                                # 6 s of silence came before a 0.1 s blip (01.11.2026).
-                                budget = int(self.live_cfg.max_played_pause * self.config.audio.output_sample_rate * 2)
-                                for held in self._held_silence:
-                                    if budget <= 0:
-                                        break
-                                    await self._output_queue.put(held[:budget])
-                                    budget -= len(held)
-                                self._held_silence = []
+                                await self._release_held_silence()
 
                                 await self._output_queue.put(data.data)
                                 if self._chunks_received == 1:
@@ -664,9 +697,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
 
             if getattr(sc, "generation_complete", False):
                 self._timing_mark("generation_complete")
-                if self._held_silence and self._timing:
-                    self._timing["trimmed"] = sum(len(c) for c in self._held_silence) / 2 / self.config.audio.output_sample_rate
-                self._held_silence = []  # trailing padding: not played
+                self._drop_held_silence()
             if (
                 getattr(sc, "generation_complete", False)
                 and self._chunks_received > 0  # the model answered this turn
@@ -678,8 +709,9 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             if hasattr(sc, "turn_complete") and sc.turn_complete:
                 self._cancel_generation_end()
                 if self._late_turn_completes:
-                    # Belongs to a turn already ended after generation_complete; it
-                    # must not end (or unblock) the turn that may be running now.
+                    # Belongs to a turn already ended early (Gemini answers in order).
+                    # It must not end (or unblock) the turn that may be running now.
+                    # If it never comes, the watchdog ends this turn and drops the count.
                     self._late_turn_completes -= 1
                     logger.info("Late turn_complete of a turn already ended — ignored")
                     if self._late_timing_logged:
@@ -757,11 +789,9 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         once Gemini generated 76 s of silence and sent generation_complete
         only after 12 s (01.11.2026)."""
         limit = self.live_cfg.trailing_silence_end
-        if not limit or self._ended_early or self._generation_end_task:
-            return
-        if "first_voice" not in self._timing:
-            return  # nothing said yet: leading silence
-        held = sum(len(c) for c in self._held_silence) / 2 / self.config.audio.output_sample_rate
+        if not limit or self._ended_early or self._generation_end_task or not self._voice_seen:
+            return  # disabled, done, already ending, or leading silence
+        held = self._seconds(self._held_bytes)
         if held >= limit:
             logger.info("%.1fs of silence after the answer — treating it as its end", held)
             self._schedule_turn_end()
@@ -779,9 +809,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         await asyncio.sleep(grace)
         self._generation_end_task = None
         self._ended_early = True
-        if self._held_silence and self._timing:
-            self._timing["trimmed"] = sum(len(c) for c in self._held_silence) / 2 / self.config.audio.output_sample_rate
-        self._held_silence = []  # trailing padding: not played
+        self._drop_held_silence()
         self._late_turn_completes += 1
         self._waiting_for_turn_complete = False
         self.cancel_watchdog()

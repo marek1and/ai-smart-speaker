@@ -588,12 +588,55 @@ async def test_gemini_turn_ends_after_generation_complete_when_turn_complete_lag
     await gemini._process_api_response(server(generation_complete=True))
     await asyncio.sleep(0.1)
     assert ended == [True] and gemini._waiting_for_turn_complete is False
-    # the late turn_complete must not end the next turn, which is waiting already
+    # the next turn starts before the late turn_complete arrives
+    gemini.start_new_turn()
+    gemini._frames_sent, gemini._response_started = 1000, True
     gemini._waiting_for_turn_complete = True
-    await gemini._process_api_response(server(turn_complete=True))
+    await gemini._process_api_response(server(turn_complete=True))  # the late one
     assert ended == [True] and gemini._waiting_for_turn_complete is True
-    await gemini._process_api_response(server(turn_complete=True))  # the next turn's own
+    await gemini._process_api_response(audio_msg(8000))              # the new answer
+    await gemini._process_api_response(server(turn_complete=True))  # its own
     assert ended == [True, True]
+
+
+async def test_gemini_barge_in_cancels_the_previous_turns_grace_timer(gemini, monkeypatch):
+    # review 01.11.2026: the timer of the old turn ended the new one mid-speech
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.05)
+    ended = []
+    gemini.set_callbacks(on_turn_complete=lambda: ended.append(True))
+    gemini._chunks_received = 5
+    await gemini._process_api_response(server(generation_complete=True))
+    gemini.start_new_turn()  # the user barges in within the grace
+    await asyncio.sleep(0.1)
+    assert ended == []
+    assert gemini._late_turn_completes == 1  # the old turn's turn_complete is still to come
+
+
+async def test_gemini_late_turn_complete_in_the_middle_of_the_next_answer_does_not_cut_it(gemini):
+    # review 2: a late turn_complete arriving after the new turn's first audio
+    ended = []
+    gemini.set_callbacks(on_turn_complete=lambda: ended.append(True))
+    gemini._late_turn_completes = 1
+    gemini.start_new_turn()
+    gemini._frames_sent, gemini._response_started = 1000, True
+    await gemini._process_api_response(audio_msg(8000))              # the new answer streams
+    await gemini._process_api_response(server(turn_complete=True))  # the old turn's, late
+    assert ended == [] and gemini._late_turn_completes == 0
+    await gemini._process_api_response(server(turn_complete=True))  # its own
+    assert ended == [True]
+
+
+async def test_gemini_watchdog_drops_a_late_turn_complete_that_never_came(gemini):
+    gemini.set_callbacks(on_turn_complete=lambda: None, on_turn_timeout=lambda: None)
+    gemini._late_turn_completes = 1
+    gemini.start_watchdog(timeout=0.05)
+    await asyncio.sleep(0.1)
+    assert gemini._late_turn_completes == 0
+    gemini._late_turn_completes = 1
+    gemini.start_watchdog(timeout=5)
+    gemini.cancel_watchdog()  # a normal end: the count stays
+    await asyncio.sleep(0)
+    assert gemini._late_turn_completes == 1
 
 
 async def test_gemini_logs_the_turn_timeline_when_turn_complete_comes(gemini, monkeypatch, caplog):
@@ -672,8 +715,7 @@ async def test_gemini_long_silence_after_speech_ends_the_turn_once(gemini, monke
     ended = []
     gemini.set_callbacks(on_turn_complete=lambda: ended.append(True))
     gemini._frames_sent, gemini._response_started = 1000, True
-    gemini._timing_start()
-    await gemini._process_api_response(audio_msg(8000))
+    await gemini._process_api_response(audio_msg(8000))  # no _timing_start: works without diagnostics
     for _ in range(6):
         await gemini._process_api_response(audio_msg(0))
     await asyncio.sleep(0.1)
@@ -681,6 +723,19 @@ async def test_gemini_long_silence_after_speech_ends_the_turn_once(gemini, monke
     await gemini._process_api_response(server(generation_complete=True))  # comes later
     await asyncio.sleep(0.1)
     assert ended == [True]  # not a second end
+
+
+async def test_gemini_pause_cut_keeps_whole_pcm16_samples(gemini, monkeypatch):
+    # review: an odd byte budget split a sample and misaligned the audio
+    monkeypatch.setattr(gemini.live_cfg, "max_played_pause", 0.3334)
+    monkeypatch.setattr(gemini.live_cfg, "trailing_silence_end", 0)
+    gemini._frames_sent, gemini._response_started = 1000, True
+    await gemini._process_api_response(audio_msg(8000))
+    for _ in range(5):
+        await gemini._process_api_response(audio_msg(0))
+    await gemini._process_api_response(audio_msg(8000))
+    while not gemini._output_queue.empty():
+        assert len(gemini._output_queue.get_nowait()) % 2 == 0
 
 
 async def test_gemini_long_pause_before_more_speech_is_cut(gemini, monkeypatch):

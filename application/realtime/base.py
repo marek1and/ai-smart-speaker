@@ -271,10 +271,14 @@ class BaseRealtimeManager(ABC):
             logger.warning(
                 "Watchdog timeout (%.1fs)! API did not send turn_complete.", timeout
             )
+            self._on_watchdog_timeout()
             if self._on_turn_timeout:
                 self._on_turn_timeout()
         except asyncio.CancelledError:
             logger.debug("Watchdog cancelled.")
+
+    def _on_watchdog_timeout(self) -> None:
+        """Hook for subclasses, called when the watchdog fires."""
 
     def cancel_watchdog(self) -> None:
         """Cancel the active watchdog timer."""
