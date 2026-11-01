@@ -239,6 +239,10 @@ music:
   rpc_url: "http://localhost:6680/mopidy/rpc"
   search_timeout: 10.0
   artist_tracks: 15  # tracks queued for an artist request
+  # Search the Mopidy-Local collection first (needs mopidy-local and a scanned
+  # library); the provider above plays what the collection does not have.
+  local_first: false
+  local_min_artist_tracks: 3  # fewer collection tracks of an artist: use the provider
   # Mopidy-YouTube's allow_cache directory: the model then says whether the
   # first track starts at once or after a download. Empty: not reported.
   cache_dir: ""  # e.g. "/data/cache/mopidy/youtube"

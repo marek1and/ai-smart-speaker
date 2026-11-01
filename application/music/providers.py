@@ -7,6 +7,9 @@ track URIs that Mopidy can queue.
 import asyncio
 import logging
 import os
+import random
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Optional
 
@@ -17,6 +20,8 @@ from config import MusicConfig
 logger = logging.getLogger(__name__)
 
 KINDS = ("track", "artist", "album")
+# Untitled CD rips ("AudioTrack 05", "Track 3"): queued only when nothing else is.
+UNTITLED = re.compile(r"^(audio ?)?track\s*\d+$", re.I)
 # Extensions Mopidy-YouTube looks for when it checks its cache.
 CACHED_EXTENSIONS = ("webm", "m4a", "mp3", "ogg")
 
@@ -26,6 +31,7 @@ class MusicSelection:
     uris: list[str]
     title: str
     artist: Optional[str]
+    source: str = ""  # label of the provider that found it
 
 
 class MopidyMusicProvider:
@@ -39,13 +45,13 @@ class MopidyMusicProvider:
 
     def __init__(self, label: str, uri_scheme: str, config: MusicConfig) -> None:
         self.label = label
-        self._uri_scheme = uri_scheme
+        self.uri_scheme = uri_scheme
         self._config = config
 
     async def find(self, query: str, kind: str) -> Optional[MusicSelection]:
         result = await self._rpc(
             "core.library.search",
-            {"query": {"any": [query]}, "uris": [self._uri_scheme]},
+            {"query": {"any": [query]}, "uris": [self.uri_scheme]},
         )
         # One SearchResult per backend that answered.
         tracks = [t for r in result or [] for t in r.get("tracks") or []]
@@ -82,14 +88,14 @@ class MopidyMusicProvider:
             lookup = await self._rpc("core.library.lookup", {"uris": [album["uri"]]})
             uris = [t["uri"] for t in (lookup or {}).get(album["uri"], [])]
             if uris:
-                return MusicSelection(uris, album.get("name", ""), _first_artist(album))
+                return MusicSelection(uris, album.get("name", ""), _first_artist(album), self.label)
         if not tracks:
             return None
         count = self._config.artist_tracks if kind == "artist" else 1
         picked = tracks[:count]
         first = picked[0]
         return MusicSelection(
-            [t["uri"] for t in picked], first.get("name", ""), _first_artist(first)
+            [t["uri"] for t in picked], first.get("name", ""), _first_artist(first), self.label
         )
 
     async def _rpc(self, method: str, params: dict):
@@ -107,6 +113,144 @@ class MopidyMusicProvider:
         return body.get("result")
 
 
+class LocalCollectionProvider(MopidyMusicProvider):
+    """The Mopidy-Local collection. Its files play at once: nothing to prefetch.
+
+    Mopidy-Local answers "any" with tracks only: every word must occur in some
+    field (substring, the file path included), at most max_search_results. A
+    hit counts only when every word of the request is in the track's own tags,
+    so a request the collection does not really have falls through to the next
+    provider instead of playing whatever matched the path.
+    """
+
+    def is_cached(self, uri: str) -> Optional[bool]:
+        return True
+
+    async def prefetch(self, uri: str) -> None:
+        return None
+
+    async def find(self, query: str, kind: str) -> Optional[MusicSelection]:
+        result = await self._rpc(
+            "core.library.search", {"query": {"any": [query]}, "uris": [self.uri_scheme]}
+        )
+        tracks = [t for r in result or [] for t in r.get("tracks") or []]
+        words = _fold(query).split()
+        if not words:
+            return None
+        if kind == "artist":
+            hits = [t for t in tracks if _has_all(words, _artists(t) + " " + _artists(t.get("album") or {}))]
+            if len(hits) < self._config.local_min_artist_tracks:
+                return None
+            # titled tracks first (the model announces the first one), rips fill up
+            titled = [t for t in hits if not _untitled(t)]
+            rips = [t for t in hits if _untitled(t)]
+            picked = (random.sample(titled, len(titled)) + random.sample(rips, len(rips)))[: self._config.artist_tracks]
+            return MusicSelection(
+                [t["uri"] for t in picked], picked[0].get("name", ""), _first_artist(picked[0]), self.label
+            )
+        if kind == "album":
+            selection = await self._album(words, tracks)
+            if selection:
+                return selection
+        hits = _titled([t for t in tracks if _has_all(words, _describe(t))])
+        if not hits:
+            return None
+        best = max(hits, key=lambda t: _matches(words, t.get("name", "")) * 2 + _matches(words, _artists(t)))
+        return MusicSelection([best["uri"]], best.get("name", ""), _first_artist(best), self.label)
+
+    async def _album(self, words: list[str], tracks: list[dict]) -> Optional[MusicSelection]:
+        albums = {}
+        for t in tracks:
+            album = t.get("album") or {}
+            described = f"{album.get('name', '')} {_artists(album)} {_artists(t)}"
+            if album.get("uri") and _has_all(words, described):
+                albums.setdefault(album["uri"], album)
+        if not albums:
+            return None
+        uri, album = max(albums.items(), key=lambda kv: _matches(words, kv[1].get("name", "")))
+        lookup = await self._rpc("core.library.lookup", {"uris": [uri]})
+        album_tracks = sorted(
+            (lookup or {}).get(uri) or [], key=lambda t: (t.get("disc_no") or 0, t.get("track_no") or 0)
+        )
+        if not album_tracks:
+            return None
+        return MusicSelection(
+            [t["uri"] for t in album_tracks],
+            album.get("name", ""),
+            _first_artist(album) or _first_artist(album_tracks[0]),
+            self.label,
+        )
+
+
+class FallbackProvider:
+    """Asks the providers in order; the first that finds something wins.
+
+    A failing provider that is not the last one is logged and skipped, so a
+    broken local index never blocks YouTube.
+    """
+
+    def __init__(self, providers: list[MopidyMusicProvider]) -> None:
+        self._providers = providers
+        self.label = " or ".join(p.label for p in providers)
+
+    async def find(self, query: str, kind: str) -> Optional[MusicSelection]:
+        for provider in self._providers:
+            try:
+                selection = await provider.find(query, kind)
+            except Exception:
+                if provider is self._providers[-1]:
+                    raise
+                logger.warning("%s search for '%s' failed, trying the next provider",
+                               provider.label, query, exc_info=True)
+                continue
+            if selection is not None:
+                return selection
+        return None
+
+    def _owner(self, uri: str) -> MopidyMusicProvider:
+        return next((p for p in self._providers if uri.startswith(p.uri_scheme)), self._providers[-1])
+
+    def is_cached(self, uri: str) -> Optional[bool]:
+        return self._owner(uri).is_cached(uri)
+
+    async def prefetch(self, uri: str) -> None:
+        await self._owner(uri).prefetch(uri)
+
+
+def _untitled(track: dict) -> bool:
+    return bool(UNTITLED.match(track.get("name", "").strip()))
+
+
+def _titled(tracks: list[dict]) -> list[dict]:
+    titled = [t for t in tracks if not _untitled(t)]
+    return titled or tracks
+
+
+def _fold(text: str) -> str:
+    """Lower case without diacritics, for comparing words with tags."""
+    text = text.replace("ł", "l").replace("Ł", "L")
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in text if not unicodedata.combining(c)).casefold()
+
+
+def _artists(item: dict) -> str:
+    return " ".join(a.get("name", "") for a in item.get("artists") or [])
+
+
+def _describe(track: dict) -> str:
+    album = track.get("album") or {}
+    return f"{track.get('name', '')} {_artists(track)} {album.get('name', '')} {_artists(album)}"
+
+
+def _matches(words: list[str], text: str) -> int:
+    folded = _fold(text)
+    return sum(w in folded for w in words)
+
+
+def _has_all(words: list[str], text: str) -> bool:
+    return _matches(words, text) == len(words)
+
+
 def _first_artist(item: dict) -> Optional[str]:
     artists = item.get("artists") or []
     return artists[0].get("name") if artists else None
@@ -119,7 +263,7 @@ PROVIDERS = {
 }
 
 
-def create_provider(config: MusicConfig) -> Optional[MopidyMusicProvider]:
+def create_provider(config: MusicConfig):
     if not config.enabled:
         return None
     if config.provider not in PROVIDERS:
@@ -127,4 +271,7 @@ def create_provider(config: MusicConfig) -> Optional[MopidyMusicProvider]:
             f"Unknown music provider '{config.provider}'. Known: {sorted(PROVIDERS)}"
         )
     label, scheme = PROVIDERS[config.provider]
-    return MopidyMusicProvider(label, scheme, config)
+    provider = MopidyMusicProvider(label, scheme, config)
+    if not config.local_first:
+        return provider
+    return FallbackProvider([LocalCollectionProvider("collection", "local:", config), provider])

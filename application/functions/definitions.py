@@ -156,7 +156,7 @@ async def play_music(query: str, kind: str = "track") -> dict:
         return {"status": "error", "details": f"{music_provider.label} search failed."}
     if selection is None:
         return {"status": "error", "details": f"Nothing found on {music_provider.label} for '{query}'."}
-    metrics.MUSIC_PLAYS.labels(provider=music_provider.label, kind=kind).inc()
+    metrics.MUSIC_PLAYS.labels(provider=selection.source or music_provider.label, kind=kind).inc()
     # Before prefetch, which creates the file.
     cached = music_provider.is_cached(selection.uris[0])
     try:
@@ -170,6 +170,8 @@ async def play_music(query: str, kind: str = "track") -> dict:
         "artist": selection.artist,
         "tracks": len(selection.uris),
     }
+    if selection.source:
+        for_model["source"] = selection.source
     if cached is not None:
         for_model["starts"] = "now" if cached else "in_a_few_seconds"
     return {"uris": selection.uris, "title": selection.title, "for_model": for_model}

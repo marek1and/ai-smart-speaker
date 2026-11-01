@@ -228,6 +228,146 @@ async def test_rpc_error_raises(rpc):
         await provider().find("q", "track")
 
 
+# --- local collection first, YouTube as the fallback --------------------------------
+
+def local_track(uri, name, artist, album="", album_uri="", disc=None, no=None):
+    t = {"uri": uri, "name": name, "artists": [{"name": artist}],
+         "album": {"uri": album_uri, "name": album, "artists": [{"name": artist}]}}
+    if disc is not None:
+        t["disc_no"] = disc
+    if no is not None:
+        t["track_no"] = no
+    return t
+
+
+COLLECTION = [
+    local_track("local:track:1", "Whisky", "Dżem", "Cegła", "local:album:cegla"),
+    local_track("local:track:2", "Czerwony jak cegła", "Dżem", "Cegła", "local:album:cegla"),
+    local_track("local:track:3", "Wehikuł czasu", "Dżem", "Najemnik", "local:album:najemnik"),
+    # matched "dzem" only through its path in Mopidy-Local
+    local_track("local:track:4", "Intro", "Kult", "Tata Kazika", "local:album:tata"),
+]
+
+
+def local(n=5):
+    return providers.LocalCollectionProvider("collection", "local:", MusicConfig(enabled=True, artist_tracks=n))
+
+
+async def test_local_track_needs_every_word_in_its_tags(rpc):
+    rpc.replies["core.library.search"] = {"result": [{"tracks": COLLECTION}]}
+    sel = await local().find("Dżem Whisky", "track")
+    assert sel.uris == ["local:track:1"] and sel.source == "collection"
+    assert rpc.sent[0]["params"]["uris"] == ["local:"]
+    assert await local().find("Dżem Rock", "track") is None
+
+
+async def test_local_words_are_compared_without_diacritics(rpc):
+    rpc.replies["core.library.search"] = {"result": [{"tracks": COLLECTION}]}
+    assert (await local().find("dzem wehikul", "track")).uris == ["local:track:3"]
+
+
+async def test_local_artist_queues_only_that_artist(rpc):
+    rpc.replies["core.library.search"] = {"result": [{"tracks": COLLECTION}]}
+    sel = await local(n=10).find("Dżem", "artist")
+    assert sorted(sel.uris) == ["local:track:1", "local:track:2", "local:track:3"]
+    assert (await local(n=2).find("Dżem", "artist")).uris.__len__() == 2
+
+
+async def test_local_artist_with_only_a_guest_track_goes_to_the_provider(rpc):
+    rpc.replies["core.library.search"] = {"result": [{"tracks": [
+        local_track("local:track:g", "Nasze rendez vous", "Kombii, Liber i Doniu")]}]}
+    assert await local().find("Kombii", "artist") is None
+
+
+async def test_local_prefers_titled_tracks_over_untitled_rips(rpc):
+    rips = [local_track(f"local:track:r{i}", f"AudioTrack 0{i}", "Hey") for i in range(1, 4)]
+    named = local_track("local:track:n", "Teksański", "Hey")
+    rpc.replies["core.library.search"] = {"result": [{"tracks": rips + [named]}]}
+    sel = await local(n=15).find("Hey", "artist")
+    assert sel.uris[0] == "local:track:n" and sel.title == "Teksański" and len(sel.uris) == 4
+    assert len((await local(n=2).find("Hey", "artist")).uris) == 2
+    rpc.replies["core.library.search"] = {"result": [{"tracks": rips}]}
+    assert len((await local(n=15).find("Hey", "artist")).uris) == 3
+
+
+async def test_local_album_plays_in_disc_and_track_order(rpc):
+    rpc.replies["core.library.search"] = {"result": [{"tracks": COLLECTION}]}
+    rpc.replies["core.library.lookup"] = {"result": {"local:album:cegla": [
+        local_track("local:track:b", "B", "Dżem", disc=2, no=1),
+        local_track("local:track:a2", "A2", "Dżem", disc=1, no=2),
+        local_track("local:track:a1", "A1", "Dżem", disc=1, no=1),
+    ]}}
+    sel = await local().find("Dżem Cegła", "album")
+    assert sel.uris == ["local:track:a1", "local:track:a2", "local:track:b"] and sel.title == "Cegła"
+
+
+async def test_local_tracks_start_at_once_and_are_not_prefetched(rpc):
+    assert local().is_cached("local:track:1") is True
+    await local().prefetch("local:track:1")
+    assert rpc.sent == []
+
+
+class StubProvider:
+    def __init__(self, label, scheme, selection=None, exc=None):
+        self.label, self.uri_scheme, self.selection, self.exc = label, scheme, selection, exc
+        self.prefetched = []
+
+    async def find(self, query, kind):
+        if self.exc:
+            raise self.exc
+        return self.selection
+
+    def is_cached(self, uri):
+        return self.label
+
+    async def prefetch(self, uri):
+        self.prefetched.append(uri)
+
+
+async def test_fallback_uses_youtube_only_when_the_collection_has_nothing():
+    yt_sel = providers.MusicSelection(["youtube:video:x"], "T", "A", "YouTube")
+    local_sel = providers.MusicSelection(["local:track:1"], "Whisky", "Dżem", "collection")
+    chain = providers.FallbackProvider([StubProvider("collection", "local:", local_sel),
+                                        StubProvider("YouTube", "youtube:", yt_sel)])
+    assert (await chain.find("q", "track")).source == "collection"
+    chain = providers.FallbackProvider([StubProvider("collection", "local:", None),
+                                        StubProvider("YouTube", "youtube:", yt_sel)])
+    assert (await chain.find("q", "track")).source == "YouTube"
+
+
+async def test_fallback_skips_a_broken_collection_but_not_a_broken_last_provider(caplog):
+    yt_sel = providers.MusicSelection(["youtube:video:x"], "T", "A", "YouTube")
+    chain = providers.FallbackProvider([StubProvider("collection", "local:", exc=OSError("db")),
+                                        StubProvider("YouTube", "youtube:", yt_sel)])
+    assert (await chain.find("q", "track")).source == "YouTube"
+    assert any(r.exc_info for r in caplog.records if "trying the next provider" in r.getMessage())
+    chain = providers.FallbackProvider([StubProvider("collection", "local:", None),
+                                        StubProvider("YouTube", "youtube:", exc=OSError("down"))])
+    with pytest.raises(OSError):
+        await chain.find("q", "track")
+
+
+async def test_fallback_routes_cache_and_prefetch_by_uri_scheme():
+    loc, yt = StubProvider("collection", "local:"), StubProvider("YouTube", "youtube:")
+    chain = providers.FallbackProvider([loc, yt])
+    assert chain.is_cached("local:track:1") == "collection"
+    assert chain.is_cached("youtube:video:x") == "YouTube"
+    await chain.prefetch("youtube:video:x")
+    assert yt.prefetched == ["youtube:video:x"] and loc.prefetched == []
+
+
+def test_local_first_builds_the_chain():
+    chain = providers.create_provider(MusicConfig(enabled=True, local_first=True))
+    assert isinstance(chain, providers.FallbackProvider) and chain.label == "collection or YouTube"
+    assert isinstance(providers.create_provider(MusicConfig(enabled=True)), providers.MopidyMusicProvider)
+
+
+async def test_play_music_tells_the_model_the_source(monkeypatch):
+    p = FakeProvider(selection=providers.MusicSelection(["local:track:1"], "Whisky", "Dżem", "collection"))
+    monkeypatch.setattr(d, "music_provider", p)
+    assert (await d.play_music("Dżem Whisky"))["for_model"]["source"] == "collection"
+
+
 def test_unknown_provider_rejected_and_disabled_gives_none():
     with pytest.raises(ValueError):
         providers.create_provider(MusicConfig(enabled=True, provider="tidal"))

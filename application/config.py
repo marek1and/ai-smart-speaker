@@ -300,6 +300,12 @@ class MusicConfig:
     search_timeout: float = 10.0
     # Tracks queued for an artist request.
     artist_tracks: int = 15
+    # Search the Mopidy-Local collection first; the provider above is the
+    # fallback when the collection has nothing that matches every word.
+    local_first: bool = False
+    # An artist request with fewer collection tracks than this (e.g. only a
+    # guest appearance) goes to the provider, which has more of them.
+    local_min_artist_tracks: int = 3
     # Mopidy-YouTube's allow_cache directory. A track found there starts at
     # once, others download first (~8 s); empty: not reported to the model.
     cache_dir: str = ""
