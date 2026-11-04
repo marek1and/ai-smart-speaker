@@ -762,6 +762,12 @@ async def test_gemini_long_pause_before_more_speech_is_cut(gemini, monkeypatch):
     assert abs(silence - 0.25) < 0.01
 
 
+def test_gemini_input_transcription_is_in_the_session_language(gemini):
+    # without it "Krystyna, zgaś telewizję" came out as "cocina" (02.11.2026)
+    conf = gemini._get_session_config()
+    assert conf.input_audio_transcription.language_codes == [gemini.live_cfg.lang]
+
+
 async def test_gemini_turn_complete_within_the_grace_ends_the_turn_once(gemini, monkeypatch):
     monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.2)
     ended = []

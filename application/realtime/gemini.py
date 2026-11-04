@@ -257,8 +257,9 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 ),
                 language_code=self.live_cfg.lang,
             ),
-            # Enable audio transcription for logging
-            input_audio_transcription=AudioTranscriptionConfig(),
+            # Without the language the transcript guessed it ("cocina" for
+            # "Krystyna, zgaś telewizję", 02.11.2026).
+            input_audio_transcription=AudioTranscriptionConfig(language_codes=[self.live_cfg.lang]),
             output_audio_transcription=AudioTranscriptionConfig(),
             # Enable Google Search tool
             tools=TOOLS + [Tool(google_search=GoogleSearch())],
