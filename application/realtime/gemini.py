@@ -575,6 +575,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                         if hasattr(part, "inline_data") and part.inline_data:
                             data = part.inline_data
                             if isinstance(data.data, bytes) and len(data.data) > 0:
+                                if self._on_model_audio:
+                                    self._on_model_audio(data.data)
                                 # Skip if playback is interrupted (barge-in)
                                 if self._playback_interrupted:
                                     continue

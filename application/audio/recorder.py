@@ -51,19 +51,24 @@ class SessionRecorder:
 
     Owns the WAV file lifecycle independently of the orchestrator.
     All public methods are safe to call when no recording is active (no-ops).
+    The microphone goes to session_*.wav; the model's audio, every chunk it
+    sent whether played or not, to session_*_model.wav next to it.
 
     Usage::
 
-        recorder = SessionRecorder(sample_rate=16000)
+        recorder = SessionRecorder(sample_rate=16000, model_sample_rate=24000)
         recorder.start()
-        recorder.write(pcm_bytes)   # called for every audio frame
+        recorder.write(pcm_bytes)        # called for every audio frame
+        recorder.write_model(pcm_bytes)  # called for every model audio chunk
         recorder.close()
     """
 
-    def __init__(self, sample_rate: int) -> None:
+    def __init__(self, sample_rate: int, model_sample_rate: Optional[int] = None) -> None:
         self._sample_rate = sample_rate
+        self._model_sample_rate = model_sample_rate
         self._wav_file: Optional[wave.Wave_write] = None
         self._wav_path: Optional[str] = None
+        self._model_file: Optional[wave.Wave_write] = None
 
     @property
     def is_active(self) -> bool:
@@ -95,8 +100,32 @@ class SessionRecorder:
         if self._wav_file:
             self._wav_file.writeframes(data)
 
+    def write_model(self, data: bytes) -> None:
+        """Write model audio; the file is created with the first chunk."""
+        if not self._wav_file or not self._model_sample_rate:
+            return
+        if not self._model_file:
+            self._model_file = wave.open(self._model_path(self._wav_path), "wb")
+            self._model_file.setnchannels(1)
+            self._model_file.setsampwidth(2)
+            self._model_file.setframerate(self._model_sample_rate)
+        self._model_file.writeframes(data)
+
+    @staticmethod
+    def _model_path(wav_path: str) -> str:
+        return wav_path[: -len(".wav")] + "_model.wav"
+
+    def _close_model(self) -> bool:
+        """Close the model recording; True when there was one."""
+        if not self._model_file:
+            return False
+        self._model_file.close()
+        self._model_file = None
+        return True
+
     def close(self) -> None:
         """Close and flush the current recording. No-op if inactive."""
+        self._close_model()
         if self._wav_file:
             self._wav_file.close()
             logger.info("Closed session recording: %s", self._wav_path)
@@ -112,6 +141,7 @@ class SessionRecorder:
         """
         if not self._wav_file:
             return
+        had_model = self._close_model()
         self._wav_file.close()
         self._wav_file = None
         if self._wav_path and os.path.exists(self._wav_path):
@@ -119,5 +149,7 @@ class SessionRecorder:
             new_basename = basename.replace("session_", "false_wake_", 1)
             new_path = os.path.join(_RECORDINGS_DIR, new_basename)
             os.rename(self._wav_path, new_path)
+            if had_model:
+                os.rename(self._model_path(self._wav_path), self._model_path(new_path))
             logger.info("False trigger recording saved: %s", new_path)
         self._wav_path = None

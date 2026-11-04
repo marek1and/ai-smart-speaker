@@ -167,7 +167,9 @@ class AudioOrchestrator:
         self._api_manager: Optional[BaseRealtimeManager] = None
 
         # Session recorder — manages WAV file lifecycle per API session
-        self._recorder = SessionRecorder(self.audio_cfg.input_sample_rate)
+        self._recorder = SessionRecorder(
+            self.audio_cfg.input_sample_rate, self.audio_cfg.output_sample_rate
+        )
 
         # Warmup control (prevent false wake word triggers after state transitions)
         self._frames_since_reset: int = 0
@@ -357,6 +359,7 @@ class AudioOrchestrator:
             on_turn_timeout=self._on_turn_timeout,
             on_error=self._on_api_error,
             on_deferred=self._on_deferred_action,
+            on_model_audio=self._recorder.write_model,
         )
 
         # Initialize ReSpeaker LEDs

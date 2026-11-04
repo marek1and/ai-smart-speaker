@@ -52,6 +52,7 @@ class BaseRealtimeManager(ABC):
         self._on_turn_timeout: Optional[Callable[[], None]] = None
         self._on_error: Optional[Callable[[], None]] = None
         self._on_deferred: Optional[Callable[[dict], None]] = None
+        self._on_model_audio: Optional[Callable[[bytes], None]] = None
         # Appended to the system instruction when a session opens (current
         # device states); set by the orchestrator before open_session().
         self.session_context: str = ""
@@ -295,9 +296,11 @@ class BaseRealtimeManager(ABC):
         on_turn_timeout: Optional[Callable[[], None]] = None,
         on_error: Optional[Callable[[], None]] = None,
         on_deferred: Optional[Callable[[dict], None]] = None,
+        on_model_audio: Optional[Callable[[bytes], None]] = None,
     ) -> None:
         """Set callbacks for API events. on_deferred gets each deferred action
-        as it is queued (play_music starts before the reply ends)."""
+        as it is queued (play_music starts before the reply ends);
+        on_model_audio gets every audio chunk the model sent, played or not."""
         self._on_audio_received = on_audio_received
         self._on_text_received = on_text_received
         self._on_turn_complete = on_turn_complete
@@ -305,6 +308,7 @@ class BaseRealtimeManager(ABC):
         self._on_turn_timeout = on_turn_timeout
         self._on_error = on_error
         self._on_deferred = on_deferred
+        self._on_model_audio = on_model_audio
 
     @property
     def awaiting_reply(self) -> bool:
