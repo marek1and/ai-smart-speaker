@@ -197,6 +197,11 @@ class LiveConfig:
     # Gemini: longest pause inside an answer that is played; longer silence
     # before more speech is cut to this.
     max_played_pause: float = 1.0
+    # Gemini: voice past voice_budget_slack + this many seconds per character of
+    # the output transcript is not played and ends the turn (normal answers take
+    # up to 0.10 s/char; 51 s once came for "Włączam Polsat."). 0 disables.
+    voice_budget_per_char: float = 0.15
+    voice_budget_slack: float = 3.0
     # Log every message to/from the Gemini API as one line per turn (debugging).
     trace_api_events: bool = False
     audio_done_watchdog_timeout: float = 3.0  # Tighter watchdog after audio stream ends (OpenAI response.output_audio.done)

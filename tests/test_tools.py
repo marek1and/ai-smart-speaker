@@ -762,6 +762,75 @@ async def test_gemini_long_pause_before_more_speech_is_cut(gemini, monkeypatch):
     assert abs(silence - 0.25) < 0.01
 
 
+def said(text):
+    return server(output_transcription=SimpleNamespace(text=text))
+
+
+async def test_gemini_voice_past_the_transcript_budget_is_not_played_and_ends_the_turn(gemini, monkeypatch):
+    # 03.11.2026: 51 s of audio came for "Włączam Polsat."; the speaker sat in
+    # RESPONDING until the drain timeout
+    monkeypatch.setattr(gemini.live_cfg, "voice_budget_per_char", 0.1)
+    monkeypatch.setattr(gemini.live_cfg, "voice_budget_slack", 0.2)
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.05)
+    ended, recorded = [], []
+    gemini.set_callbacks(on_turn_complete=lambda: ended.append(True), on_model_audio=recorded.append)
+    gemini._frames_sent, gemini._response_started = 1000, True
+    gemini._timing_start()
+    await gemini._process_api_response(said("abc"))  # budget 0.2 + 3 x 0.1 = 0.5 s
+    for _ in range(10):
+        await gemini._process_api_response(audio_msg(8000))  # 0.1 s each
+    assert gemini._output_queue.qsize() == 5
+    assert len(recorded) == 10  # the recording keeps what was not played
+    await asyncio.sleep(0.1)
+    assert ended == [True]
+    assert abs(gemini._timing["dropped"] - 0.5) < 1e-6
+
+
+async def test_gemini_voice_budget_follows_a_lagging_transcript(gemini, monkeypatch):
+    # the transcript comes in pieces, interleaved with the audio
+    monkeypatch.setattr(gemini.live_cfg, "voice_budget_per_char", 0.1)
+    monkeypatch.setattr(gemini.live_cfg, "voice_budget_slack", 0.2)
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.05)
+    ended = []
+    gemini.set_callbacks(on_turn_complete=lambda: ended.append(True))
+    gemini._frames_sent, gemini._response_started = 1000, True
+    await gemini._process_api_response(said("ab"))  # 0.4 s
+    for _ in range(5):
+        await gemini._process_api_response(audio_msg(8000))
+    await gemini._process_api_response(said(" and the rest of the answer"))
+    await gemini._process_api_response(audio_msg(8000))  # played again, the end is called off
+    await asyncio.sleep(0.1)
+    assert ended == [] and gemini._output_queue.qsize() == 5
+    gemini._cancel_generation_end()
+
+
+async def test_gemini_voice_budget_needs_a_transcript_and_resets_each_turn(gemini, monkeypatch):
+    monkeypatch.setattr(gemini.live_cfg, "voice_budget_per_char", 0.1)
+    monkeypatch.setattr(gemini.live_cfg, "voice_budget_slack", 0.0)
+    gemini._frames_sent, gemini._response_started = 1000, True
+    for _ in range(5):
+        await gemini._process_api_response(audio_msg(8000))  # no transcript: not judged
+    assert gemini._output_queue.qsize() == 5
+    await gemini._process_api_response(said("a"))  # 0.1 s, already spent
+    await gemini._process_api_response(audio_msg(8000))
+    assert gemini._output_queue.qsize() == 5
+    gemini._cancel_generation_end()
+    gemini.start_new_turn()
+    gemini._frames_sent, gemini._response_started = 1000, True
+    await gemini._process_api_response(said("a"))
+    await gemini._process_api_response(audio_msg(8000))
+    assert gemini._output_queue.qsize() == 6
+
+
+async def test_gemini_voice_budget_off_plays_everything(gemini, monkeypatch):
+    monkeypatch.setattr(gemini.live_cfg, "voice_budget_per_char", 0)
+    gemini._frames_sent, gemini._response_started = 1000, True
+    await gemini._process_api_response(said("a"))
+    for _ in range(60):
+        await gemini._process_api_response(audio_msg(8000))
+    assert gemini._output_queue.qsize() == 60
+
+
 def test_gemini_input_transcription_is_in_the_session_language(gemini):
     # without it "Krystyna, zgaś telewizję" came out as "cocina" (02.11.2026)
     conf = gemini._get_session_config()

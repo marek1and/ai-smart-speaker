@@ -89,6 +89,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         self._held_bytes: int = 0
         self._ended_early: bool = False  # this turn already ended before turn_complete
         self._voice_seen: bool = False  # the model said something this turn
+        self._voice_played: float = 0.0  # seconds of voice queued for the speaker this turn
+        self._voice_dropped: float = 0.0  # seconds of voice over the transcript budget
 
     def _silence_run_is_notable(self, run_length: int) -> bool:
         """Is this silent-chunk run long enough to warrant a warning?
@@ -134,6 +136,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         self._held_silence, self._held_bytes = [], 0
         self._ended_early = False
         self._voice_seen = False
+        self._voice_played = self._voice_dropped = 0.0
 
     def _on_watchdog_timeout(self) -> None:
         # The turn ended without turn_complete: a late one expected for an
@@ -162,6 +165,26 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             await self._output_queue.put(held[:budget])
             budget -= len(held)
         self._held_silence, self._held_bytes = [], 0
+
+    def _over_voice_budget(self, seconds: float) -> bool:
+        """Is this voice chunk more than the output transcript accounts for?
+        Gemini once sent 51 s of audio for "Włączam Polsat." (03.11.2026);
+        normal answers take up to 0.10 s per character."""
+        per_char = self.live_cfg.voice_budget_per_char
+        chars = len(self._ai_transcript.strip())
+        if not per_char or not chars:
+            return False  # disabled, or no transcript to judge by
+        budget = self.live_cfg.voice_budget_slack + chars * per_char
+        if self._voice_played + seconds <= budget:
+            return False
+        if not self._voice_dropped:
+            logger.warning(
+                "Voice past %.1fs for a %d-character transcript — not played", budget, chars
+            )
+        self._voice_dropped += seconds
+        if self._timing:
+            self._timing["dropped"] = self._voice_dropped
+        return True
 
     def _trace_event(self, kind: str, audio_seconds: float = 0.0) -> None:
         """Records an API event; consecutive events of one kind become one entry."""
@@ -209,10 +232,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         self._timing = {}
         logger.info(
             "Turn timing (%s): first_audio=%ss first_voice=%ss generation_complete=%ss "
-            "turn_complete=%.1fs audio=%.1fs of which silent=%.1fs, trailing silence not played=%.1fs",
+            "turn_complete=%.1fs audio=%.1fs of which silent=%.1fs, trailing silence not played=%.1fs, "
+            "voice over budget not played=%.1fs",
             how, t.get("first_audio", "-"), t.get("first_voice", "-"),
             t.get("generation_complete", "-"), time.monotonic() - t["t0"], t["audio"], t["silent"],
-            t.get("trimmed", 0.0),
+            t.get("trimmed", 0.0), t.get("dropped", 0.0),
         )
 
     def _get_session_config(self) -> LiveConnectConfig:
@@ -656,6 +680,10 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                                     self._held_bytes += len(data.data)
                                     self._end_turn_on_long_silence()
                                     continue
+                                if self._over_voice_budget(seconds):
+                                    if not self._generation_end_task:
+                                        self._schedule_turn_end()
+                                    continue
                                 if self._ended_early:
                                     # Measures how often trailing_silence_end cuts an answer.
                                     logger.warning("Speech after the turn already ended early")
@@ -663,6 +691,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                                 self._cancel_generation_end()  # the model is still talking
                                 await self._release_held_silence()
 
+                                self._voice_played += seconds
                                 await self._output_queue.put(data.data)
                                 if self._chunks_received == 1:
                                     logger.info("Receiving audio response (chunk_bytes=%d, rms=%.5f)...", len(data.data), rms)
