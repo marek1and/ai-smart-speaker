@@ -372,6 +372,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             self._timing_start()
             self._trace_event("→activity_end")
             logger.info("Sent activity_end to API")
+            # Ends a turn the API never answers; audio and tool calls restart it.
+            self.start_watchdog(self.live_cfg.turn_watchdog_timeout)
         except ConnectionClosed as e:
             # The session can be closed between the checks above and the send
             # (e.g. initial-silence close racing local VAD) — normal shutdown,

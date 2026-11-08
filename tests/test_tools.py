@@ -943,3 +943,31 @@ def test_both_backends_await_the_reply_after_activity_end_and_a_typed_request():
 def test_deferred_tools_exist():
     from realtime.base import BaseRealtimeManager
     assert BaseRealtimeManager.DEFERRED_FUNCTIONS <= set(FUNCTIONS)
+
+
+# --- turn watchdog in the Gemini manager ----------------------------------------------
+
+class _ActivitySession:
+    async def send_realtime_input(self, **kwargs):
+        pass
+
+
+async def test_unanswered_activity_end_times_out(gemini, monkeypatch):
+    # 07.11.2026: Gemini sent nothing after activity_end, the turn hung until a 1008 close
+    monkeypatch.setattr(gemini.live_cfg, "turn_watchdog_timeout", 0.01)
+    timeouts = []
+    gemini.set_callbacks(on_turn_timeout=lambda: timeouts.append(1))
+    gemini._session, gemini._session_active, gemini._activity_started = _ActivitySession(), True, True
+    await gemini.send_activity_end()
+    assert gemini.awaiting_reply
+    await asyncio.sleep(0.05)
+    assert timeouts == [1]
+
+
+async def test_turn_complete_cancels_the_activity_end_watchdog(gemini):
+    gemini._session, gemini._session_active, gemini._activity_started = _ActivitySession(), True, True
+    await gemini.send_activity_end()
+    assert gemini._watchdog_task is not None
+    gemini._frames_sent = gemini._min_frames_for_turn_complete
+    await gemini._process_api_response(SimpleNamespace(server_content=SimpleNamespace(turn_complete=True)))
+    assert gemini._watchdog_task is None

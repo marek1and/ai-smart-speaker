@@ -1182,9 +1182,16 @@ class AudioOrchestrator:
             self._turn_complete_event.clear()
             logger.info("Turn complete without audio response")
             self._listening_entry_time = None
-            if self._text_turn is not None:
-                # The answer is over even without audio; _finish_turn would
-                # skip a LISTENING state as a barge-in and leave it hanging.
+            # A voice turn keeps waiting for late audio (05.09.2026) only while
+            # the API ended it and the session lives. After an API error or the
+            # watchdog (still awaiting_reply) nothing would leave LISTENING:
+            # deaf until restart on 07.11.2026. _finish_turn skips LISTENING
+            # as a barge-in, hence RESPONDING first.
+            if (
+                self._text_turn is not None
+                or not self._api_manager.session_active
+                or self._api_manager.awaiting_reply
+            ):
                 self._set_state(SpeakerState.RESPONDING)
             await self._execute_post_response_actions()
             return

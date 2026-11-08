@@ -197,10 +197,32 @@ async def test_unanswered_text_turn_ends_and_is_reported(make):
 async def test_voice_turn_without_audio_still_waits_in_listening(make):
     # unchanged for speech: late audio after turn_complete still plays (05.09.2026)
     o = make()
+    o._api_manager.session_active = True
     o._state = SpeakerState.LISTENING
     o._turn_complete_event.set()
     await o._handle_listening_state()
     assert o.state == SpeakerState.LISTENING
+
+
+async def test_voice_turn_ends_after_an_api_error(make):
+    # 07.11.2026: 1008 closed the session, LISTENING ignored the wake word until restart
+    o = make()
+    o._api_manager.session_active = False
+    o._state = SpeakerState.LISTENING
+    o._on_api_error()
+    await o._handle_listening_state()
+    assert o.state == SpeakerState.IDLE
+    assert SoundEvent.ERROR in o._sound_player.played
+
+
+async def test_voice_turn_the_api_never_answered_ends_on_the_watchdog(make):
+    o = make()
+    o._api_manager.session_active = True
+    o._api_manager.awaiting_reply = True  # activity_end sent, no turn_complete
+    o._state = SpeakerState.LISTENING
+    o._on_turn_timeout()
+    await o._handle_listening_state()
+    assert o.state == SpeakerState.IDLE
 
 
 async def test_idle_loop_wakes_at_once_for_text(make):
