@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import math
 import re
 import time
 import numpy as np
@@ -759,23 +760,29 @@ class MPDClientWrapper:
 
     @staticmethod
     def _map_volume_to_curve(percentage: int) -> int:
-        """Maps a linear percentage to a square root curve (y = sqrt(x))."""
+        """Volume percentage to the linear gain (0-100) of Mopidy's software mixer.
+
+        gain = (exp(4 * sqrt(p)) - 1) / (e^4 - 1): the square root this app
+        always applied, followed by the curve of MPD's software mixer, which
+        Mopidy does not have. With the square root alone a duck from 50% to
+        20% was 4 dB instead of the 10 dB it was under MPD.
+        """
         if percentage <= 0:
             return 0
         if percentage >= 100:
             return 100
-        mapped_val = (percentage / 100.0) ** 0.5
-        return int(round(mapped_val * 100))
+        gain = math.expm1(4.0 * math.sqrt(percentage / 100.0)) / math.expm1(4.0)
+        return int(round(gain * 100))
 
     @staticmethod
     def _map_volume_from_curve(mapped_percentage: int) -> int:
-        """Maps a square root curve percentage back to linear (x = y^2)."""
+        """Inverse of _map_volume_to_curve."""
         if mapped_percentage <= 0:
             return 0
         if mapped_percentage >= 100:
             return 100
-        linear_val = (mapped_percentage / 100.0) ** 2
-        return int(round(linear_val * 100))
+        root = math.log1p(mapped_percentage / 100.0 * math.expm1(4.0)) / 4.0
+        return int(round(root**2 * 100))
 
     async def _set_internal_volume_unsafe(self, linear_volume: int):
         """

@@ -3,6 +3,7 @@
 cancelled fade, every play crashing on clearerror) and radio/music sharing one
 queue."""
 import asyncio
+import math
 import time
 
 import pytest
@@ -53,6 +54,19 @@ async def test_start_queue_mpd_error_leaves_state_untouched(client, mopidy):
 def test_volume_curve_round_trip(pct):
     w = mpd_module.MPDClientWrapper
     assert abs(w._map_volume_from_curve(w._map_volume_to_curve(pct)) - pct) <= 1
+
+
+def test_duck_from_half_volume_is_about_ten_db():
+    # the square-root curve alone gave 4 dB on Mopidy's linear mixer: barely audible
+    w = mpd_module.MPDClientWrapper
+    drop = 20 * math.log10(w._map_volume_to_curve(20) / w._map_volume_to_curve(50))
+    assert -11.5 < drop < -9
+
+
+def test_volume_curve_never_decreases_and_keeps_quiet_levels_audible():
+    w = mpd_module.MPDClientWrapper
+    gains = [w._map_volume_to_curve(p) for p in range(101)]
+    assert gains == sorted(gains) and gains[0] == 0 and gains[1] >= 1 and gains[100] == 100
 
 
 async def test_volume_zero_stops_and_keeps_restore_volume(client, mopidy):
