@@ -205,6 +205,49 @@ async def test_voice_turn_without_audio_still_waits_in_listening(make):
     assert o.state == SpeakerState.LISTENING
 
 
+async def test_voice_turn_without_audio_ends_when_nothing_follows(make, monkeypatch):
+    # nothing left LISTENING: the microphone streamed to the API until somebody spoke
+    o = make()
+    o._api_manager.session_active = True
+    o._state = SpeakerState.LISTENING
+    closed_as_false = []
+    o._recorder.close_as_false_trigger = lambda: closed_as_false.append(1)
+    o._turn_complete_event.set()
+    await o._handle_listening_state()
+    now = orch.time.time()
+    monkeypatch.setattr(orch.time, "time", lambda: now + get_config().live.initial_silence_timeout + 1)
+    await o._handle_listening_state()
+    assert o.state == SpeakerState.IDLE
+    # the user did speak: not a false wake word, the session stays for the next one
+    assert not closed_as_false and o._api_manager.closed == 0
+    assert SoundEvent.END_CONVERSATION in o._sound_player.played
+
+
+async def test_voice_turn_without_audio_keeps_listening_once_the_user_speaks(make, monkeypatch):
+    o = make()
+    o._api_manager.session_active = True
+    o._state = SpeakerState.LISTENING
+    o._turn_complete_event.set()
+    await o._handle_listening_state()
+    o._api_manager.activity_started = True
+    now = orch.time.time()
+    monkeypatch.setattr(orch.time, "time", lambda: now + get_config().live.initial_silence_timeout + 1)
+    await o._handle_listening_state()
+    assert o.state == SpeakerState.LISTENING
+
+
+async def test_silence_after_the_wake_word_is_still_a_false_trigger(make, monkeypatch):
+    o = make()
+    o._wake_event.set()
+    await o._handle_idle_state()
+    closed_as_false = []
+    o._recorder.close_as_false_trigger = lambda: closed_as_false.append(1)
+    now = orch.time.time()
+    monkeypatch.setattr(orch.time, "time", lambda: now + get_config().live.initial_silence_timeout + 1)
+    await o._handle_listening_state()
+    assert o.state == SpeakerState.IDLE and closed_as_false and o._api_manager.closed == 1
+
+
 async def test_voice_turn_ends_after_an_api_error(make):
     # 07.11.2026: 1008 closed the session, LISTENING ignored the wake word until restart
     o = make()

@@ -178,6 +178,9 @@ class AudioOrchestrator:
         # Initial silence timeout: tracks when we entered LISTENING from IDLE.
         # None means the check is disabled (barge-in or follow-up path).
         self._listening_entry_time: Optional[float] = None
+        # The deadline was re-armed after a reply without audio: when it
+        # passes, the turn ends normally instead of as a false trigger.
+        self._reply_was_empty: bool = False
 
         # Counts completed turns in the current session. Reset when a new session
         # is opened; when it reaches session_max_turns the session is closed at
@@ -1158,6 +1161,7 @@ class AudioOrchestrator:
         await self._send_preroll()
         # Arm initial-silence check — no speech detected yet after wake word.
         self._listening_entry_time = time.time()
+        self._reply_was_empty = False
         self._set_state(SpeakerState.LISTENING)
 
     async def _handle_listening_state(self) -> None:
@@ -1199,6 +1203,12 @@ class AudioOrchestrator:
             ):
                 self._set_state(SpeakerState.RESPONDING)
             await self._execute_post_response_actions()
+            if self._state == SpeakerState.LISTENING:
+                # Late audio gets as long as speech after the wake word; with
+                # no deadline the microphone streamed to the API until
+                # somebody spoke or the server closed the session.
+                self._listening_entry_time = time.time()
+                self._reply_was_empty = True
             return
 
         # Initial silence timeout: no speech detected since wake word —
@@ -1208,6 +1218,9 @@ class AudioOrchestrator:
         ):
             elapsed = time.time() - self._listening_entry_time
             if elapsed > self.live_cfg.initial_silence_timeout:
+                if self._reply_was_empty:
+                    await self._end_turn_after_empty_reply(elapsed)
+                    return
                 logger.info(
                     "Initial silence timeout (%.1fs) — no speech after wake word, likely false trigger.",
                     elapsed,
@@ -1493,6 +1506,15 @@ class AudioOrchestrator:
             )
         else:
             logger.info("Listening for wake word...")
+
+    async def _end_turn_after_empty_reply(self, waited: float) -> None:
+        """The user spoke and the API answered with nothing: a finished turn,
+        not a false wake word, so the session and its recording stay."""
+        logger.info("No late audio %.1fs after an empty reply, ending turn.", waited)
+        self._listening_entry_time = None
+        # _finish_turn skips a LISTENING state (its barge-in guard).
+        self._set_state(SpeakerState.IDLE)
+        await self._finish_turn(play_end_sound=not await self.mpd_client.is_playing())
 
     async def _close_on_initial_silence(self) -> None:
         """Close session silently after a false-positive wake word.
