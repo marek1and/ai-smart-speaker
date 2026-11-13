@@ -229,6 +229,11 @@ live:
   # answers take up to 0.10 s/char). 0 disables.
   voice_budget_per_char: 0.15
   voice_budget_slack: 3.0
+  # Gemini: less voice than this per transcript character counts as an incomplete
+  # answer (warning + speaker_truncated_answers_total). 0 disables.
+  min_voice_per_char: 0.045
+  # Gemini: a chunk whose high-passed level is below this carries no voice.
+  output_silence_highpass_threshold: 0.0015
   # One log line per turn with every message to/from the Gemini API (debugging).
   trace_api_events: false
 

@@ -666,7 +666,8 @@ async def test_gemini_logs_the_turn_timeline_when_turn_complete_comes(gemini, mo
 
 def audio_msg(level):
     import numpy as np
-    pcm = (np.ones(2400) * level).astype(np.int16).tobytes()
+    # alternating samples: silence is judged on the high-passed signal
+    pcm = (np.resize([1, -1], 2400) * level).astype(np.int16).tobytes()
     part = SimpleNamespace(inline_data=SimpleNamespace(data=pcm), text=None)
     return server(model_turn=SimpleNamespace(parts=[part]))
 
@@ -971,3 +972,87 @@ async def test_turn_complete_cancels_the_activity_end_watchdog(gemini):
     gemini._frames_sent = gemini._min_frames_for_turn_complete
     await gemini._process_api_response(SimpleNamespace(server_content=SimpleNamespace(turn_complete=True)))
     assert gemini._watchdog_task is None
+
+
+def tone(freq, rms, seconds=0.2):
+    import numpy as np
+    t = np.arange(int(24000 * seconds)) / 24000
+    return (np.sin(2 * np.pi * freq * t) * rms * 2 ** 0.5 * 32768).astype(np.int16).tobytes()
+
+
+def tone_msg(freq, rms, seconds=0.2):
+    part = SimpleNamespace(inline_data=SimpleNamespace(data=tone(freq, rms, seconds)), text=None)
+    return server(model_turn=SimpleNamespace(parts=[part]))
+
+
+@pytest.mark.parametrize("data, silent", [
+    (tone(100, 0.017), True),    # the rumble of 12.11.2026 at its loudest
+    (tone(60, 0.004), True),
+    (tone(1000, 0.1), False),    # voice band at a normal level
+    (tone(300, 0.05), False),    # a low, quiet voice
+    (b"\x00\x00", True),         # the 2-byte chunks of an empty answer
+    (b"", True),
+])
+def test_gemini_rumble_and_empty_chunks_are_silence(gemini, data, silent):
+    assert gemini._is_silent(data) is silent
+
+
+async def test_gemini_rumble_is_not_played_and_trails_the_voice_as_silence(gemini):
+    # 12.11.2026: 11.6 s of rumble below 300 Hz came for "Włączam RMF Classic."
+    gemini._frames_sent = 1000
+    for _ in range(10):
+        await gemini._process_api_response(tone_msg(100, 0.012))
+    assert gemini._output_queue.empty() and not gemini._voice_seen
+    await gemini._process_api_response(tone_msg(1000, 0.2))
+    played = gemini._output_queue.qsize()
+    await gemini._process_api_response(tone_msg(100, 0.012))
+    assert gemini._output_queue.qsize() == played
+
+
+def truncated_answers():
+    import metrics
+    return metrics.TRUNCATED_ANSWERS._value.get()
+
+
+@pytest.mark.parametrize("voice_seconds, counted", [(1.0, 1), (2.6, 0)])
+async def test_gemini_answer_with_too_little_voice_is_counted(gemini, voice_seconds, counted):
+    # 09.11.2026: 1.0 s of voice, then 12 s of silence
+    gemini._frames_sent = 1000
+    before = truncated_answers()
+    await gemini._process_api_response(tone_msg(1000, 0.2, voice_seconds))
+    await gemini._process_api_response(said("Radio już gra, głośność 50 procent."))
+    await gemini._process_api_response(server(turn_complete=True))
+    assert truncated_answers() - before == counted
+
+
+async def test_gemini_empty_answer_ended_after_generation_complete_is_counted(gemini, monkeypatch):
+    monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.01)
+    gemini._frames_sent = 1000
+    before = truncated_answers()
+    part = SimpleNamespace(inline_data=SimpleNamespace(data=b"\x00\x00"), text=None)
+    await gemini._process_api_response(server(model_turn=SimpleNamespace(parts=[part])))
+    await gemini._process_api_response(said("Włączam Polsat."))
+    await gemini._process_api_response(server(generation_complete=True))
+    await asyncio.sleep(0.05)
+    assert truncated_answers() - before == 1
+
+
+async def test_gemini_turn_without_a_transcript_is_not_counted_as_truncated(gemini):
+    gemini._frames_sent = 1000
+    before = truncated_answers()
+    await gemini._process_api_response(server(turn_complete=True))
+    assert truncated_answers() == before
+
+
+async def test_gemini_session_end_logs_the_pending_turn_timing(gemini, caplog):
+    # it used to come out hours later with the next session ("turn_complete=53564.4s")
+    class Live:
+        def connect(self, **k):
+            raise RuntimeError("no session")
+
+    gemini._client = SimpleNamespace(aio=SimpleNamespace(live=Live()))
+    gemini._timing_start()
+    with caplog.at_level("INFO"):
+        await gemini._run_conversation()
+    assert gemini._timing == {} and gemini._trace == []
+    assert "session closed before its turn_complete" in caplog.text

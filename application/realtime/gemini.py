@@ -112,6 +112,16 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         arr = np.frombuffer(data, dtype=np.int16).astype(np.float32)
         return float(np.sqrt(np.mean(np.square(arr)))) / 32768.0
 
+    def _is_silent(self, data: bytes) -> bool:
+        """No voice in this chunk. Judged on the first difference (a high-pass):
+        Gemini's broken answers carry a rumble below 300 Hz at RMS up to 0.017
+        that plain RMS took for voice (6 s of it played on 12.11.2026)."""
+        arr = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+        if arr.size < 2:
+            return True
+        level = float(np.sqrt(np.mean(np.square(np.diff(arr))))) / 32768.0
+        return level < self.live_cfg.output_silence_highpass_threshold
+
     def initialize(self) -> None:
         """Initialize the Gemini client."""
         api_key = self.config.api_keys.google_api_key
@@ -469,6 +479,9 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             self._session = None
             self._session_active = False
             self._activity_started = False
+            # Otherwise it is logged hours later, with the next session's first turn.
+            self._timing_log("session closed before its turn_complete")
+            self._trace, self._late_timing_logged = [], 0
             logger.info("Session closed.")
 
     async def _send_to_api_task(self) -> None:
@@ -554,8 +567,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             for part in mt.parts:
                 data = getattr(part, "inline_data", None)
                 if data and isinstance(data.data, bytes) and data.data:
-                    rms = self._pcm16_rms(data.data)
-                    kind = "←silence" if rms < self.live_cfg.output_silence_rms_threshold else "←voice"
+                    kind = "←silence" if self._is_silent(data.data) else "←voice"
                     self._trace_event(kind, self._seconds(len(data.data)))
                 elif getattr(part, "text", None):
                     self._trace_event("←text")
@@ -624,7 +636,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                                 self._chunks_received += 1
 
                                 rms = self._pcm16_rms(data.data)
-                                is_silent = rms < self.live_cfg.output_silence_rms_threshold
+                                is_silent = self._is_silent(data.data)
                                 seconds = self._seconds(len(data.data))
                                 if self._timing:
                                     self._timing["audio"] += seconds
@@ -772,6 +784,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
                 # Cancel watchdog only for a real (non-stale) turn_complete
                 self.cancel_watchdog()
                 self._log_transcripts()
+                self._check_voice_matches_transcript()
                 logger.info("API: turn_complete")
                 self._timing_log("on time")
                 if self._on_turn_complete:
@@ -804,6 +817,21 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             logger.info("📝 USER: %s", self._user_transcript.strip())
         if self._ai_transcript.strip():
             logger.info("🤖 AI: %s", self._ai_transcript.strip())
+
+    def _check_voice_matches_transcript(self) -> None:
+        """Counts answers whose audio is too short for their transcript: Gemini
+        sent 1.0 s of voice and 12 s of silence for a 35-character sentence
+        (09.11.2026). Normal answers take 0.06-0.11 s per character."""
+        per_char = self.live_cfg.min_voice_per_char
+        chars = len(self._ai_transcript.strip())
+        if not per_char or not chars or self._playback_interrupted:
+            return
+        if self._voice_played < chars * per_char:
+            metrics.TRUNCATED_ANSWERS.inc()
+            logger.warning(
+                "Answer audio incomplete: %.1fs of voice for a %d-character transcript",
+                self._voice_played, chars,
+            )
 
     def _cancel_generation_end(self) -> None:
         if self._generation_end_task and not self._generation_end_task.done():
@@ -848,6 +876,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         self._waiting_for_turn_complete = False
         self.cancel_watchdog()
         self._log_transcripts()
+        self._check_voice_matches_transcript()
         logger.info("API: generation_complete, no turn_complete within %.1fs — ending the turn", grace)
         if self._on_turn_complete:
             self._on_turn_complete()

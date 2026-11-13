@@ -202,15 +202,18 @@ class LiveConfig:
     # up to 0.10 s/char; 51 s once came for "Włączam Polsat."). 0 disables.
     voice_budget_per_char: float = 0.15
     voice_budget_slack: float = 3.0
+    # Gemini: an answer with less voice than this per transcript character is
+    # counted as incomplete (speaker_truncated_answers_total). 0 disables.
+    min_voice_per_char: float = 0.045
     # Log every message to/from the Gemini API as one line per turn (debugging).
     trace_api_events: bool = False
     audio_done_watchdog_timeout: float = 3.0  # Tighter watchdog after audio stream ends (OpenAI response.output_audio.done)
 
-    # Output silence detection: RMS threshold below which a received audio chunk is
-    # considered silence. Silent chunks are forwarded to the speaker but do NOT reset
-    # the turn watchdog — preventing Gemini from hanging the session by streaming
-    # silence indefinitely instead of sending turn_complete.
-    output_silence_rms_threshold: float = 0.002
+    # Output silence detection (Gemini): a received chunk whose high-passed level
+    # (RMS of the first difference, full scale = 1) is below this carries no voice.
+    # Such chunks do not reset the turn watchdog and are held back as a pause.
+    # Measured on 79 answers: low-frequency rumble peaks at 0.0006, voice is above.
+    output_silence_highpass_threshold: float = 0.0015
 
     # A short silent lead-in (and a gap around the middle of the utterance) is normal
     # in Gemini's audio stream — measured on every second response, so warning about

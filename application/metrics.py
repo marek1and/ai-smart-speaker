@@ -73,6 +73,10 @@ TOKENS_OUTPUT = Counter(
 )
 
 # Conversation events
+TRUNCATED_ANSWERS = Counter(
+    'speaker_truncated_answers_total',
+    'Answers with too little voice for their transcript (Gemini audio cut or empty)',
+)
 BARGE_INS = Counter('speaker_barge_ins_total', 'Barge-in interruptions executed')
 FOLLOWUP_TIMEOUTS = Counter('speaker_followup_timeouts_total', 'Follow-up conversation timeouts')
 FOLLOWUPS_STARTED = Counter('speaker_followups_started_total', 'Follow-up conversations started')
