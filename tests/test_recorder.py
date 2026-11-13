@@ -1,8 +1,10 @@
 import os
 import wave
+from types import SimpleNamespace
 
 import pytest
 
+import audio.recorder as rec
 from audio.recorder import SessionRecorder
 
 
@@ -58,3 +60,24 @@ def test_without_a_model_rate_nothing_is_recorded(tmp_path, monkeypatch):
     recorder.write_model(b"\x02\x00" * 2400)
     recorder.close()
     assert len(wavs()) == 1
+
+
+def test_start_closes_a_recording_left_open(recorder, monkeypatch):
+    # after an API error nothing closed the recorder: the next session's model
+    # audio went on into the old file
+    stamps = iter(["20261113_100000", "20261113_100005"])
+    now = SimpleNamespace(strftime=lambda fmt: next(stamps))
+    monkeypatch.setattr(rec, "datetime", SimpleNamespace(now=lambda: now))
+    recorder.start()
+    recorder.write_model(b"\x02\x00" * 2400)
+    recorder.start()
+    recorder.write_model(b"\x03\x00" * 1200)
+    recorder.close()
+    assert wavs() == [
+        "session_20261113_100000.wav", "session_20261113_100000_model.wav",
+        "session_20261113_100005.wav", "session_20261113_100005_model.wav",
+    ]
+    with wave.open(os.path.join("recordings", "session_20261113_100000_model.wav")) as w:
+        assert w.getnframes() == 2400
+    with wave.open(os.path.join("recordings", "session_20261113_100005_model.wav")) as w:
+        assert w.getnframes() == 1200

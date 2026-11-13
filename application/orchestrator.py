@@ -178,6 +178,8 @@ class AudioOrchestrator:
         # Initial silence timeout: tracks when we entered LISTENING from IDLE.
         # None means the check is disabled (barge-in or follow-up path).
         self._listening_entry_time: Optional[float] = None
+        # Wake gates stay relaxed until then, see _detect_wake_word_async.
+        self._radio_playing_until: float = 0.0
         # The deadline was re-armed after a reply without audio: when it
         # passes, the turn ends normally instead of as a false trigger.
         self._reply_was_empty: bool = False
@@ -728,7 +730,7 @@ class AudioOrchestrator:
         relaxed_mode = relaxation_configured and (
             self._state == SpeakerState.RESPONDING
             or playing
-            or time.monotonic() < getattr(self, "_radio_playing_until", 0.0)
+            or time.monotonic() < self._radio_playing_until
         )
 
         def _inference() -> tuple[float, float, float, bool]:

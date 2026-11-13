@@ -81,6 +81,7 @@ class SessionRecorder:
         verifier_score: Optional[float] = None,
     ) -> None:
         """Open a new timestamped WAV file and begin recording."""
+        self.close()  # a session that died on an API error leaves one open
         os.makedirs(_RECORDINGS_DIR, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         score_tag = ""
