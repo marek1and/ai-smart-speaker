@@ -463,9 +463,12 @@ async def test_room_audio_is_not_sent_while_the_reply_is_awaited(make):
     o._forward_audio_to_api = forward
     frame = np.zeros(512, dtype=np.int16)
     await o._process_listening_audio(frame, frame.tobytes())
+    recorded = []
+    o._recorder.write = recorded.append
     o._api_manager.awaiting_reply = True  # activity_end sent / a typed request
     await o._process_listening_audio(frame, frame.tobytes())
     assert len(sent) == 1
+    assert recorded == [frame.tobytes()]  # kept for diagnosing cut-off commands
 
 
 async def test_a_newer_music_request_wins_over_one_still_downloading(make, monkeypatch):

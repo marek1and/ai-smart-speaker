@@ -637,7 +637,9 @@ class AudioOrchestrator:
             # The utterance is complete. Room audio sent now (radio, TV, our own
             # music) made Gemini produce up to ~20 s of silence before it ended
             # its reply: 5 of 32 probe turns with music, 0 of 30 with no audio
-            # or digital silence (01.11.2026).
+            # or digital silence (01.11.2026). It is still recorded: shows
+            # whether the user was cut off mid-sentence.
+            self._recorder.write(mono_bytes)
             return
         await self._forward_audio_to_api(mono_bytes)
 
