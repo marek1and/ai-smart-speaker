@@ -255,7 +255,7 @@ class HybridVAD:
             # Only count silence if we were speaking
             if self.state.is_speaking:
                 # Detect speech end
-                if self.state.silence_frames >= self.config.silence_frames_required:
+                if self.state.silence_frames >= self._silence_frames_to_end():
                     self.state.is_speaking = False
                     speech_ended = True
                     self.state.speech_frames = 0
@@ -267,6 +267,14 @@ class HybridVAD:
                 self.state.speech_frames = 0
 
         return speech_started, speech_ended
+
+    def _silence_frames_to_end(self) -> int:
+        """Longer for an utterance that is still short: it may be a pause after
+        the first word. speech_frames counts the whole utterance while speaking."""
+        cfg = self.config
+        if cfg.short_utterance_frames and self.state.speech_frames < cfg.short_utterance_frames:
+            return max(cfg.short_utterance_silence_frames, cfg.silence_frames_required)
+        return cfg.silence_frames_required
 
     @property
     def is_speaking(self) -> bool:

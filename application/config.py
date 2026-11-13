@@ -123,6 +123,11 @@ class VADConfig:
     # Temporal smoothing (for HybridVAD)
     speech_frames_required: int = 3  # Consecutive speech frames to start
     silence_frames_required: int = 15  # Consecutive silence frames to end (~500ms)
+    # An utterance with fewer speech frames than short_utterance_frames needs
+    # short_utterance_silence_frames of silence to end: a pause after the first
+    # word ended the turn ("gaś" / "Nie zrozumiałam.", 13.11.2026). 0 disables.
+    short_utterance_frames: int = 0
+    short_utterance_silence_frames: int = 30
 
     # Ignore VAD verdicts until this long after our own sound effect finishes
     # playing. On the XVF ASR path (no post-processor) the beep residue after

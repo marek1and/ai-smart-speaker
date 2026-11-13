@@ -93,6 +93,11 @@ vad:
   # Temporal smoothing
   speech_frames_required: 3
   silence_frames_required: 15
+  # An utterance with fewer than short_utterance_frames speech frames (20 = 0.64 s)
+  # needs short_utterance_silence_frames of silence (30 = 0.96 s) to end, so a
+  # pause after the first word does not end the turn. 0 disables.
+  short_utterance_frames: 20
+  short_utterance_silence_frames: 30
   # Ignore VAD verdicts until this long after our own sound effect stops
   # playing — the beep residue after AEC reads as speech and can flip
   # FOLLOW_UP into LISTENING with nobody speaking.
