@@ -1036,6 +1036,11 @@ class MPDClientWrapper:
         status = await self.get_status()
         return status.get("state") == "play" if status else False
 
+    def is_playing_cached(self) -> bool:
+        """Last known play state without asking MPD, for callers that must
+        never wait (the microphone loop). Unknown counts as not playing."""
+        return self._is_playing is True
+
     async def stop(self):
         """Stops MPD playback."""
         self._playback_generation += 1

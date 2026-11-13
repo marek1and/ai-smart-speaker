@@ -2,6 +2,7 @@
 Past bugs: a handler exception left the speaker deaf in RESPONDING until the
 API dropped the session; a deferred radio play waited for the next wake word."""
 import asyncio
+import threading
 
 import numpy as np
 import pytest
@@ -651,3 +652,98 @@ async def test_state_machine_survives_a_handler_exception(make, monkeypatch):
     monkeypatch.setattr(orch.asyncio, "sleep", lambda s: real_sleep(0))
     await asyncio.wait_for(o._state_machine_task(), 2)
     assert calls == 2 and o.state == SpeakerState.IDLE
+
+
+# --- microphone loop must not wait for MPD ------------------------------------------
+
+class FakeDetector:
+    last_verifier_score = None
+    last_window_rms = 0.0
+
+    def __init__(self):
+        self.relaxed = []
+
+    def process(self, mono, relaxed_mode=False):
+        self.relaxed.append(relaxed_mode)
+        return 0.0, 0.0, 0.0, False
+
+
+class SlowDuckMPD(FakeMPD):
+    """duck() hangs until released, like a Mopidy that stopped answering."""
+
+    def __init__(self):
+        super().__init__(playing=True)
+        self.release = asyncio.Event()
+
+    async def duck(self):
+        await self.release.wait()
+        self.calls.append("duck")
+
+
+FRAME = np.zeros(512, dtype=np.int16)
+
+
+async def test_wake_detection_does_not_wait_for_a_hung_mopidy(make, client, mopidy):
+    # play state unknown + Mopidy not answering: every frame waited for the connect timeout
+    release = threading.Event()
+    mopidy.connect = lambda host, port: release.wait(5)
+    o = make()
+    o.mpd_client = client
+    o._wake_detector = FakeDetector()
+    try:
+        await asyncio.wait_for(o._detect_wake_word_async(asyncio.get_running_loop(), FRAME), 0.5)
+    finally:
+        release.set()
+    assert o._wake_detector.relaxed == [False]
+
+
+async def test_wake_gates_relax_from_the_cached_play_state(make, client, mopidy, monkeypatch):
+    o = make()
+    monkeypatch.setattr(o.wake_cfg, "relaxed_verifier_threshold", 0.3)
+    o.mpd_client = client
+    o._wake_detector = FakeDetector()
+    await client.get_status()  # what the watcher does on every poll
+    await o._detect_wake_word_async(asyncio.get_running_loop(), FRAME)
+    mopidy.queue, mopidy.state, mopidy.song = ["http://x.invalid/a.mp3"], "play", 0
+    await client.get_status()
+    await o._detect_wake_word_async(asyncio.get_running_loop(), FRAME)
+    assert o._wake_detector.relaxed == [False, True]
+
+
+async def test_wake_word_does_not_wait_for_the_duck(make):
+    o = make()
+    o.mpd_client = SlowDuckMPD()
+    await asyncio.wait_for(o._handle_wake_word_result(orch.WakeWordResult(True, 0.9, 0.9)), 0.5)
+    assert o._wake_event.is_set()
+    assert SoundEvent.WAKE_WORD in o._sound_player.played
+    o.mpd_client.release.set()
+    await asyncio.sleep(0.01)
+    assert o.mpd_client.calls == ["duck"]
+
+
+async def test_turn_end_unducks_after_a_duck_still_in_flight(make):
+    # an unduck that ran first found nothing to restore; the duck landed later and stayed
+    o = make()
+    o.mpd_client = SlowDuckMPD()
+    await asyncio.wait_for(o._handle_wake_word_result(orch.WakeWordResult(True, 0.9, 0.9)), 0.5)
+    o._state = SpeakerState.RESPONDING
+    finish = asyncio.create_task(o._finish_turn())
+    await asyncio.sleep(0.01)
+    assert o.mpd_client.calls == []
+    o.mpd_client.release.set()
+    await finish
+    assert o.mpd_client.calls == ["duck", "unduck"]
+    assert o.state == SpeakerState.IDLE
+
+
+async def test_a_failing_duck_does_not_reach_the_microphone_loop(make):
+    o = make()
+
+    async def boom():
+        raise OSError("mpd gone")
+
+    o.mpd_client.playing = True
+    o.mpd_client.duck = boom
+    await o._handle_wake_word_result(orch.WakeWordResult(True, 0.9, 0.9))
+    await o._finish_turn()
+    assert o.mpd_client.calls == ["unduck"]

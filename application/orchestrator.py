@@ -195,6 +195,9 @@ class AudioOrchestrator:
         self._respeaker = None
         self._leds = None
 
+        # Duck started by the wake word, see _duck_radio_in_background.
+        self._duck_task: Optional[asyncio.Task] = None
+
         # Strong references to fire-and-forget tasks (MQTT bridge, barge-in,
         # MPD watcher). The event loop keeps only weak refs — an unreferenced
         # task can be garbage-collected mid-flight and silently disappear.
@@ -699,22 +702,22 @@ class AudioOrchestrator:
         # so the detector adapts per config (relaxed verifier threshold,
         # relaxed VAD gate). Without covering RESPONDING, barge-in fails: the
         # strict IDLE verifier rejects wake word spoken over the residue of
-        # speaker own voice. is_playing() hits the local cache, which the MPD
-        # watcher refreshes every state_poll_interval; RESPONDING short-circuits
-        # it so we skip the await.
+        # speaker own voice. Only the cached play state is read, which the MPD
+        # watcher refreshes every state_poll_interval: asking MPD here made every
+        # frame wait for the connect timeout while Mopidy did not answer.
         relaxation_configured = (
             self.wake_cfg.relaxed_verifier_threshold is not None
             or self.wake_cfg.relaxed_vad_threshold is not None
             or self.wake_cfg.relaxed_min_activation_frames is not None
         )
-        # Debounce: is_playing() flips to False transiently even while
+        # Debounce: the play state flips to False transiently even while
         # MPD plays steadily (stale/corrupted status reads in the client cache; MPD
         # itself is rock-stable). Those bad reads
         # flipped the wake thresholds to strict IDLE mid-radio, dropping ~half of valid
         # calls. Hold "radio playing" for 5s after the last True so gaps are bridged.
         # A frozen stream is silent, so it must not relax the gates either.
         playing = (
-            await self.mpd_client.is_playing()
+            self.mpd_client.is_playing_cached()
             and not self.mpd_client.is_stream_stalled()
         )
         if playing:
@@ -799,7 +802,7 @@ class AudioOrchestrator:
             context=_wake_context, mode=_mode_label(result.relaxed_mode)
         ).inc()
 
-        await self._duck_radio_if_playing()
+        self._duck_radio_in_background()
 
         if self._state == SpeakerState.IDLE and self._verifier is not None:
             # Fire verification in background — don't block wake sound or session open.
@@ -1104,7 +1107,7 @@ class AudioOrchestrator:
                 metrics.API_ERRORS.inc()
                 if self._sound_player:
                     self._sound_player.play(SoundEvent.ERROR)
-                await self.mpd_client.unduck()
+                await self._unduck_radio()
                 self._set_state(SpeakerState.IDLE)
                 if text is not None:
                     self._publish_turn("text", text, "", error="session_failed")
@@ -1441,7 +1444,7 @@ class AudioOrchestrator:
             self._pending_verification.cancel()
             self._pending_verification = None
 
-        await self.mpd_client.unduck()
+        await self._unduck_radio()
         await drop_prefetched()
 
         # Guard: a barge-in may have already transitioned state to LISTENING while
@@ -1502,7 +1505,7 @@ class AudioOrchestrator:
             self._pending_verification.cancel()
             self._pending_verification = None
 
-        await self.mpd_client.unduck()
+        await self._unduck_radio()
         self._drain_queue(self._api_input_queue)
 
         if self._api_manager:
@@ -1547,6 +1550,24 @@ class AudioOrchestrator:
         """Duck radio volume if playback is active."""
         if await self.mpd_client.is_playing():
             await self.mpd_client.duck()
+
+    def _duck_radio_in_background(self) -> None:
+        """Duck from the microphone loop, which must not wait for MPD."""
+
+        async def duck() -> None:
+            try:
+                await self._duck_radio_if_playing()
+            except Exception:
+                logger.exception("Radio duck failed")
+
+        if self._duck_task is None or self._duck_task.done():
+            self._duck_task = self._spawn(duck(), name="radio_duck")
+
+    async def _unduck_radio(self) -> None:
+        """Unduck, after a duck still in flight: one landing later would stay."""
+        if self._duck_task is not None and not self._duck_task.done():
+            await asyncio.wait({self._duck_task})
+        await self.mpd_client.unduck()
 
     async def _inactivity_monitor_task(self) -> None:
         """Close the API session after a period of IDLE inactivity.
