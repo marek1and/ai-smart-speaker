@@ -892,7 +892,10 @@ class AudioOrchestrator:
         wake word, or answering a typed request when text is given."""
         if text is None:
             self._drop_queued_text()
-        if not await self._session.open(self._last_wake_result):
+        # A typed request has no wake word: its recording must not carry the
+        # scores of an earlier one.
+        wake_result = self._last_wake_result if text is None else None
+        if not await self._session.open(wake_result):
             self._play_error_sound()
             await self._unduck_radio()
             self._set_state(SpeakerState.IDLE)

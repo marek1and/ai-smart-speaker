@@ -249,6 +249,16 @@ async def test_silence_after_the_wake_word_is_still_a_false_trigger(make, monkey
     assert o.state == SpeakerState.IDLE and closed_as_false and o._api_manager.closed == 1
 
 
+async def test_text_session_recording_does_not_take_an_earlier_wake_words_scores(make):
+    o = make()
+    o._last_wake_result = orch.WakeWordResult(triggered=True, score=0.98, max_score=0.98, verifier_score=0.4)
+    started = []
+    o._recorder.start = lambda **k: started.append(k)
+    assert o.submit_text("x")
+    await o._handle_idle_state()
+    assert started == [{"model_score": None, "verifier_score": None}]
+
+
 async def test_stt_rejection_is_counted_once_as_a_false_trigger(make):
     import metrics
 
