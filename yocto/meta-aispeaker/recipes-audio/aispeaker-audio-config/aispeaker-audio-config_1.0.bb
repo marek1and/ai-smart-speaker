@@ -27,7 +27,7 @@ do_install() {
     install -d ${D}${sysconfdir}/pipewire/pipewire.conf.d
     install -m 0644 ${S}/50-fixed-clock.conf ${D}${sysconfdir}/pipewire/pipewire.conf.d/
 
-    # WirePlumber: XVF3800 always active, period 240x4
+    # WirePlumber: XVF3800 always active
     install -d ${D}${sysconfdir}/wireplumber/wireplumber.conf.d
     install -m 0644 ${S}/51-lowlatency-alsa.conf ${D}${sysconfdir}/wireplumber/wireplumber.conf.d/
     install -m 0644 ${S}/40-default-volume.conf ${D}${sysconfdir}/wireplumber/wireplumber.conf.d/
