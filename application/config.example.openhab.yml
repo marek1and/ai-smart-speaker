@@ -28,6 +28,7 @@ audio:
 
   # Queue sizes
   input_queue_maxsize: 50
+  api_input_queue_maxsize: 50  # Microphone frames waiting to be sent to the API
   output_queue_maxsize: 500
 
 wake_word:
@@ -40,6 +41,13 @@ wake_word:
   window_seconds: 0.8
   cooldown_seconds: 2.5
   min_activation_frames: 2
+  # Detections ignored after a detector reset: after a finished turn, and the
+  # short one after a barge-in (the user is still talking).
+  warmup_seconds: 1.5
+  short_warmup_seconds: 0.5
+  trigger_dedup_seconds: 0.5  # Two triggers closer than this are one wake word
+  # Relaxed gates stay on this long after the radio was last seen playing.
+  radio_playing_hold_seconds: 5.0
   # Relaxed mode: active while THIS speaker produces output (radio via MPD or
   # own TTS while responding). Voice over that output scores lower on every
   # gate, so each strict gate has a relaxed_* counterpart used then; unset =
@@ -143,21 +151,26 @@ live:
   
   # Audio format settings
   send_sample_rate: 16000
-  receive_sample_rate: 24000
   input_mime_type: "audio/pcm;rate=16000"
   
   preroll_seconds: 1.5
   barge_in: true
+  barge_in_resume_delay: 0.1  # Output stream resumes this long after a barge-in cut it
+  post_reply_pause: 0.3  # Pause between the reply and the end/follow-up sound
   session_inactivity_timeout: 30.0
   max_reconnect_attempts: 3
+  # Delay before reconnect attempt n: reconnect_backoff_base ** (n - 1) s, capped.
+  reconnect_backoff_base: 2.0
+  reconnect_backoff_max: 30.0
   # How long open_session() waits before giving up and cancelling the retry task
   # (the background retries take far longer than a user will wait).
   session_open_timeout: 10.0
   followup_timeout: 3.0
 
   enable_manual_vad: true
-  api_vad_timeout: 2.0
   turn_watchdog_timeout: 5.0
+  # Microphone frames sent before the API can be answering this turn (stale-reply guard).
+  min_frames_before_reply: 20
   # Warn about silent output chunks only once the run is this long (a short silent
   # lead-in is normal), then repeat the warning every N chunks.
   output_silence_warn_after: 5
@@ -169,6 +182,7 @@ live:
   
   # OpenAI-specific settings
   openai_model: "gpt-realtime"
+  openai_commit_delay: 0.15  # Wait before committing the audio buffer at the end of speech
   openai_voice: "shimmer" # Options: alloy, ash, ballad, coral, echo, sage, shimmer, verse
 
 sound:
@@ -269,6 +283,7 @@ mpd:
   stream_stall_timeout: 20.0
   stream_stall_max_restarts: 2
   volume_fade_in_seconds: 1.0  # Duration of volume fade-in (resuming)
+  volume_fade_steps: 25  # Volume changes a fade is made of
   volume_duck_percentage: 20   # Volume percentage during conversation
   default_playback_volume: 70  # Default playback volume if no previous volume is known
   state_file: "radio_state.json"  # Persists current station, URL cache, and play counts

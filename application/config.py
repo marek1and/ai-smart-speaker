@@ -41,6 +41,8 @@ class AudioConfig:
 
     # Queue sizes
     input_queue_maxsize: int = 50
+    # Microphone frames waiting to be sent to the API; when full, the oldest goes.
+    api_input_queue_maxsize: int = 50
     output_queue_maxsize: int = 500  # Large buffer for smooth audio playback
 
 
@@ -59,6 +61,16 @@ class WakeWordConfig:
     min_activation_frames: int = (
         2  # Consecutive frames above threshold required to trigger
     )
+    # Detections are ignored this long after the detector is reset: after a
+    # finished turn (and at startup), and the short one after a barge-in or a
+    # wake word said while already listening, when the user is still talking.
+    warmup_seconds: float = 1.5
+    short_warmup_seconds: float = 0.5
+    # Two triggers closer than this are one wake word.
+    trigger_dedup_seconds: float = 0.5
+    # The relaxed gates stay on this long after the radio was last seen
+    # playing: the cached play state flips to "not playing" for single reads.
+    radio_playing_hold_seconds: float = 5.0
 
     # Custom verifier model (sklearn .pkl loaded independently from openwakeword)
     verifier_path: Optional[str] = None  # Path to .pkl verifier
@@ -157,7 +169,6 @@ class LiveConfig:
 
     # Audio format settings
     send_sample_rate: int = 16000
-    receive_sample_rate: int = 24000
     input_mime_type: str = "audio/pcm;rate=16000"
 
     # Preroll: capture audio before wake word (1.5s captures full "Alexa" + context)
@@ -165,6 +176,11 @@ class LiveConfig:
 
     # Barge-in (interruption) settings
     barge_in: bool = True
+    # After a barge-in cut the playback, the output stream resumes this much later.
+    barge_in_resume_delay: float = 0.1
+    # Pause between the end of the reply's audio and what follows it (the
+    # deferred actions, the end or follow-up sound).
+    post_reply_pause: float = 0.3
 
     # Session management
     session_inactivity_timeout: float = 10.0  # Close session after N seconds idle
@@ -172,6 +188,10 @@ class LiveConfig:
         4  # Close session after N completed turns (fresh context on next wake)
     )
     max_reconnect_attempts: int = 3
+    # Delay before reconnect attempt n is reconnect_backoff_base ** (n - 1)
+    # seconds, at most reconnect_backoff_max.
+    reconnect_backoff_base: float = 2.0
+    reconnect_backoff_max: float = 30.0
     # How long open_session() waits for the session to come up before giving up.
     # The background conversation task keeps retrying (max_reconnect_attempts with
     # exponential backoff) for far longer than a user is willing to wait, so the
@@ -190,9 +210,11 @@ class LiveConfig:
     # --- Manual VAD Control (Hybrid Strategy) ---
     enable_manual_vad: bool = True  # Use local Silero VAD for speech boundaries
 
-    # API VAD settings (failsafe with long timeout)
-    api_vad_timeout: float = 2.0  # API-side silence timeout (failsafe)
     turn_watchdog_timeout: float = 5.0  # Watchdog timeout for turn completion
+    # Microphone frames that must be sent in a turn before audio or
+    # turn_complete from the API is taken as its reply (20 frames = 0.64 s);
+    # earlier ones are what is left of a barged-in turn.
+    min_frames_before_reply: int = 20
     # Gemini: end the turn this long after generation_complete when nothing new
     # came and turn_complete is still missing (it lagged 4-19 s). 0 disables.
     generation_complete_grace: float = 1.0
@@ -239,6 +261,9 @@ class LiveConfig:
 
     # --- OpenAI-specific settings ---
     openai_model: str = "gpt-realtime"
+    # Wait between the end of speech and committing the audio buffer, so the
+    # last frames reach the API first.
+    openai_commit_delay: float = 0.15
     openai_voice: str = "marin"  # OpenAI voice (marin, cedar, alloy, ash, ballad, coral, echo, sage, shimmer, verse)
 
 
@@ -398,6 +423,7 @@ class MPDConfig:
     # Restarts of a frozen stream before giving up and stopping playback.
     stream_stall_max_restarts: int = 2
     volume_fade_in_seconds: float = 2.0  # Duration of volume fade-in (resuming)
+    volume_fade_steps: int = 25  # Volume changes a fade is made of
     volume_duck_percentage: int = 20  # Volume percentage during conversation
     default_playback_volume: int = (
         50  # Default playback volume if no previous volume is known
