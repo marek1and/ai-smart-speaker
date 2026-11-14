@@ -16,7 +16,9 @@ S = "${UNPACKDIR}"
 inherit useradd
 
 USERADD_PACKAGES = "${PN}"
-GROUPADD_PARAM:${PN} = "-f plugdev"
+# gpio/spi/i2c: named by the RPi udev rules (99-com.rules), which otherwise
+# log an error per rule on every boot
+GROUPADD_PARAM:${PN} = "-f plugdev; -r -f gpio; -r -f spi; -r -f i2c"
 USERADD_PARAM:${PN} = "-m -u 1000 -s /bin/sh -G audio,video,dialout,plugdev speaker"
 
 do_install() {

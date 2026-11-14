@@ -57,7 +57,7 @@ CORE_IMAGE_EXTRA_INSTALL = " \
     aispeaker-update \
     \
     tzdata ca-certificates curl \
-    usbutils htop e2fsprogs-resize2fs parted \
+    usbutils htop e2fsprogs-resize2fs parted systemd-analyze \
     i2c-tools \
 "
 

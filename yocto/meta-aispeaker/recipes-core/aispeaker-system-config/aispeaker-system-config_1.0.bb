@@ -17,6 +17,7 @@ SRC_URI = " \
     file://10-aispeaker-volatile-lib.conf \
     file://aispeaker-zram \
     file://aispeaker-zram.service \
+    file://60-aispeaker-zram.conf \
 "
 
 S = "${UNPACKDIR}"
@@ -47,6 +48,14 @@ do_install() {
     # reconnects on its own, so wait-online is masked
     install -d ${D}${sysconfdir}/systemd/system
     ln -s /dev/null ${D}${sysconfdir}/systemd/system/NetworkManager-wait-online.service
+
+    # The image ships /etc/ld.so.cache. On first boot ldconfig.service wrote
+    # its own copy into the /etc overlay, which then shadowed the cache of
+    # every later update.
+    ln -s /dev/null ${D}${sysconfdir}/systemd/system/ldconfig.service
+
+    install -d ${D}${sysconfdir}/sysctl.d
+    install -m 0644 ${S}/60-aispeaker-zram.conf ${D}${sysconfdir}/sysctl.d/
 
 
     install -d ${D}${sbindir}
