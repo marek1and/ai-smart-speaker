@@ -1,7 +1,7 @@
 #!/bin/sh
 # Confirms the running slot once the speaker is healthy: network up, sshd
-# listening, and ai-smart-speaker active for HEALTHY_FOR seconds (when the app
-# is deployed). Confirming means `rauc status mark-good`, which makes the RAUC
+# listening, the audio stack running with a sink and a source, and
+# ai-smart-speaker active for HEALTHY_FOR seconds (when the app is deployed). Confirming means `rauc status mark-good`, which makes the RAUC
 # backend point the firmware's normal boot at this slot.
 #
 # On a trial boot (the slot is not yet the firmware's normal one) that does not
@@ -24,6 +24,13 @@ echo "slot $current, normal boot slot $primary, trial=$trial"
 healthy() {
     [ "$(nmcli -t -f STATE general 2>/dev/null)" = connected ] || { why="no network"; return 1; }
     systemctl -q is-active sshd.socket || { why="sshd.socket not listening"; return 1; }
+    for unit in pipewire wireplumber pipewire-pulse mopidy; do
+        systemctl -q is-active "$unit" || { why="$unit not active"; return 1; }
+    done
+    nodes=$(PIPEWIRE_RUNTIME_DIR=/run/pipewire pw-cli ls Node 2>/dev/null)
+    for class in Audio/Sink Audio/Source; do
+        echo "$nodes" | grep -q "media.class = \"$class\"" || { why="no $class node in PipeWire"; return 1; }
+    done
     if [ -x "$APP_VENV" ]; then
         systemctl -q is-active ai-smart-speaker || { why="ai-smart-speaker not active"; return 1; }
         since=$(systemctl show -p ActiveEnterTimestampMonotonic --value ai-smart-speaker)

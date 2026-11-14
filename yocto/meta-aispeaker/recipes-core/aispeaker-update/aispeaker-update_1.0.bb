@@ -45,4 +45,4 @@ FILES:${PN} = " \
     ${systemd_unitdir}/system.conf.d \
 "
 
-RDEPENDS:${PN} = "rauc dosfstools networkmanager-nmcli"
+RDEPENDS:${PN} = "rauc dosfstools networkmanager-nmcli pipewire-tools"

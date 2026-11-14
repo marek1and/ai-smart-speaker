@@ -320,7 +320,8 @@ slot then boots once and only becomes the default after it proved healthy.
   sets `root=` / `rauc.slot=` in its `cmdline.txt`. The bundle holds only the
   rootfs, so kernel and rootfs always come from the same build.
 - **Confirmation:** `aispeaker-health-check.service` marks the slot good once
-  the network is up, `sshd.socket` listens and `ai-smart-speaker` (when
+  the network is up, `sshd.socket` listens, PipeWire, WirePlumber and Mopidy
+  run with an audio sink and source present, and `ai-smart-speaker` (when
   deployed) has been active for 60 s; a failed `mark-good` (bootsel not
   writable) is retried. On a trial boot that does not get there within 10 min
   it reboots — back to the previous slot.
