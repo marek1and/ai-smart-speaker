@@ -1,0 +1,6 @@
+# PipeWire runs as system services here. Without this, the image's preset-all
+# enables the upstream user units and every SSH login starts a second audio
+# stack next to the system one.
+disable pipewire*
+disable wireplumber*
+disable filter-chain*

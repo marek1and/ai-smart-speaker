@@ -17,6 +17,7 @@ SRC_URI = " \
     file://wireplumber.service \
     file://pipewire-pulse.service \
     file://aispeaker-env.sh \
+    file://50-aispeaker-audio.preset \
 "
 
 S = "${UNPACKDIR}"
@@ -43,11 +44,14 @@ do_install() {
             ${D}${sysconfdir}/systemd/system/multi-user.target.wants/${unit}.service
     done
 
+    install -d ${D}${systemd_unitdir}/user-preset
+    install -m 0644 ${S}/50-aispeaker-audio.preset ${D}${systemd_unitdir}/user-preset/
+
     # interactive shells: point pw-cli/pactl/pip at the right places
     install -d ${D}${sysconfdir}/profile.d
     install -m 0644 ${S}/aispeaker-env.sh ${D}${sysconfdir}/profile.d/
 }
 
-FILES:${PN} = "${sysconfdir}"
+FILES:${PN} = "${sysconfdir} ${systemd_unitdir}/user-preset"
 
 RDEPENDS:${PN} = "pipewire wireplumber"
