@@ -26,6 +26,7 @@ class FakeApi:
         self.chunks_received = 0
         self.closed = 0
         self.awaiting_reply = False
+        self.playback_interrupted = False
         self.watchdogs = []
 
     async def open_session(self):
@@ -650,11 +651,94 @@ async def test_follow_up_decision(make, transcript, flag, follow_up):
     assert (o.state == SpeakerState.FOLLOW_UP) is follow_up
 
 
-async def test_finish_turn_does_not_stomp_a_barge_in(make):
+class SlowUnduckMPD(FakeMPD):
+    """unduck() hangs until released: the window in which the next turn can start."""
+
+    def __init__(self, playing=False):
+        super().__init__(playing)
+        self.release = asyncio.Event()
+
+    async def unduck(self):
+        await self.release.wait()
+        self.calls.append("unduck")
+
+
+async def _in_unduck(o, coro):
+    task = asyncio.create_task(coro)
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    return task
+
+
+async def test_barge_in_during_the_unduck_keeps_its_turn(make):
     o = make()
-    o._state = SpeakerState.LISTENING
-    await o._finish_turn()
+    o.mpd_client = SlowUnduckMPD()
+    o._state = SpeakerState.RESPONDING
+    finish = await _in_unduck(o, o._finish_turn())
+    await o._execute_barge_in()
+    o.mpd_client.release.set()
+    await finish
     assert o.state == SpeakerState.LISTENING
+    assert SoundEvent.END_CONVERSATION not in o._sound_player.played
+    assert o._session_turn_count == 0
+
+
+async def test_follow_up_answer_during_the_timeout_unduck_keeps_its_turn(make):
+    o = make()
+    o.mpd_client = SlowUnduckMPD()
+    o._state = SpeakerState.FOLLOW_UP
+    finish = await _in_unduck(o, o._finish_turn())
+    await o._start_followup_conversation()
+    o.mpd_client.release.set()
+    await finish
+    assert o.state == SpeakerState.LISTENING
+    assert SoundEvent.END_CONVERSATION not in o._sound_player.played
+
+
+async def test_barge_in_during_the_deferred_actions_stays_ducked(make):
+    # the old turn used to unduck the radio under the new one before giving way
+    o = make()
+    o._api_manager.pending_actions.append(
+        {"type": "play_internet_radio", "payload": {"url": "http://x.invalid/a.mp3", "name": "Eska"}})
+    o._state = SpeakerState.RESPONDING
+    release = asyncio.Event()
+
+    async def slow_play_station(url, name, key=None):
+        await release.wait()
+
+    o.mpd_client.play_station = slow_play_station
+    end = asyncio.create_task(o._execute_post_response_actions())
+    await asyncio.sleep(0.01)
+    await o._execute_barge_in()
+    release.set()
+    await end
+    assert o.state == SpeakerState.LISTENING
+    assert "unduck" not in o.mpd_client.calls
+
+
+async def test_a_wake_word_repeated_while_listening_does_not_keep_the_turn_open(make):
+    # only a new turn stops the cleanup, not the LISTENING state by itself
+    o = make()
+    o.mpd_client = SlowUnduckMPD()
+    o._state = SpeakerState.LISTENING
+    finish = await _in_unduck(o, o._finish_turn())
+    await o._handle_wake_word_result(orch.WakeWordResult(True, 0.9, 0.9))
+    o.mpd_client.release.set()
+    await finish
+    assert o.state == SpeakerState.IDLE
+
+
+async def test_empty_reply_with_a_radio_action_still_waits_for_late_audio(make):
+    o = make()
+    o._api_manager.session_active = True
+    o._api_manager.pending_actions.append(
+        {"type": "play_internet_radio", "payload": {"url": "http://x.invalid/a.mp3", "name": "Eska"}})
+    o._state = SpeakerState.LISTENING
+    o._turn_complete_event.set()
+    await o._handle_listening_state()
+    assert o.state == SpeakerState.LISTENING
+    assert o.mpd_client.calls[-1] == "unduck"
+    assert o._session_turn_count == 0
 
 
 async def test_session_closes_after_the_turn_limit(make):
@@ -666,10 +750,11 @@ async def test_session_closes_after_the_turn_limit(make):
     assert o._api_manager.closed == 1
 
 
-async def test_crashed_handler_returns_to_idle_with_the_error_sound(make):
+@pytest.mark.parametrize("state", [SpeakerState.LISTENING, SpeakerState.RESPONDING, SpeakerState.FOLLOW_UP])
+async def test_crashed_handler_returns_to_idle_with_the_error_sound(make, state):
     # 04.09.2026: an exception left the state machine in RESPONDING for minutes
     o = make()
-    o._state = SpeakerState.RESPONDING
+    o._state = state
     await o._recover_from_state_error()
     assert o.state == SpeakerState.IDLE
     assert SoundEvent.ERROR in o._sound_player.played

@@ -97,6 +97,10 @@ class AudioOrchestrator:
         # IDLE, so the inactivity monitor must not treat it as an idle session.
         self._wake_in_progress = False
 
+        # Numbers the turns. Whoever ends a turn remembers its number: a
+        # barge-in or a follow-up answer during an await starts the next one.
+        self._turn_id = 0
+
         # Flags
         self._playback_interrupted = False
 
@@ -281,6 +285,13 @@ class AudioOrchestrator:
             * self.audio_cfg.input_sample_rate
             / self.audio_cfg.input_chunk
         )
+
+    def _begin_turn(self, text: Optional[str] = None) -> None:
+        """Start a turn: spoken, or answering a typed request when text is given."""
+        self._turn_id += 1
+        self._api_manager.start_new_turn()
+        self._turn_complete_event.clear()
+        self._text_turn = text
 
     @staticmethod
     def _drain_queue(q: asyncio.Queue) -> None:
@@ -685,9 +696,7 @@ class AudioOrchestrator:
         if self._hybrid_vad:
             self._hybrid_vad.reset()
 
-        self._api_manager.start_new_turn()
-        self._turn_complete_event.clear()
-        self._text_turn = None
+        self._begin_turn()
 
         await self._send_preroll()
         # Speech was already detected before entering LISTENING — no silence timeout.
@@ -893,9 +902,7 @@ class AudioOrchestrator:
         if self._hybrid_vad:
             self._hybrid_vad.reset()
 
-        self._api_manager.start_new_turn()
-        self._turn_complete_event.clear()
-        self._text_turn = None
+        self._begin_turn()
 
         if self.live_cfg.enable_manual_vad:
             await self._api_manager.send_activity_start()
@@ -1037,10 +1044,6 @@ class AudioOrchestrator:
         try:
             if self._sound_player:
                 self._sound_player.play(SoundEvent.ERROR)
-            # Drop to IDLE before the cleanup, not after: _finish_turn bails out
-            # early when it finds LISTENING (its barge-in guard), which on this
-            # path would skip the cleanup and leave the state stuck again.
-            self._set_state(SpeakerState.IDLE)
             await self._finish_turn(play_end_sound=False)
         except Exception:
             # Recovery itself must never take the state machine down.
@@ -1138,10 +1141,8 @@ class AudioOrchestrator:
         # Must run before start_new_turn() clears pending_actions.
         await self._dispatch_deferred_actions()
 
-        self._api_manager.start_new_turn()
-        self._turn_complete_event.clear()
+        self._begin_turn(text)
         self._last_activity_time = time.time()
-        self._text_turn = text
 
         if text is not None:
             logger.info("Text request: %s", text)
@@ -1155,8 +1156,6 @@ class AudioOrchestrator:
             else:
                 self._publish_turn("text", text, "", error="send_failed")
                 self._text_turn = None
-                # _finish_turn skips a LISTENING state (its barge-in guard).
-                self._set_state(SpeakerState.IDLE)
                 await self._finish_turn(play_end_sound=False)
             return
 
@@ -1196,16 +1195,14 @@ class AudioOrchestrator:
             # A voice turn keeps waiting for late audio (05.09.2026) only while
             # the API ended it and the session lives. After an API error or the
             # watchdog (still awaiting_reply) nothing would leave LISTENING:
-            # deaf until restart on 07.11.2026. _finish_turn skips LISTENING
-            # as a barge-in, hence RESPONDING first.
-            if (
-                self._text_turn is not None
-                or not self._api_manager.session_active
-                or self._api_manager.awaiting_reply
-            ):
-                self._set_state(SpeakerState.RESPONDING)
-            await self._execute_post_response_actions()
-            if self._state == SpeakerState.LISTENING:
+            # deaf until restart on 07.11.2026.
+            await_late_audio = (
+                self._text_turn is None
+                and self._api_manager.session_active
+                and not self._api_manager.awaiting_reply
+            )
+            await self._execute_post_response_actions(await_late_audio)
+            if await_late_audio and self._state == SpeakerState.LISTENING:
                 # Late audio gets as long as speech after the wake word; with
                 # no deadline the microphone streamed to the API until
                 # somebody spoke or the server closed the session.
@@ -1402,8 +1399,13 @@ class AudioOrchestrator:
 
         return ran_radio_action, error
 
-    async def _execute_post_response_actions(self) -> None:
-        """Execute deferred actions and decide the next state after AI response."""
+    async def _execute_post_response_actions(self, await_late_audio: bool = False) -> None:
+        """Execute deferred actions and decide the next state after AI response.
+
+        With await_late_audio the turn is not ended: the radio is released and
+        the state stays LISTENING, unless the AI asked for a follow-up.
+        """
+        turn_id = self._turn_id
         # Read the turn first: a barge-in during the deferred actions starts a
         # new turn and clears the transcripts. Publish after them, with their error.
         turn = None
@@ -1420,10 +1422,12 @@ class AudioOrchestrator:
 
         if turn_should_end:
             logger.info("Radio action performed, ending turn.")
-            await self._finish_turn(play_end_sound=False)
+            await self._finish_turn(False, turn_id, await_late_audio)
             return
 
         radio_playing = await self.mpd_client.is_playing()
+        if turn_id != self._turn_id:
+            return
 
         if not self._playback_interrupted:
             requested = (
@@ -1446,30 +1450,43 @@ class AudioOrchestrator:
                 self._set_state(SpeakerState.FOLLOW_UP)
                 return
 
-        if radio_playing:
-            logger.info("Radio is playing, ending turn.")
-            await self._finish_turn(play_end_sound=False)
-        else:
-            logger.info("Radio not playing, ending turn.")
-            await self._finish_turn()
+        logger.info("Radio %s, ending turn.", "is playing" if radio_playing else "not playing")
+        await self._finish_turn(not radio_playing, turn_id, await_late_audio)
 
-    async def _finish_turn(self, play_end_sound: bool = True) -> None:
-        """Common cleanup after a conversation turn is finished."""
+    def _superseded(self, turn_id: int) -> bool:
+        if turn_id == self._turn_id:
+            return False
+        logger.debug("Turn %d superseded by turn %d, leaving the state alone", turn_id, self._turn_id)
+        return True
+
+    async def _finish_turn(
+        self,
+        play_end_sound: bool = True,
+        turn_id: Optional[int] = None,
+        keep_listening: bool = False,
+    ) -> None:
+        """Common cleanup after a conversation turn is finished.
+
+        turn_id is the turn being finished, the current one unless the caller
+        awaited something since it decided to end it. A barge-in or a follow-up
+        answer can start the next turn during any await: the finished turn then
+        leaves the radio volume and the state to the new one. keep_listening
+        only releases the radio and stays in the current state.
+        """
+        if turn_id is None:
+            turn_id = self._turn_id
+        if self._superseded(turn_id):
+            return
+
         if self._pending_verification is not None:
             self._pending_verification.cancel()
             self._pending_verification = None
 
         await self._unduck_radio()
+        if self._superseded(turn_id):
+            return
         await drop_prefetched()
-
-        # Guard: a barge-in may have already transitioned state to LISTENING while
-        # we were awaiting unduck() above.  In that case the new turn is already
-        # in progress — do not stomp it by setting IDLE here.
-        # NOTE: FOLLOW_UP is also a valid caller (timeout path) and must proceed to IDLE.
-        if self._state == SpeakerState.LISTENING:
-            logger.debug(
-                "_finish_turn: barge-in already in progress (LISTENING), skipping IDLE transition"
-            )
+        if self._superseded(turn_id) or keep_listening:
             return
 
         self._drain_queue(self._api_input_queue)
@@ -1514,8 +1531,6 @@ class AudioOrchestrator:
         not a false wake word, so the session and its recording stay."""
         logger.info("No late audio %.1fs after an empty reply, ending turn.", waited)
         self._listening_entry_time = None
-        # _finish_turn skips a LISTENING state (its barge-in guard).
-        self._set_state(SpeakerState.IDLE)
         await self._finish_turn(play_end_sound=not await self.mpd_client.is_playing())
 
     async def _close_on_initial_silence(self) -> None:
