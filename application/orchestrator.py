@@ -1124,6 +1124,11 @@ class AudioOrchestrator:
             self._pending_verification.cancel()
             self._pending_verification = None
 
+        if self._state == SpeakerState.LISTENING and not keep_listening:
+            # LISTENING only resets the detector on a wake word; one said
+            # during the cleanup below would play its sound and open nothing.
+            self._set_state(SpeakerState.IDLE)
+
         await self._unduck_radio()
         if self._superseded(turn_id):
             return
@@ -1140,7 +1145,8 @@ class AudioOrchestrator:
         if play_end_sound and self._sound_player:
             self._sound_player.play(SoundEvent.END_CONVERSATION)
 
-        self._set_state(SpeakerState.IDLE)
+        if self._state != SpeakerState.IDLE:
+            self._set_state(SpeakerState.IDLE)
         self._last_activity_time = time.time()
 
         await self._session.turn_finished()

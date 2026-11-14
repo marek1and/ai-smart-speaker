@@ -719,8 +719,8 @@ async def test_barge_in_during_the_deferred_actions_stays_ducked(make):
     assert "unduck" not in o.mpd_client.calls
 
 
-async def test_a_wake_word_repeated_while_listening_does_not_keep_the_turn_open(make):
-    # only a new turn stops the cleanup, not the LISTENING state by itself
+async def test_a_wake_word_during_the_cleanup_of_a_turn_ending_in_listening_opens_the_next(make):
+    # LISTENING only resets the detector: the wake sound played and nothing opened
     o = make()
     o.mpd_client = SlowUnduckMPD()
     o._state = SpeakerState.LISTENING
@@ -728,7 +728,21 @@ async def test_a_wake_word_repeated_while_listening_does_not_keep_the_turn_open(
     await o._handle_wake_word_result(orch.WakeWordResult(True, 0.9, 0.9))
     o.mpd_client.release.set()
     await finish
-    assert o.state == SpeakerState.IDLE
+    assert o.state == SpeakerState.IDLE and o._session.turn_count == 1
+    assert o._wake_event.is_set()
+    await o._handle_idle_state()
+    assert o.state == SpeakerState.LISTENING
+
+
+async def test_waiting_for_late_audio_stays_in_listening_during_the_unduck(make):
+    o = make()
+    o.mpd_client = SlowUnduckMPD()
+    o._state = SpeakerState.LISTENING
+    finish = await _in_unduck(o, o._finish_turn(keep_listening=True))
+    assert o.state == SpeakerState.LISTENING
+    o.mpd_client.release.set()
+    await finish
+    assert o.state == SpeakerState.LISTENING
 
 
 async def test_empty_reply_with_a_radio_action_still_waits_for_late_audio(make):
