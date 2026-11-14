@@ -5,6 +5,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
+from state import DeferredAction
+
 logger = logging.getLogger(__name__)
 
 # How often open_session() checks whether the conversation task has established
@@ -51,7 +53,7 @@ class BaseRealtimeManager(ABC):
         self._on_interrupted: Optional[Callable[[], None]] = None
         self._on_turn_timeout: Optional[Callable[[], None]] = None
         self._on_error: Optional[Callable[[], None]] = None
-        self._on_deferred: Optional[Callable[[dict], None]] = None
+        self._on_deferred: Optional[Callable[[DeferredAction], None]] = None
         self._on_model_audio: Optional[Callable[[bytes], None]] = None
         # Appended to the system instruction when a session opens (current
         # device states); set by the orchestrator before open_session().
@@ -84,7 +86,7 @@ class BaseRealtimeManager(ABC):
         self._ai_transcript: str = ""
 
         # Pending actions for deferred execution
-        self.pending_actions: list = []
+        self.pending_actions: list[DeferredAction] = []
 
         # Watchdog for tool calls
         self._watchdog_task: Optional[asyncio.Task] = None
@@ -295,7 +297,7 @@ class BaseRealtimeManager(ABC):
         on_interrupted: Optional[Callable[[], None]] = None,
         on_turn_timeout: Optional[Callable[[], None]] = None,
         on_error: Optional[Callable[[], None]] = None,
-        on_deferred: Optional[Callable[[dict], None]] = None,
+        on_deferred: Optional[Callable[[DeferredAction], None]] = None,
         on_model_audio: Optional[Callable[[bytes], None]] = None,
     ) -> None:
         """Set callbacks for API events. on_deferred gets each deferred action
@@ -323,7 +325,7 @@ class BaseRealtimeManager(ABC):
 
     def _defer(self, function_name: str, payload: dict) -> None:
         """Queues a deferred tool action for the orchestrator."""
-        action = {"type": function_name, "payload": payload}
+        action = DeferredAction(function_name, payload)
         self.pending_actions.append(action)
         if self._on_deferred:
             self._on_deferred(action)

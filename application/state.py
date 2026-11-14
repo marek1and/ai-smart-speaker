@@ -1,5 +1,6 @@
 """State management for voice assistant."""
 
+import asyncio
 import enum
 import time
 from dataclasses import dataclass, field
@@ -20,6 +21,16 @@ class AudioFrame:
     data: bytes
     timestamp: float = field(default_factory=time.time)
     mime_type: str = "audio/pcm;rate=16000"
+
+
+@dataclass
+class DeferredAction:
+    """A tool call the orchestrator executes, queued by the realtime manager."""
+    type: str
+    payload: dict
+    # Set by DeferredPlayback for actions that start playback.
+    request: Optional[int] = None
+    task: Optional[asyncio.Task] = None
 
 
 @dataclass

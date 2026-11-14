@@ -544,7 +544,7 @@ async def test_failed_lookup_reaches_the_model_and_is_not_deferred(gemini, mpd, 
 
 async def test_deferred_action_is_queued_and_facts_reach_the_model(gemini, mpd):
     await gemini._handle_tool_calls([call("set_playback_volume", volume_percentage=30)])
-    assert gemini.pending_actions[0]["type"] == "set_playback_volume"
+    assert gemini.pending_actions[0].type == "set_playback_volume"
     assert gemini.sent[0].response == {"status": "success", "previous_volume": 50}
 
 
@@ -579,7 +579,7 @@ async def test_both_backends_report_deferred_actions_as_they_are_queued(gemini, 
         seen = []
         mgr.set_callbacks(on_deferred=seen.append)
         await run()
-        assert seen == mgr.pending_actions and seen[0]["type"] == "set_playback_volume", type(mgr).__name__
+        assert seen == mgr.pending_actions and seen[0].type == "set_playback_volume", type(mgr).__name__
 
 
 def server(**content):
