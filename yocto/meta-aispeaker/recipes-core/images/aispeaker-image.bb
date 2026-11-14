@@ -11,6 +11,8 @@ OVERLAYFS_ETC_DEVICE = "LABEL=data"
 OVERLAYFS_ETC_FSTYPE = "ext4"
 OVERLAYFS_ETC_MOUNT_OPTIONS = "defaults,noatime"
 OVERLAYFS_ETC_USE_ORIG_INIT_NAME = "1"
+# oe-core's preinit plus an e2fsck of /data before it is mounted
+OVERLAYFS_ETC_INIT_TEMPLATE := "${THISDIR}/files/overlayfs-etc-preinit.sh.in"
 
 # ext4: the rootfs image that goes into the RAUC bundle (aispeaker-bundle)
 IMAGE_FSTYPES = "wic.bz2 wic.bmap ext4"
@@ -57,7 +59,7 @@ CORE_IMAGE_EXTRA_INSTALL = " \
     aispeaker-update \
     \
     tzdata ca-certificates curl \
-    usbutils htop e2fsprogs-resize2fs parted systemd-analyze \
+    usbutils htop e2fsprogs-e2fsck e2fsprogs-resize2fs parted systemd-analyze \
     i2c-tools \
 "
 

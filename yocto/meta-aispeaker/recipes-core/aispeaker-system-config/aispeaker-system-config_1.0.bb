@@ -18,6 +18,7 @@ SRC_URI = " \
     file://aispeaker-zram \
     file://aispeaker-zram.service \
     file://60-aispeaker-zram.conf \
+    file://e2fsck.conf \
 "
 
 S = "${UNPACKDIR}"
@@ -53,6 +54,8 @@ do_install() {
     # its own copy into the /etc overlay, which then shadowed the cache of
     # every later update.
     ln -s /dev/null ${D}${sysconfdir}/systemd/system/ldconfig.service
+
+    install -m 0644 ${S}/e2fsck.conf ${D}${sysconfdir}/
 
     install -d ${D}${sysconfdir}/sysctl.d
     install -m 0644 ${S}/60-aispeaker-zram.conf ${D}${sysconfdir}/sysctl.d/
