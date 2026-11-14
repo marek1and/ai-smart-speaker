@@ -1,5 +1,6 @@
 """MicPipeline: frames off the capture queue, the preroll and wake word clips."""
 import asyncio
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -98,7 +99,7 @@ async def test_no_clips_when_saving_is_off(monkeypatch, saved):
 async def test_candidate_clips_are_rate_limited_and_skip_the_tail_of_a_trigger(mic, saved, monkeypatch):
     wake = get_config().wake_word
     now = 1000.0
-    monkeypatch.setattr(mic_pipeline.time, "time", lambda: now)
+    monkeypatch.setattr(mic_pipeline, "time", SimpleNamespace(monotonic=lambda: now))
     mic.queue.put(stereo())
     await mic.next_frame()
     hot = WakeWordResult(False, wake.candidate_threshold + 0.01, 0.9)

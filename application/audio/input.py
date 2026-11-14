@@ -137,7 +137,7 @@ class AudioInput:
         Called from audio thread - must be fast, no blocking operations.
         """
         if status:
-            now = time.time()
+            now = time.monotonic()
             if now - self._last_status_log_time >= 1.0:
                 logger.warning("Audio input status: %s", status)
                 self._last_status_log_time = now
@@ -174,7 +174,7 @@ class AudioInput:
 
     def _log_dropped_frame(self) -> None:
         """Log dropped frames with rate limiting (max once per second)."""
-        now = time.time()
+        now = time.monotonic()
         if now - self._last_drop_log_time >= 1.0:
             logger.warning(
                 "Input queue full - dropped %d frame(s) in last second",
@@ -195,7 +195,7 @@ class AudioInput:
         max_val = int(np.max(np.abs(audio)))
 
         if max_val >= self._clip_threshold:
-            now = time.time()
+            now = time.monotonic()
             # Rate limit: log at most once per second
             if now - self._last_clip_log_time >= 1.0:
                 logger.warning(

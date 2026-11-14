@@ -1,5 +1,7 @@
 """WakeGate: warmup after a reset and the cooldown between triggers. The
 strict/relaxed decision is covered in test_orchestrator (cached play state)."""
+from types import SimpleNamespace
+
 import numpy as np
 
 import wake_gate
@@ -63,11 +65,11 @@ def test_a_full_reset_warms_up_longer_and_can_arm_the_detector_cooldown():
 def test_a_second_trigger_within_the_cooldown_is_the_same_wake_word(monkeypatch):
     gate = make()
     now = 1000.0
-    monkeypatch.setattr(wake_gate.time, "time", lambda: now)
+    monkeypatch.setattr(wake_gate, "time", SimpleNamespace(monotonic=lambda: now))
     assert gate.accept_trigger()
-    now += wake_gate.TRIGGER_COOLDOWN / 2
+    now += get_config().wake_word.trigger_dedup_seconds / 2
     assert not gate.accept_trigger()
-    now += wake_gate.TRIGGER_COOLDOWN
+    now += get_config().wake_word.trigger_dedup_seconds
     assert gate.accept_trigger()
 
 

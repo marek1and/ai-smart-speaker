@@ -14,6 +14,7 @@ import queue
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -51,6 +52,32 @@ from tools.xvf_client import ReSpeakerLeds, open_respeaker
 from tools.respeaker_monitor import respeaker_monitor_task
 
 logger = logging.getLogger(__name__)
+
+# How often the state handlers look for what they wait for.
+_STATE_POLL_INTERVAL = 0.05
+# How long the tasks wait on a queue or an event before they look whether the
+# application is still running.
+_QUEUE_POLL_INTERVAL = 0.1
+_IDLE_POLL_INTERVAL = 1.0
+# How often an idle session is checked for inactivity (and system metrics refreshed).
+_INACTIVITY_CHECK_INTERVAL = 5.0
+# Pause after an unexpected error in a task, so a persistent one cannot spin.
+_AUDIO_ERROR_PAUSE = 0.1
+_STATE_ERROR_PAUSE = 1.0
+_WAKE_CONTEXT = {
+    SpeakerState.RESPONDING: "barge_in",
+    SpeakerState.LISTENING: "re_listen",
+}
+
+
+@dataclass
+class _SilenceWait:
+    """LISTENING ends when nobody has spoken initial_silence_timeout after since."""
+
+    since: float
+    # Armed again after a reply without audio: when it passes, the turn ends
+    # normally instead of as a false trigger.
+    after_empty_reply: bool = False
 
 
 def _mode_label(relaxed: bool) -> str:
@@ -99,9 +126,6 @@ class AudioOrchestrator:
         # barge-in or a follow-up answer during an await starts the next one.
         self._turn_id = 0
 
-        # Flags
-        self._playback_interrupted = False
-
         # Thread-safe queue for audio output
         self._speaker_queue: queue.Queue[bytes] = queue.Queue(
             maxsize=self.audio_cfg.output_queue_maxsize
@@ -109,7 +133,9 @@ class AudioOrchestrator:
         self._mic = MicPipeline(config)
 
         # Async queues for API communication
-        self._api_input_queue: asyncio.Queue[AudioFrame] = asyncio.Queue(maxsize=50)
+        self._api_input_queue: asyncio.Queue[AudioFrame] = asyncio.Queue(
+            maxsize=self.audio_cfg.api_input_queue_maxsize
+        )
         self._api_output_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
         # Events for coordination
@@ -141,12 +167,11 @@ class AudioOrchestrator:
         )
         self._session = SessionKeeper(self.live_cfg, self._recorder)
 
-        # Initial silence timeout: tracks when we entered LISTENING from IDLE.
+        # Initial silence timeout, armed when LISTENING is entered from IDLE.
         # None means the check is disabled (barge-in or follow-up path).
-        self._listening_entry_time: Optional[float] = None
-        # The deadline was re-armed after a reply without audio: when it
-        # passes, the turn ends normally instead of as a false trigger.
-        self._reply_was_empty: bool = False
+        self._silence_wait: Optional[_SilenceWait] = None
+        # When FOLLOW_UP started waiting for the user; cleared by every transition.
+        self._follow_up_since: Optional[float] = None
 
         # STT wake word verifier (optional, loaded at startup if enabled)
         self._verifier: Optional[WakeWordVerifier] = None
@@ -181,9 +206,12 @@ class AudioOrchestrator:
 
         self._is_tty = sys.stdout.isatty()
 
-    def _play_error_sound(self) -> None:
+    def _play_sound(self, event: SoundEvent) -> None:
         if self._sound_player:
-            self._sound_player.play(SoundEvent.ERROR)
+            self._sound_player.play(event)
+
+    def _play_error_sound(self) -> None:
+        self._play_sound(SoundEvent.ERROR)
 
     def _spawn(self, coro, name: str) -> asyncio.Task:
         """create_task with a strong reference held for the task's lifetime."""
@@ -216,7 +244,8 @@ class AudioOrchestrator:
         old_state = self._state
         self._state = new_state
         logger.info("STATE: %s -> %s", old_state.value, new_state.value)
-        self._last_activity_time = time.time()
+        self._last_activity_time = time.monotonic()
+        self._follow_up_since = None
 
         metrics.STATE_TRANSITIONS.labels(
             from_state=old_state.value, to_state=new_state.value
@@ -240,13 +269,25 @@ class AudioOrchestrator:
         self._text_turn = text
 
     @staticmethod
-    def _drain_queue(q: asyncio.Queue) -> None:
+    def _drain_queue(q: asyncio.Queue | queue.Queue) -> None:
         """Discard all currently-queued items without blocking."""
         while not q.empty():
             try:
                 q.get_nowait()
-            except asyncio.QueueEmpty:
+            except (asyncio.QueueEmpty, queue.Empty):
                 break
+
+    @staticmethod
+    def _put_dropping_oldest(q: asyncio.Queue | queue.Queue, item) -> None:
+        """put_nowait; a full queue gives up its oldest item for it."""
+        try:
+            q.put_nowait(item)
+        except (asyncio.QueueFull, queue.Full):
+            try:
+                q.get_nowait()
+                q.put_nowait(item)
+            except (asyncio.QueueEmpty, queue.Empty, asyncio.QueueFull, queue.Full):
+                pass
 
     # -------------------------------------------------------------------------
     # Lifecycle
@@ -345,7 +386,7 @@ class AudioOrchestrator:
         self._wake_gate.reset()
 
         self._running = True
-        self._last_activity_time = time.time()
+        self._last_activity_time = time.monotonic()
 
         # Start audio streams
         self._audio_input.start()
@@ -357,8 +398,7 @@ class AudioOrchestrator:
             "enabled" if self.live_cfg.enable_manual_vad else "disabled",
         )
 
-        if self._sound_player:
-            self._sound_player.play(SoundEvent.STARTUP)
+        self._play_sound(SoundEvent.STARTUP)
 
         logger.info("Listening for wake word...")
 
@@ -386,8 +426,7 @@ class AudioOrchestrator:
         """Callback when API session fails unexpectedly."""
         logger.error("API session error — playing error sound and resetting state")
         metrics.API_ERRORS.inc()
-        if self._sound_player:
-            self._sound_player.play(SoundEvent.ERROR)
+        self._play_error_sound()
         self._turn_complete_event.set()
 
     async def _cleanup(self) -> None:
@@ -484,7 +523,7 @@ class AudioOrchestrator:
                 # letting an exception escape kills the whole application
                 # mid-conversation (FIRST_EXCEPTION in _main_loop).
                 logger.exception("Audio capture error")
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(_AUDIO_ERROR_PAUSE)
 
     async def _process_listening_audio(
         self, mono: np.ndarray, mono_bytes: bytes
@@ -493,14 +532,12 @@ class AudioOrchestrator:
         if not self._api_manager.session_active:
             return
 
-        if self._hybrid_vad and self.live_cfg.enable_manual_vad:
+        if self._hybrid_vad:
             speech_started, speech_ended = self._hybrid_vad.process_frame(mono)
 
             if speech_started:
                 logger.info("VAD: Speech started - sending activity_start")
-                self._listening_entry_time = (
-                    None  # user spoke — silence timeout no longer applies
-                )
+                self._silence_wait = None  # user spoke — the timeout no longer applies
                 await self._api_manager.send_activity_start()
 
             if speech_ended:
@@ -555,7 +592,7 @@ class AudioOrchestrator:
 
         await self._send_preroll()
         # Speech was already detected before entering LISTENING — no silence timeout.
-        self._listening_entry_time = None
+        self._silence_wait = None
         self._set_state(SpeakerState.LISTENING)
 
     async def _handle_wake_word_result(self, result: WakeWordResult) -> None:
@@ -586,15 +623,9 @@ class AudioOrchestrator:
 
         self._mic.save_trigger_clip(result)
 
-        _wake_context = (
-            "barge_in"
-            if self._state == SpeakerState.RESPONDING
-            else "re_listen"
-            if self._state == SpeakerState.LISTENING
-            else "idle"
-        )
         metrics.WAKE_DETECTIONS.labels(
-            context=_wake_context, mode=_mode_label(result.relaxed_mode)
+            context=_WAKE_CONTEXT.get(self._state, "idle"),
+            mode=_mode_label(result.relaxed_mode),
         ).inc()
 
         if self._state == SpeakerState.LISTENING:
@@ -615,8 +646,7 @@ class AudioOrchestrator:
                 self._mic.preroll(),
             )
 
-        if self._sound_player:
-            self._sound_player.play(SoundEvent.WAKE_WORD)
+        self._play_sound(SoundEvent.WAKE_WORD)
 
         if self._state == SpeakerState.IDLE:
             self._last_wake_result = result
@@ -670,7 +700,6 @@ class AudioOrchestrator:
             return
         metrics.BARGE_INS.inc()
         self._stop_playback_event.set()
-        self._playback_interrupted = True
         self._api_manager.playback_interrupted = True
 
         # Instant flush: stop audio output immediately
@@ -692,29 +721,20 @@ class AudioOrchestrator:
             await self._api_manager.send_activity_start()
 
         # User is already speaking — silence timeout does not apply.
-        self._listening_entry_time = None
+        self._silence_wait = None
         self._set_state(SpeakerState.LISTENING)
 
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(self.live_cfg.barge_in_resume_delay)
         if self._audio_output:
             self._audio_output.resume()
 
         self._stop_playback_event.clear()
-        self._playback_interrupted = False
         self._api_manager.playback_interrupted = False
 
     async def _forward_audio_to_api(self, audio_bytes: bytes) -> None:
         """Forward audio frame to the API send queue."""
         frame = AudioFrame(data=audio_bytes, mime_type=self.live_cfg.input_mime_type)
-        try:
-            self._api_input_queue.put_nowait(frame)
-        except asyncio.QueueFull:
-            try:
-                self._api_input_queue.get_nowait()
-                self._api_input_queue.put_nowait(frame)
-            except asyncio.QueueEmpty:
-                pass
-
+        self._put_dropping_oldest(self._api_input_queue, frame)
         self._recorder.write(audio_bytes)
 
     # -------------------------------------------------------------------------
@@ -730,7 +750,7 @@ class AudioOrchestrator:
             try:
                 try:
                     audio_data = await asyncio.wait_for(
-                        self._api_output_queue.get(), timeout=0.1
+                        self._api_output_queue.get(), timeout=_QUEUE_POLL_INTERVAL
                     )
                 except asyncio.TimeoutError:
                     continue
@@ -750,18 +770,11 @@ class AudioOrchestrator:
                 for chunk in chunks:
                     if self._stop_playback_event.is_set():
                         break
-                    try:
-                        self._speaker_queue.put_nowait(chunk)
-                    except queue.Full:
-                        try:
-                            self._speaker_queue.get_nowait()
-                            self._speaker_queue.put_nowait(chunk)
-                        except queue.Empty:
-                            pass
+                    self._put_dropping_oldest(self._speaker_queue, chunk)
 
-            except Exception as e:
-                logger.error("Playback bridge error: %s", e)
-                await asyncio.sleep(0.1)
+            except Exception:
+                logger.exception("Playback bridge error")
+                await asyncio.sleep(_AUDIO_ERROR_PAUSE)
 
     # -------------------------------------------------------------------------
     # State Machine
@@ -769,49 +782,38 @@ class AudioOrchestrator:
 
     async def _state_machine_task(self) -> None:
         """Main state machine controller."""
-        follow_up_start: Optional[float] = None
-
+        handlers = {
+            SpeakerState.IDLE: self._handle_idle_state,
+            SpeakerState.LISTENING: self._handle_listening_state,
+            SpeakerState.RESPONDING: self._handle_responding_state,
+            SpeakerState.FOLLOW_UP: self._handle_follow_up_state,
+        }
         while self._running:
             try:
-                if self._state == SpeakerState.IDLE:
-                    await self._handle_idle_state()
-                    follow_up_start = None
-
-                elif self._state == SpeakerState.LISTENING:
-                    await self._handle_listening_state()
-                    follow_up_start = None
-
-                elif self._state == SpeakerState.RESPONDING:
-                    await self._handle_responding_state()
-                    follow_up_start = None
-
-                elif self._state == SpeakerState.FOLLOW_UP:
-                    if not self._text_requests.empty():
-                        follow_up_start = None
-                        await self._open_session_and_listen(self._text_requests.get_nowait())
-                        continue
-                    if follow_up_start is None:
-                        follow_up_start = time.time()
-
-                    elapsed = time.time() - follow_up_start
-                    if elapsed >= self.live_cfg.followup_timeout:
-                        logger.info(
-                            "Follow-up timeout (%.1fs), ending conversation", elapsed
-                        )
-                        metrics.FOLLOWUP_TIMEOUTS.inc()
-                        follow_up_start = None
-                        await self._finish_turn()
-                    else:
-                        await asyncio.sleep(0.05)
-
+                await handlers[self._state]()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 # Broad by design — see _audio_capture_task.
                 logger.exception("State machine error")
-                follow_up_start = None
                 await self._recover_from_state_error()
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(_STATE_ERROR_PAUSE)
+
+    async def _handle_follow_up_state(self) -> None:
+        """Handle FOLLOW_UP state: wait for the user to answer, or a typed request."""
+        if not self._text_requests.empty():
+            await self._open_session_and_listen(self._text_requests.get_nowait())
+            return
+        if self._follow_up_since is None:
+            self._follow_up_since = time.monotonic()
+
+        elapsed = time.monotonic() - self._follow_up_since
+        if elapsed >= self.live_cfg.followup_timeout:
+            logger.info("Follow-up timeout (%.1fs), ending conversation", elapsed)
+            metrics.FOLLOWUP_TIMEOUTS.inc()
+            await self._finish_turn()
+        else:
+            await asyncio.sleep(_STATE_POLL_INTERVAL)
 
     async def _recover_from_state_error(self) -> None:
         """Return to IDLE after a handler blew up mid-turn.
@@ -826,8 +828,7 @@ class AudioOrchestrator:
         if self._state == SpeakerState.IDLE:
             return
         try:
-            if self._sound_player:
-                self._sound_player.play(SoundEvent.ERROR)
+            self._play_error_sound()
             await self._finish_turn(play_end_sound=False)
         except Exception:
             # Recovery itself must never take the state machine down.
@@ -847,7 +848,9 @@ class AudioOrchestrator:
             return
         if not self._wake_event.is_set():
             try:
-                await asyncio.wait_for(self._idle_signal.wait(), timeout=1.0)
+                await asyncio.wait_for(
+                    self._idle_signal.wait(), timeout=_IDLE_POLL_INTERVAL
+                )
             except asyncio.TimeoutError:
                 return
             self._idle_signal.clear()
@@ -906,12 +909,12 @@ class AudioOrchestrator:
         await self._dispatch_deferred_actions()
 
         self._begin_turn(text)
-        self._last_activity_time = time.time()
+        self._last_activity_time = time.monotonic()
 
         if text is not None:
             logger.info("Text request: %s", text)
             # No initial-silence check: nobody is expected to speak.
-            self._listening_entry_time = None
+            self._silence_wait = None
             self._set_state(SpeakerState.LISTENING)
             if await self._api_manager.send_text(text):
                 # Nobody speaks after a typed request, so nothing else ends a
@@ -925,8 +928,7 @@ class AudioOrchestrator:
 
         await self._send_preroll()
         # Arm initial-silence check — no speech detected yet after wake word.
-        self._listening_entry_time = time.time()
-        self._reply_was_empty = False
+        self._silence_wait = _SilenceWait(since=time.monotonic())
         self._set_state(SpeakerState.LISTENING)
 
     async def _handle_listening_state(self) -> None:
@@ -937,25 +939,21 @@ class AudioOrchestrator:
             except Exception:
                 verified = True  # don't reject on verifier error
             self._pending_verification = None
-            activity_started = self._api_manager and self._api_manager.activity_started
-            if not verified and not activity_started:
+            if not verified and not self._api_manager.activity_started:
                 logger.info("STT verification failed — false trigger, aborting session")
-                metrics.FALSE_TRIGGERS.labels(
-                    reason="stt_rejection", mode=self._wake_mode_label()
-                ).inc()
-                await self._close_on_initial_silence()
+                await self._close_after_false_trigger("stt_rejection")
                 return
 
         if self._api_manager.chunks_received > 0:
             logger.info("First audio received, transitioning to RESPONDING")
-            self._listening_entry_time = None
+            self._silence_wait = None
             self._set_state(SpeakerState.RESPONDING)
             return
 
         if self._turn_complete_event.is_set():
             self._turn_complete_event.clear()
             logger.info("Turn complete without audio response")
-            self._listening_entry_time = None
+            self._silence_wait = None
             # A voice turn keeps waiting for late audio (05.09.2026) only while
             # the API ended it and the session lives. After an API error or the
             # watchdog (still awaiting_reply) nothing would leave LISTENING:
@@ -970,65 +968,61 @@ class AudioOrchestrator:
                 # Late audio gets as long as speech after the wake word; with
                 # no deadline the microphone streamed to the API until
                 # somebody spoke or the server closed the session.
-                self._listening_entry_time = time.time()
-                self._reply_was_empty = True
+                self._silence_wait = _SilenceWait(
+                    since=time.monotonic(), after_empty_reply=True
+                )
             return
 
         # Initial silence timeout: no speech detected since wake word —
         # likely a false positive. Close session silently.
-        if self._listening_entry_time is not None and not (
-            self._api_manager and self._api_manager.activity_started
-        ):
-            elapsed = time.time() - self._listening_entry_time
+        wait = self._silence_wait
+        if wait is not None and not self._api_manager.activity_started:
+            elapsed = time.monotonic() - wait.since
             if elapsed > self.live_cfg.initial_silence_timeout:
-                if self._reply_was_empty:
+                if wait.after_empty_reply:
                     await self._end_turn_after_empty_reply(elapsed)
                     return
                 logger.info(
                     "Initial silence timeout (%.1fs) — no speech after wake word, likely false trigger.",
                     elapsed,
                 )
-                await self._close_on_initial_silence()
+                await self._close_after_false_trigger("initial_silence")
                 return
 
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(_STATE_POLL_INTERVAL)
 
     async def _handle_responding_state(self) -> None:
         """Handle RESPONDING state: wait for turn_complete then drain playback."""
         if not self._turn_complete_event.is_set():
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(_STATE_POLL_INTERVAL)
             return
 
         self._turn_complete_event.clear()
 
         # Wait for speaker queue to drain (bounded — guards against AudioOutput hang)
-        drain_deadline = time.time() + self.live_cfg.speaker_drain_timeout
+        drain_deadline = time.monotonic() + self.live_cfg.speaker_drain_timeout
         while not self._speaker_queue.empty() and self._running:
-            if self._playback_interrupted:
+            if self._api_manager.playback_interrupted:
                 break
-            if time.time() > drain_deadline:
+            if time.monotonic() > drain_deadline:
                 logger.warning(
                     "Speaker queue did not drain within %.1fs — clearing buffers",
                     self.live_cfg.speaker_drain_timeout,
                 )
                 break
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_QUEUE_POLL_INTERVAL)
 
         # Clear both queues so any remaining AI audio doesn't bleed into the END
         # sound or the next turn. This matters when the drain loop hit the timeout
         # (lots of buffered audio) or when the bridge task was still refilling
         # _speaker_queue from _api_output_queue as we drained.
         self._drain_queue(self._api_output_queue)
-        while not self._speaker_queue.empty():
-            try:
-                self._speaker_queue.get_nowait()
-            except queue.Empty:
-                break
+        self._drain_queue(self._speaker_queue)
 
         if self._state != SpeakerState.RESPONDING:
             return
 
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(self.live_cfg.post_reply_pause)
 
         # Re-check after sleep: barge-in may have transitioned state to LISTENING.
         if self._state != SpeakerState.RESPONDING:
@@ -1038,7 +1032,7 @@ class AudioOrchestrator:
 
     async def _dispatch_deferred_actions(self) -> tuple[bool, Optional[str]]:
         """Run and clear the pending deferred tool actions, see DeferredPlayback.dispatch."""
-        if not self._api_manager or not self._api_manager.pending_actions:
+        if not self._api_manager.pending_actions:
             return False, None
         actions = list(self._api_manager.pending_actions)
         self._api_manager.pending_actions.clear()
@@ -1053,17 +1047,14 @@ class AudioOrchestrator:
         turn_id = self._turn_id
         # Read the turn first: a barge-in during the deferred actions starts a
         # new turn and clears the transcripts. Publish after them, with their error.
-        turn = None
-        if self._api_manager is not None:
-            turn = (
-                "text" if self._text_turn is not None else "voice",
-                self._text_turn or self._api_manager.user_transcript.strip(),
-                self._api_manager.ai_transcript.strip(),
-            )
+        turn = (
+            "text" if self._text_turn is not None else "voice",
+            self._text_turn or self._api_manager.user_transcript.strip(),
+            self._api_manager.ai_transcript.strip(),
+        )
         self._text_turn = None
         turn_should_end, error = await self._dispatch_deferred_actions()
-        if turn is not None:
-            self._publish_turn(*turn, error)
+        self._publish_turn(*turn, error)
 
         if turn_should_end:
             logger.info("Radio action performed, ending turn.")
@@ -1074,11 +1065,8 @@ class AudioOrchestrator:
         if turn_id != self._turn_id:
             return
 
-        if not self._playback_interrupted:
-            requested = (
-                self._api_manager is not None
-                and self._api_manager.request_for_user_input
-            )
+        if not self._api_manager.playback_interrupted:
+            requested = self._api_manager.request_for_user_input
             if requested or self._ai_ended_with_question():
                 if not requested:
                     logger.info(
@@ -1088,8 +1076,7 @@ class AudioOrchestrator:
                     "Waiting for follow-up (%.1fs, Silero VAD)...",
                     self.live_cfg.followup_timeout,
                 )
-                if self._sound_player:
-                    self._sound_player.play(SoundEvent.FOLLOW_UP)
+                self._play_sound(SoundEvent.FOLLOW_UP)
                 if self._hybrid_vad:
                     self._hybrid_vad.reset()
                 self._set_state(SpeakerState.FOLLOW_UP)
@@ -1109,6 +1096,7 @@ class AudioOrchestrator:
         play_end_sound: bool = True,
         turn_id: Optional[int] = None,
         keep_listening: bool = False,
+        false_trigger: Optional[str] = None,
     ) -> None:
         """Common cleanup after a conversation turn is finished.
 
@@ -1116,7 +1104,9 @@ class AudioOrchestrator:
         awaited something since it decided to end it. A barge-in or a follow-up
         answer can start the next turn during any await: the finished turn then
         leaves the radio volume and the state to the new one. keep_listening
-        only releases the radio and stays in the current state.
+        only releases the radio and stays in the current state. false_trigger
+        (the reason for the metric) closes the session and files its recording
+        as a false trigger instead of counting a turn.
         """
         if turn_id is None:
             turn_id = self._turn_id
@@ -1145,12 +1135,20 @@ class AudioOrchestrator:
         if self._hybrid_vad:
             self._hybrid_vad.reset()
 
-        if play_end_sound and self._sound_player:
-            self._sound_player.play(SoundEvent.END_CONVERSATION)
+        if play_end_sound:
+            self._play_sound(SoundEvent.END_CONVERSATION)
 
         if self._state != SpeakerState.IDLE:
             self._set_state(SpeakerState.IDLE)
-        self._last_activity_time = time.time()
+        self._last_activity_time = time.monotonic()
+
+        if false_trigger:
+            await self._session.close("false_trigger")
+            metrics.FALSE_TRIGGERS.labels(
+                reason=false_trigger, mode=self._wake_mode_label()
+            ).inc()
+            logger.info("Listening for wake word... (session closed after false trigger)")
+            return
 
         await self._session.turn_finished()
 
@@ -1168,34 +1166,14 @@ class AudioOrchestrator:
         """The user spoke and the API answered with nothing: a finished turn,
         not a false wake word, so the session and its recording stay."""
         logger.info("No late audio %.1fs after an empty reply, ending turn.", waited)
-        self._listening_entry_time = None
+        self._silence_wait = None
         await self._finish_turn(play_end_sound=not await self.mpd_client.is_playing())
 
-    async def _close_on_initial_silence(self) -> None:
-        """Close session silently after a false-positive wake word.
-
-        Restores radio volume, closes the API session to save quota, and returns
-        to IDLE without playing the end-conversation sound.
-        """
-        self._listening_entry_time = None
-        if self._pending_verification is not None:
-            self._pending_verification.cancel()
-            self._pending_verification = None
-
-        await self._unduck_radio()
-        self._drain_queue(self._api_input_queue)
-
-        await self._session.close("false_trigger")
-        metrics.FALSE_TRIGGERS.labels(
-            reason="initial_silence", mode=self._wake_mode_label()
-        ).inc()
-
-        self._wake_gate.reset(cooldown=True)
-        if self._hybrid_vad:
-            self._hybrid_vad.reset()
-
-        self._set_state(SpeakerState.IDLE)
-        logger.info("Listening for wake word... (session closed after false trigger)")
+    async def _close_after_false_trigger(self, reason: str) -> None:
+        """Back to IDLE after a false-positive wake word: no end-conversation
+        sound, and the API session is closed to save quota."""
+        self._silence_wait = None
+        await self._finish_turn(play_end_sound=False, false_trigger=reason)
 
     def _publish_turn(
         self, source: str, request: str, reply: str, error: Optional[str] = None
@@ -1215,8 +1193,6 @@ class AudioOrchestrator:
         request_for_user_input. Checks the final character only — a '?' inside
         a sentence (e.g., a parenthetical) must not trigger a follow-up.
         """
-        if self._api_manager is None:
-            return False
         transcript = self._api_manager.ai_transcript.strip()
         return bool(transcript) and transcript.endswith("?")
 
@@ -1249,7 +1225,7 @@ class AudioOrchestrator:
         (MPD keepalive lives in mpd_client.watch_external_changes now.)
         """
         while self._running:
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(_INACTIVITY_CHECK_INTERVAL)
 
             metrics.update_system_metrics()
 
@@ -1263,7 +1239,7 @@ class AudioOrchestrator:
             if self._wake_in_progress:
                 continue
 
-            await self._session.close_if_inactive(time.time() - self._last_activity_time)
+            await self._session.close_if_inactive(time.monotonic() - self._last_activity_time)
 
     # -------------------------------------------------------------------------
     # Preroll

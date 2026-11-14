@@ -12,11 +12,6 @@ from config import AudioConfig, WakeWordConfig
 from mpd_client.client import MPDClientWrapper
 from state import WakeWordResult
 
-# Two triggers closer than this are one wake word.
-TRIGGER_COOLDOWN: float = 0.5
-# "Radio playing" is held this long after the last True, see WakeGate.detect.
-RADIO_PLAYING_HOLD: float = 5.0
-
 
 class WakeGate:
     """Runs the wake word detector on each microphone frame.
@@ -54,8 +49,9 @@ class WakeGate:
         """Reset the wake word detector and recalculate the warmup budget.
 
         Args:
-            short_warmup: Use 0.5 s warmup (barge-in or re-wake while LISTENING).
-                          Default (False) uses 1.5 s warmup after a full turn ends.
+            short_warmup: Use wake_word.short_warmup_seconds (barge-in or re-wake
+                          while LISTENING) instead of warmup_seconds (after a
+                          full turn ends).
             cooldown:     Additionally arm the detector cooldown to prevent
                           immediate re-triggering on the same audio event.
         """
@@ -65,15 +61,19 @@ class WakeGate:
                 self.detector.set_cooldown()
         self.frames_since_reset = 0
         self.warmup_frames_needed = int(
-            (0.5 if short_warmup else 1.5)
+            (
+                self.wake_cfg.short_warmup_seconds
+                if short_warmup
+                else self.wake_cfg.warmup_seconds
+            )
             * self.audio_cfg.input_sample_rate
             / self.audio_cfg.input_chunk
         )
 
     def accept_trigger(self) -> bool:
-        """False for a trigger within TRIGGER_COOLDOWN of the last accepted one."""
-        now = time.time()
-        if now - self.last_trigger_time < TRIGGER_COOLDOWN:
+        """False for a trigger within trigger_dedup_seconds of the last accepted one."""
+        now = time.monotonic()
+        if now - self.last_trigger_time < self.wake_cfg.trigger_dedup_seconds:
             return False
         self.last_trigger_time = now
         return True
@@ -100,14 +100,17 @@ class WakeGate:
         # MPD plays steadily (stale/corrupted status reads in the client cache; MPD
         # itself is rock-stable). Those bad reads
         # flipped the wake thresholds to strict IDLE mid-radio, dropping ~half of valid
-        # calls. Hold "radio playing" for 5s after the last True so gaps are bridged.
+        # calls. Hold "radio playing" for radio_playing_hold_seconds after the last
+        # True so gaps are bridged.
         # A frozen stream is silent, so it must not relax the gates either.
         playing = (
             self.mpd_client.is_playing_cached()
             and not self.mpd_client.is_stream_stalled()
         )
         if playing:
-            self._radio_playing_until = time.monotonic() + RADIO_PLAYING_HOLD
+            self._radio_playing_until = (
+                time.monotonic() + self.wake_cfg.radio_playing_hold_seconds
+            )
         relaxed_mode = relaxation_configured and (
             self._responding()
             or playing

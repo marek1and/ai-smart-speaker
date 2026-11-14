@@ -99,7 +99,7 @@ class AudioOutput:
         Called from audio thread - must be fast, fill buffer completely.
         """
         if status:
-            now = time.time()
+            now = time.monotonic()
             if now - self._last_status_log_time >= 1.0:
                 logger.warning("Audio output status: %s", status)
                 self._last_status_log_time = now

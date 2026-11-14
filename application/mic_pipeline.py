@@ -130,7 +130,7 @@ class MicPipeline:
             or result.score < self.wake_cfg.candidate_threshold
         ):
             return
-        now = time.time()
+        now = time.monotonic()
         if (
             now - self._last_candidate_time < self.wake_cfg.cooldown_seconds
             or now - last_trigger_time < self.wake_cfg.cooldown_seconds

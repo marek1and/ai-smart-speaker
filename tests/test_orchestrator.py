@@ -150,7 +150,7 @@ async def test_text_turn_opens_a_session_without_silence_timeout(make):
     await o._handle_idle_state()
     assert o._api_manager.sent == ["zgaś światło"]
     assert o.state == SpeakerState.LISTENING
-    assert o._listening_entry_time is None
+    assert o._silence_wait is None
     assert "duck" in o.mpd_client.calls
 
 
@@ -218,8 +218,7 @@ async def test_voice_turn_without_audio_ends_when_nothing_follows(make, monkeypa
     o._recorder.close_as_false_trigger = lambda: closed_as_false.append(1)
     o._turn_complete_event.set()
     await o._handle_listening_state()
-    now = orch.time.time()
-    monkeypatch.setattr(orch.time, "time", lambda: now + get_config().live.initial_silence_timeout + 1)
+    o._silence_wait.since -= get_config().live.initial_silence_timeout + 1
     await o._handle_listening_state()
     assert o.state == SpeakerState.IDLE
     # the user did speak: not a false wake word, the session stays for the next one
@@ -234,8 +233,7 @@ async def test_voice_turn_without_audio_keeps_listening_once_the_user_speaks(mak
     o._turn_complete_event.set()
     await o._handle_listening_state()
     o._api_manager.activity_started = True
-    now = orch.time.time()
-    monkeypatch.setattr(orch.time, "time", lambda: now + get_config().live.initial_silence_timeout + 1)
+    o._silence_wait.since -= get_config().live.initial_silence_timeout + 1
     await o._handle_listening_state()
     assert o.state == SpeakerState.LISTENING
 
@@ -246,10 +244,26 @@ async def test_silence_after_the_wake_word_is_still_a_false_trigger(make, monkey
     await o._handle_idle_state()
     closed_as_false = []
     o._recorder.close_as_false_trigger = lambda: closed_as_false.append(1)
-    now = orch.time.time()
-    monkeypatch.setattr(orch.time, "time", lambda: now + get_config().live.initial_silence_timeout + 1)
+    o._silence_wait.since -= get_config().live.initial_silence_timeout + 1
     await o._handle_listening_state()
     assert o.state == SpeakerState.IDLE and closed_as_false and o._api_manager.closed == 1
+
+
+async def test_stt_rejection_is_counted_once_as_a_false_trigger(make):
+    import metrics
+
+    def count(reason):
+        return metrics.FALSE_TRIGGERS.labels(reason=reason, mode="strict")._value.get()
+
+    o = make()
+    o._wake_event.set()
+    await o._handle_idle_state()
+    o._pending_verification = asyncio.get_running_loop().create_future()
+    o._pending_verification.set_result(False)
+    before = count("stt_rejection"), count("initial_silence")
+    await o._handle_listening_state()
+    assert o.state == SpeakerState.IDLE and o._api_manager.closed == 1
+    assert (count("stt_rejection"), count("initial_silence")) == (before[0] + 1, before[1])
 
 
 async def test_voice_turn_ends_after_an_api_error(make):

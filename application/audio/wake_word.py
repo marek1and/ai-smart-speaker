@@ -188,7 +188,7 @@ class WakeWordDetector:
             self._consecutive_above_threshold = 0
 
         # Check cooldown - don't trigger if we triggered recently
-        now = time.time()
+        now = time.monotonic()
         in_cooldown = (now - self._last_trigger_time) < self.cfg.cooldown_seconds
 
         # Relaxed consecutive-frame requirement: voice-over-music sustains
@@ -231,4 +231,4 @@ class WakeWordDetector:
 
     def set_cooldown(self) -> None:
         """Manually trigger cooldown (e.g., after conversation ends)."""
-        self._last_trigger_time = time.time()
+        self._last_trigger_time = time.monotonic()

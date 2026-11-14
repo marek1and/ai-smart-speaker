@@ -239,7 +239,7 @@ class HybridVAD:
         if is_speech:
             self.state.speech_frames += 1
             self.state.silence_frames = 0
-            self.state.last_speech_time = time.time()
+            self.state.last_speech_time = time.monotonic()
 
             # Detect speech start
             if (
