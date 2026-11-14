@@ -1,10 +1,8 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from typing import AsyncIterator, Optional
 
-import numpy as np
 from google import genai
 from google.genai.live import AsyncSession
 from google.genai.types import (
@@ -30,29 +28,13 @@ from websockets.exceptions import ConnectionClosed
 import metrics
 from config import AppConfig
 from realtime.base import INPUT_POLL_INTERVAL, BaseRealtimeManager
+from realtime.reply_audio import ReplyAudio
 from realtime.turn_log import TurnLog
 from functions.schemas import GEMINI_TOOLS as TOOLS
 
 logger = logging.getLogger(__name__)
 
-_PCM16_FULL_SCALE = 32768.0
 _PCM16_BYTES_PER_SAMPLE = 2
-
-
-@dataclass
-class _ReplyAudio:
-    """What is known about the audio of the reply to the current turn."""
-
-    silent_run: int = 0  # consecutive silent chunks
-    # Silent chunks are held back until the model speaks again (then they
-    # play: a pause) or generation_complete comes (then they were trailing
-    # padding: up to 20 s of it on the speaker, 01.11.2026).
-    held: list[bytes] = field(default_factory=list)
-    held_bytes: int = 0
-    ended_early: bool = False  # this turn already ended before turn_complete
-    voice_seen: bool = False  # the model said something this turn
-    voice_played: float = 0.0  # seconds of voice queued for the speaker
-    voice_dropped: float = 0.0  # seconds of voice over the transcript budget
 
 
 class GeminiRealtimeManager(BaseRealtimeManager):
@@ -89,38 +71,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         # (measured 4-19 s on 01.11.2026): see _end_turn_after_generation.
         self._generation_end_task: Optional[asyncio.Task] = None
         self._late_turn_completes: int = 0
-        self._reply = _ReplyAudio()
+        self._reply = self._new_reply()
         self._turn_log = TurnLog(self.live_cfg)
 
-    def _silence_run_is_notable(self, run_length: int) -> bool:
-        """Is this silent-chunk run long enough to warrant a warning?
-
-        Warns once the run reaches output_silence_warn_after, then every
-        output_silence_warn_every chunks for as long as the silence continues.
-        """
-        warn_after = self.live_cfg.output_silence_warn_after
-        warn_every = self.live_cfg.output_silence_warn_every
-        if run_length < warn_after:
-            return False
-        if run_length == warn_after:
-            return True
-        return warn_every > 0 and (run_length - warn_after) % warn_every == 0
-
-    @staticmethod
-    def _pcm16_rms(data: bytes) -> float:
-        """Return normalised RMS [0.0, 1.0] for a 16-bit little-endian PCM buffer."""
-        arr = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-        return float(np.sqrt(np.mean(np.square(arr)))) / _PCM16_FULL_SCALE
-
-    def _is_silent(self, data: bytes) -> bool:
-        """No voice in this chunk. Judged on the first difference (a high-pass):
-        Gemini's broken answers carry a rumble below 300 Hz at RMS up to 0.017
-        that plain RMS took for voice (6 s of it played on 12.11.2026)."""
-        arr = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-        if arr.size < 2:
-            return True
-        level = float(np.sqrt(np.mean(np.square(np.diff(arr))))) / _PCM16_FULL_SCALE
-        return level < self.live_cfg.output_silence_highpass_threshold
+    def _new_reply(self) -> ReplyAudio:
+        return ReplyAudio(self.live_cfg, self.config.audio.output_sample_rate)
 
     def initialize(self) -> None:
         """Initialize the Gemini client."""
@@ -142,7 +97,7 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         if self._generation_end_task and not self._generation_end_task.done():
             self._late_turn_completes += 1
         self._cancel_generation_end()
-        self._reply = _ReplyAudio()
+        self._reply = self._new_reply()
 
     def _on_watchdog_timeout(self) -> None:
         # The turn ended without turn_complete: a late one expected for an
@@ -151,49 +106,11 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             logger.info("Dropping %d expected late turn_complete(s) after the watchdog", self._late_turn_completes)
             self._late_turn_completes = 0
 
-    def _seconds(self, nbytes: int) -> float:
-        """Duration of PCM16 output audio."""
-        return nbytes / _PCM16_BYTES_PER_SAMPLE / self.config.audio.output_sample_rate
-
     def _drop_held_silence(self) -> None:
         """Trailing silence: not played."""
-        if self._reply.held_bytes:
-            self._turn_log.note("trimmed", self._seconds(self._reply.held_bytes))
-        self._reply.held, self._reply.held_bytes = [], 0
-
-    async def _release_held_silence(self) -> None:
-        """Speech follows: the held silence was a pause. It plays, cut to
-        max_played_pause (6 s of silence came before a 0.1 s blip, 01.11.2026)."""
-        budget = (
-            int(self.live_cfg.max_played_pause * self.config.audio.output_sample_rate)
-            * _PCM16_BYTES_PER_SAMPLE
-        )
-        for held in self._reply.held:
-            if budget <= 0:
-                break
-            await self._output_queue.put(held[:budget])
-            budget -= len(held)
-        self._reply.held, self._reply.held_bytes = [], 0
-
-    def _over_voice_budget(self, seconds: float) -> bool:
-        """Is this voice chunk more than the output transcript accounts for?
-        Gemini once sent 51 s of audio for "Włączam Polsat." (03.11.2026);
-        normal answers take up to 0.10 s per character."""
-        per_char = self.live_cfg.voice_budget_per_char
-        chars = len(self._ai_transcript.strip())
-        if not per_char or not chars:
-            return False  # disabled, or no transcript to judge by
-        budget = self.live_cfg.voice_budget_slack + chars * per_char
-        reply = self._reply
-        if reply.voice_played + seconds <= budget:
-            return False
-        if not reply.voice_dropped:
-            logger.warning(
-                "Voice past %.1fs for a %d-character transcript — not played", budget, chars
-            )
-        reply.voice_dropped += seconds
-        self._turn_log.note("dropped", reply.voice_dropped)
-        return True
+        trimmed = self._reply.drop_held()
+        if trimmed:
+            self._turn_log.note("trimmed", trimmed)
 
     def _get_session_config(self) -> LiveConnectConfig:
         """Build the LiveConnectConfig for API sessions.
@@ -434,8 +351,8 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             for part in mt.parts:
                 data = getattr(part, "inline_data", None)
                 if data and isinstance(data.data, bytes) and data.data:
-                    kind = "←silence" if self._is_silent(data.data) else "←voice"
-                    self._turn_log.event(kind, self._seconds(len(data.data)))
+                    kind = "←silence" if self._reply.is_silent(data.data) else "←voice"
+                    self._turn_log.event(kind, self._reply.seconds(len(data.data)))
                 elif getattr(part, "text", None):
                     self._turn_log.event("←text")
         if getattr(getattr(sc, "input_transcription", None), "text", None):
@@ -549,65 +466,32 @@ class GeminiRealtimeManager(BaseRealtimeManager):
             return
 
         self._chunks_received += 1
-        reply = self._reply
-        rms = self._pcm16_rms(data)
-        is_silent = self._is_silent(data)
-        seconds = self._seconds(len(data))
-        self._turn_log.add_audio(seconds, is_silent)
-        self._log_silence_run(is_silent, rms)
+        chunk = self._reply.take(data, len(self._ai_transcript.strip()))
+        self._turn_log.add_audio(chunk.seconds, chunk.silent)
 
         # The first chunk starts the watchdog (response_started setter), later
         # voice extends it. Silent chunks do not: Gemini streaming silence
         # indefinitely must eventually time out.
         if not self._response_started:
             self.response_started = True
-        elif not is_silent:
+        elif not chunk.silent:
             self.reset_watchdog_if_running()
 
-        if is_silent:
-            reply.held.append(data)
-            reply.held_bytes += len(data)
+        if chunk.silent:
             self._end_turn_on_long_silence()
             return
-        if self._over_voice_budget(seconds):
+        if chunk.over_budget:
+            self._turn_log.note("dropped", self._reply.voice_dropped)
             if not self._generation_end_task:
                 self._schedule_turn_end()
             return
-        if reply.ended_early:
-            # Measures how often trailing_silence_end cuts an answer.
-            logger.warning("Speech after the turn already ended early")
-        reply.voice_seen = True
         self._cancel_generation_end()  # the model is still talking
-        await self._release_held_silence()
-
-        reply.voice_played += seconds
-        await self._output_queue.put(data)
+        for audio in chunk.play:
+            await self._output_queue.put(audio)
         if self._chunks_received == 1:
-            logger.info("Receiving audio response (chunk_bytes=%d, rms=%.5f)...", len(data), rms)
-
-    def _log_silence_run(self, is_silent: bool, rms: float) -> None:
-        reply = self._reply
-        if is_silent:
-            reply.silent_run += 1
-            if self._silence_run_is_notable(reply.silent_run):
-                logger.warning(
-                    "Receiving SILENT audio from Gemini (chunk #%d, rms=%.5f, consecutive_silent=%d) — watchdog NOT reset",
-                    self._chunks_received, rms, reply.silent_run,
-                )
-            else:
-                logger.debug(
-                    "Silent chunk #%d (rms=%.5f, consecutive_silent=%d)",
-                    self._chunks_received, rms, reply.silent_run,
-                )
-            return
-        if reply.silent_run > 0:
-            log = (
-                logger.info
-                if reply.silent_run >= self.live_cfg.output_silence_warn_after
-                else logger.debug
+            logger.info(
+                "Receiving audio response (chunk_bytes=%d, rms=%.5f)...", len(data), chunk.rms
             )
-            log("Audio resumed after %d silent chunks (rms=%.5f)", reply.silent_run, rms)
-        reply.silent_run = 0
 
     def _handle_turn_complete(self) -> bool:
         """False when the turn_complete was ignored (late or stale)."""
@@ -643,19 +527,15 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         return True
 
     def _check_voice_matches_transcript(self) -> None:
-        """Counts answers whose audio is too short for their transcript: Gemini
-        sent 1.0 s of voice and 12 s of silence for a 35-character sentence
-        (09.11.2026). Normal answers take 0.06-0.11 s per character."""
-        per_char = self.live_cfg.min_voice_per_char
+        """Counts answers whose audio is too short for their transcript."""
         chars = len(self._ai_transcript.strip())
-        if not per_char or not chars or self.playback_interrupted:
+        if self.playback_interrupted or not self._reply.is_incomplete(chars):
             return
-        if self._reply.voice_played < chars * per_char:
-            metrics.TRUNCATED_ANSWERS.inc()
-            logger.warning(
-                "Answer audio incomplete: %.1fs of voice for a %d-character transcript",
-                self._reply.voice_played, chars,
-            )
+        metrics.TRUNCATED_ANSWERS.inc()
+        logger.warning(
+            "Answer audio incomplete: %.1fs of voice for a %d-character transcript",
+            self._reply.voice_played, chars,
+        )
 
     def _cancel_generation_end(self) -> None:
         if self._generation_end_task and not self._generation_end_task.done():
@@ -671,16 +551,14 @@ class GeminiRealtimeManager(BaseRealtimeManager):
         )
 
     def _end_turn_on_long_silence(self) -> None:
-        """Treat a long run of silence after speech like generation_complete:
-        once Gemini generated 76 s of silence and sent generation_complete
-        only after 12 s (01.11.2026)."""
-        limit = self.live_cfg.trailing_silence_end
-        reply = self._reply
-        if not limit or reply.ended_early or self._generation_end_task or not reply.voice_seen:
-            return  # disabled, done, already ending, or leading silence
-        held = self._seconds(reply.held_bytes)
-        if held >= limit:
-            logger.info("%.1fs of silence after the answer — treating it as its end", held)
+        """Treat a long run of silence after speech like generation_complete."""
+        if self._reply.ended_early or self._generation_end_task:
+            return  # done, or already ending
+        if self._reply.trailing_silence_is_long():
+            logger.info(
+                "%.1fs of silence after the answer — treating it as its end",
+                self._reply.seconds(self._reply.held_bytes),
+            )
             self._schedule_turn_end()
 
     async def _end_turn_after_generation(self) -> None:

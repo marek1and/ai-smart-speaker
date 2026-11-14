@@ -1006,7 +1006,7 @@ def tone_msg(freq, rms, seconds=0.2):
     (b"", True),
 ])
 def test_gemini_rumble_and_empty_chunks_are_silence(gemini, data, silent):
-    assert gemini._is_silent(data) is silent
+    assert gemini._reply.is_silent(data) is silent
 
 
 async def test_gemini_rumble_is_not_played_and_trails_the_voice_as_silence(gemini):
