@@ -10,6 +10,7 @@ import pytest
 
 import deferred_playback
 import orchestrator as orch
+import session_keeper
 from audio.sounds import SoundEvent
 from config import get_config
 from state import DeferredAction, SpeakerState
@@ -119,10 +120,10 @@ class FakeSounds:
 def make():
     def factory(api=None, playing=False):
         o = orch.AudioOrchestrator(get_config())
-        o._api_manager = api or FakeApi()
+        o._api_manager = o._session.api = api or FakeApi()
         o.mpd_client = o._deferred_playback.mpd_client = FakeMPD(playing)
         o._mqtt_bridge = FakeBridge()
-        o._recorder = FakeRecorder()
+        o._recorder = o._session.recorder = FakeRecorder()
         o._sound_player = FakeSounds()
         o._hybrid_vad = None
         o._reset_wake_detector = lambda **k: None
@@ -483,7 +484,7 @@ async def test_a_new_session_gets_the_current_device_states(make, monkeypatch):
     async def states():
         return "Stan: light.salon_glowne: on"
 
-    monkeypatch.setattr(orch, "prompt_state_context", states)
+    monkeypatch.setattr(session_keeper, "prompt_state_context", states)
     o = make()
     seen = []
     real_open = o._api_manager.open_session
@@ -682,7 +683,7 @@ async def test_barge_in_during_the_unduck_keeps_its_turn(make):
     await finish
     assert o.state == SpeakerState.LISTENING
     assert SoundEvent.END_CONVERSATION not in o._sound_player.played
-    assert o._session_turn_count == 0
+    assert o._session.turn_count == 0
 
 
 async def test_follow_up_answer_during_the_timeout_unduck_keeps_its_turn(make):
@@ -740,13 +741,13 @@ async def test_empty_reply_with_a_radio_action_still_waits_for_late_audio(make):
     await o._handle_listening_state()
     assert o.state == SpeakerState.LISTENING
     assert o.mpd_client.calls[-1] == "unduck"
-    assert o._session_turn_count == 0
+    assert o._session.turn_count == 0
 
 
 async def test_session_closes_after_the_turn_limit(make):
     o = make()
     o._api_manager.session_active = True
-    o._session_turn_count = get_config().live.session_max_turns - 1
+    o._session.turn_count = get_config().live.session_max_turns - 1
     o._state = SpeakerState.RESPONDING
     await o._finish_turn()
     assert o._api_manager.closed == 1

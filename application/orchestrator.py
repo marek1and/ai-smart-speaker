@@ -40,11 +40,11 @@ from functions.definitions import (
     drop_prefetched,
     get_radio_client,
     inject_mpd_client,
-    prompt_state_context,
 )
 import metrics
 from mpd_client.client import MPDClientWrapper
 from realtime import BaseRealtimeManager, create_realtime_manager
+from session_keeper import SessionKeeper
 from state import AudioFrame, SpeakerState, WakeWordResult
 from tools.xvf_client import ReSpeakerLeds, open_respeaker
 from tools.respeaker_monitor import respeaker_monitor_task
@@ -174,6 +174,7 @@ class AudioOrchestrator:
         self._recorder = SessionRecorder(
             self.audio_cfg.input_sample_rate, self.audio_cfg.output_sample_rate
         )
+        self._session = SessionKeeper(self.live_cfg, self._recorder)
 
         # Warmup control (prevent false wake word triggers after state transitions)
         self._frames_since_reset: int = 0
@@ -187,11 +188,6 @@ class AudioOrchestrator:
         # The deadline was re-armed after a reply without audio: when it
         # passes, the turn ends normally instead of as a false trigger.
         self._reply_was_empty: bool = False
-
-        # Counts completed turns in the current session. Reset when a new session
-        # is opened; when it reaches session_max_turns the session is closed at
-        # the next natural IDLE boundary.
-        self._session_turn_count: int = 0
 
         # Current audio frame for status display
         self._current_audio_frame: Optional[np.ndarray] = None
@@ -382,6 +378,7 @@ class AudioOrchestrator:
             self._api_output_queue,
         )
         self._api_manager.initialize()
+        self._session.api = self._api_manager
         self._api_manager.set_callbacks(
             on_turn_complete=self._on_turn_complete,
             on_interrupted=self._on_interrupted,
@@ -1115,33 +1112,13 @@ class AudioOrchestrator:
         wake word, or answering a typed request when text is given."""
         if text is None:
             self._drop_queued_text()
-        if not self._api_manager.session_active:
-            self._api_manager.session_context = await prompt_state_context()
-            await self._api_manager.open_session()
-            if not self._api_manager.session_active:
-                logger.error(
-                    "Failed to open API session — playing error sound and returning to IDLE"
-                )
-                metrics.API_ERRORS.inc()
-                if self._sound_player:
-                    self._sound_player.play(SoundEvent.ERROR)
-                await self._unduck_radio()
-                self._set_state(SpeakerState.IDLE)
-                if text is not None:
-                    self._publish_turn("text", text, "", error="session_failed")
-                return
-            metrics.SESSIONS_OPENED.inc()
-            self._recorder.start(
-                model_score=self._last_wake_result.score
-                if self._last_wake_result
-                else None,
-                verifier_score=self._last_wake_result.verifier_score
-                if self._last_wake_result
-                else None,
-            )
-            self._session_turn_count = 0
-        else:
-            logger.info("Reusing existing session (recording continues)")
+        if not await self._session.open(self._last_wake_result):
+            self._play_error_sound()
+            await self._unduck_radio()
+            self._set_state(SpeakerState.IDLE)
+            if text is not None:
+                self._publish_turn("text", text, "", error="session_failed")
+            return
 
         if self._hybrid_vad:
             self._hybrid_vad.reset()
@@ -1392,24 +1369,11 @@ class AudioOrchestrator:
         self._set_state(SpeakerState.IDLE)
         self._last_activity_time = time.time()
 
-        self._session_turn_count += 1
-        metrics.SESSION_TURNS.inc()
-        if (
-            self._api_manager is not None
-            and self._api_manager.session_active
-            and self._session_turn_count >= self.live_cfg.session_max_turns
-        ):
-            logger.info(
-                "Session turn limit reached (%d), closing session.",
-                self._session_turn_count,
-            )
-            metrics.SESSIONS_CLOSED.labels(reason="max_turns").inc()
-            await self._api_manager.close_session()
-            self._recorder.close()
+        await self._session.turn_finished()
 
         if self._is_tty:
             print()
-        if self._api_manager is not None and self._api_manager.session_active:
+        if self._session.active:
             logger.info(
                 "Listening for wake word... (session kept alive for %.0fs)",
                 self.live_cfg.session_inactivity_timeout,
@@ -1438,13 +1402,10 @@ class AudioOrchestrator:
         await self._unduck_radio()
         self._drain_queue(self._api_input_queue)
 
-        if self._api_manager:
-            await self._api_manager.close_session()
-        self._recorder.close_as_false_trigger()
+        await self._session.close("false_trigger")
         metrics.FALSE_TRIGGERS.labels(
             reason="initial_silence", mode=self._wake_mode_label()
         ).inc()
-        metrics.SESSIONS_CLOSED.labels(reason="false_trigger").inc()
 
         self._reset_wake_detector(cooldown=True)
         if self._hybrid_vad:
@@ -1509,8 +1470,6 @@ class AudioOrchestrator:
 
             metrics.update_system_metrics()
 
-            if not self._api_manager.session_active:
-                continue
             if self._state != SpeakerState.IDLE:
                 continue
             # A wake word is mid-flight: the session it just opened is still
@@ -1521,12 +1480,7 @@ class AudioOrchestrator:
             if self._wake_in_progress:
                 continue
 
-            elapsed = time.time() - self._last_activity_time
-            if elapsed > self.live_cfg.session_inactivity_timeout:
-                logger.info("Session inactive for %.0fs, closing...", elapsed)
-                metrics.SESSIONS_CLOSED.labels(reason="inactivity").inc()
-                await self._api_manager.close_session()
-                self._recorder.close()
+            await self._session.close_if_inactive(time.time() - self._last_activity_time)
 
     # -------------------------------------------------------------------------
     # Preroll
