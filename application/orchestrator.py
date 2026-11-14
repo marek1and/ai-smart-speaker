@@ -13,15 +13,14 @@ import logging
 import queue
 import sys
 import time
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Deque, Optional
+from typing import Optional
 
 import numpy as np
 
 from audio.input import AudioInput
 from audio.output import AudioOutput
-from audio.recorder import SessionRecorder, save_clip
+from audio.recorder import SessionRecorder
 from audio.sounds import SoundEvent, SoundPlayer
 from audio.vad import HybridVAD, create_hybrid_vad
 from audio.verifier import WakeWordVerifier
@@ -42,6 +41,7 @@ from functions.definitions import (
     inject_mpd_client,
 )
 import metrics
+from mic_pipeline import MicPipeline
 from mpd_client.client import MPDClientWrapper
 from realtime import BaseRealtimeManager, create_realtime_manager
 from session_keeper import SessionKeeper
@@ -102,47 +102,15 @@ class AudioOrchestrator:
         # Flags
         self._playback_interrupted = False
 
-        # Thread-safe queues for audio I/O
-        self._mic_queue: queue.Queue[np.ndarray] = queue.Queue(
-            maxsize=self.audio_cfg.input_queue_maxsize
-        )
+        # Thread-safe queue for audio output
         self._speaker_queue: queue.Queue[bytes] = queue.Queue(
             maxsize=self.audio_cfg.output_queue_maxsize
         )
+        self._mic = MicPipeline(config)
 
         # Async queues for API communication
         self._api_input_queue: asyncio.Queue[AudioFrame] = asyncio.Queue(maxsize=50)
         self._api_output_queue: asyncio.Queue[bytes] = asyncio.Queue()
-
-        # Preroll buffer for capturing audio before wake word
-        preroll_frames = int(
-            self.live_cfg.preroll_seconds
-            * self.audio_cfg.input_sample_rate
-            / self.audio_cfg.input_chunk
-        )
-        self._preroll_buffer: Deque[bytes] = deque(maxlen=max(preroll_frames, 5))
-
-        # Detector input ring buffer, dumped to a WAV at trigger time. The
-        # preroll buffer can't serve this purpose: it is flushed at session
-        # open (~0.7s after the trigger), by which point it has rolled past
-        # most of the triggering audio.
-        self._trigger_clip_buffer: Optional[Deque[bytes]] = None
-        self._clip_channels: int = 1
-        self._last_candidate_time: float = 0.0
-        if self.wake_cfg.save_trigger_clips or self.wake_cfg.save_candidate_clips:
-            clip_frames = int(
-                self.wake_cfg.trigger_clip_seconds
-                * self.audio_cfg.input_sample_rate
-                / self.audio_cfg.input_chunk
-            )
-            self._trigger_clip_buffer = deque(maxlen=max(clip_frames, 5))
-
-        # AEC health metric: mic/reference ratios from playback frames
-        # (see _update_aec_metric).
-        self._aec_ratio_window: Deque[float] = deque(
-            maxlen=max(config.metrics.aec_window_frames, 1)
-        )
-        self._aec_frame_counter: int = 0
 
         # Events for coordination
         self._wake_event = asyncio.Event()
@@ -179,9 +147,6 @@ class AudioOrchestrator:
         # The deadline was re-armed after a reply without audio: when it
         # passes, the turn ends normally instead of as a false trigger.
         self._reply_was_empty: bool = False
-
-        # Current audio frame for status display
-        self._current_audio_frame: Optional[np.ndarray] = None
 
         # STT wake word verifier (optional, loaded at startup if enabled)
         self._verifier: Optional[WakeWordVerifier] = None
@@ -328,7 +293,7 @@ class AudioOrchestrator:
         )
 
         # Initialize audio I/O (SoundDevice)
-        self._audio_input = AudioInput(self.audio_cfg, self._mic_queue)
+        self._audio_input = AudioInput(self.audio_cfg, self._mic.queue)
         self._audio_output = AudioOutput(self.audio_cfg, self._speaker_queue)
 
         # Initialize wake word detector
@@ -374,7 +339,7 @@ class AudioOrchestrator:
 
         # Thread pool for CPU-bound tasks (wake word, VAD)
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="audio")
-        self._wake_gate.executor = self._executor
+        self._wake_gate.executor = self._mic.executor = self._executor
 
         # Long initial warmup to suppress false triggers on startup noise
         self._wake_gate.reset()
@@ -499,38 +464,10 @@ class AudioOrchestrator:
         """Continuous audio capture from microphone with VAD processing."""
         while self._running:
             try:
-                try:
-                    raw_audio = await asyncio.wait_for(
-                        asyncio.to_thread(self._mic_queue.get, timeout=0.5),
-                        timeout=1.0,
-                    )
-                except (asyncio.TimeoutError, queue.Empty):
+                frame = await self._mic.next_frame()
+                if frame is None:
                     continue
-
-                # Extract mono channel (mic might be stereo)
-                stereo = raw_audio.ndim == 2 and raw_audio.shape[1] > 1
-                if stereo:
-                    mono = raw_audio[:, 0]
-                else:
-                    mono = raw_audio.flatten()
-
-                if mono.size == 0:
-                    continue
-
-                self._current_audio_frame = mono
-                mono_bytes = mono.tobytes()
-                self._preroll_buffer.append(mono_bytes)
-                if self._trigger_clip_buffer is not None:
-                    # Full frame, not just mono: with the XVF3800 right channel
-                    # muxed to the far-end reference (5 0), a stereo clip
-                    # self-labels whether our own audio was playing and what it
-                    # was. Downstream prepare_recordings.py scores channel 0.
-                    self._clip_channels = raw_audio.shape[1] if stereo else 1
-                    self._trigger_clip_buffer.append(
-                        raw_audio.tobytes() if stereo else mono_bytes
-                    )
-                if stereo:
-                    self._update_aec_metric(raw_audio)
+                mono, mono_bytes = frame
 
                 wake_result = await self._wake_gate.detect(mono)
                 await self._handle_wake_word_result(wake_result)
@@ -548,68 +485,6 @@ class AudioOrchestrator:
                 # mid-conversation (FIRST_EXCEPTION in _main_loop).
                 logger.exception("Audio capture error")
                 await asyncio.sleep(0.1)
-
-    def _maybe_save_candidate_clip(self, result: WakeWordResult) -> None:
-        """Dump a near-miss (hot score, no trigger) for offline review.
-
-        Captures the band invisible to trigger clips: voices the model
-        undershoots (household members) and borderline noises. Rate-limited
-        by cooldown_seconds against both hot streaks of the same event and
-        the hot tail that follows a real trigger.
-        """
-        if (
-            not self.wake_cfg.save_candidate_clips
-            or self._trigger_clip_buffer is None
-            or result.score < self.wake_cfg.candidate_threshold
-        ):
-            return
-        now = time.time()
-        if (
-            now - self._last_candidate_time < self.wake_cfg.cooldown_seconds
-            or now - self._wake_gate.last_trigger_time < self.wake_cfg.cooldown_seconds
-        ):
-            return
-        self._last_candidate_time = now
-        clip_frames = list(self._trigger_clip_buffer)
-        logger.info(
-            "Near-miss candidate (score=%.3f, verifier=%s, rms=%.0f) — saving clip",
-            result.score,
-            f"{result.verifier_score:.3f}" if result.verifier_score is not None else "n/a",
-            result.window_rms,
-        )
-        asyncio.get_running_loop().run_in_executor(
-            self._executor,
-            save_clip,
-            clip_frames,
-            self.audio_cfg.input_sample_rate,
-            "candidate",
-            result.score,
-            result.verifier_score,
-            self._clip_channels,
-        )
-
-    def _update_aec_metric(self, raw_audio: np.ndarray) -> None:
-        """Track echo-cancellation health from the far-end reference channel.
-
-        Right input channel carries the XVF3800 far-end reference with system
-        delay (mux 5 0), time-aligned with the mic channel. On frames where
-        the reference has signal (our audio is playing), the mic channel of a
-        healthy AEC holds only residue — the median mic/ref ratio over a
-        rolling window is exported in dB as speaker_aec_residual_db. Median
-        (not mean) so double-talk frames don't dominate the trend.
-        """
-        ref = raw_audio[:, 1].astype(np.float32)
-        ref_rms = float(np.sqrt(np.mean(ref**2)))
-        if ref_rms < self.config.metrics.aec_ref_min_rms:
-            return
-        mic = raw_audio[:, 0].astype(np.float32)
-        mic_rms = float(np.sqrt(np.mean(mic**2)))
-        self._aec_ratio_window.append(mic_rms / ref_rms)
-        self._aec_frame_counter += 1
-        # Refresh the gauge ~1×/s (31 frames × 32 ms), not every frame.
-        if self._aec_frame_counter % 31 == 0:
-            median_ratio = float(np.median(self._aec_ratio_window))
-            metrics.AEC_RESIDUAL_DB.set(20.0 * np.log10(max(median_ratio, 1e-6)))
 
     async def _process_listening_audio(
         self, mono: np.ndarray, mono_bytes: bytes
@@ -686,7 +561,7 @@ class AudioOrchestrator:
     async def _handle_wake_word_result(self, result: WakeWordResult) -> None:
         """Handle wake word detection result based on current state."""
         if not result.triggered:
-            self._maybe_save_candidate_clip(result)
+            self._mic.maybe_save_candidate_clip(result, self._wake_gate.last_trigger_time)
             self._print_status(result)
             return
 
@@ -709,19 +584,7 @@ class AudioOrchestrator:
                 result.window_rms,
             )
 
-        if self._trigger_clip_buffer is not None:
-            # Snapshot before more frames roll the deque; write off-loop.
-            clip_frames = list(self._trigger_clip_buffer)
-            asyncio.get_running_loop().run_in_executor(
-                self._executor,
-                save_clip,
-                clip_frames,
-                self.audio_cfg.input_sample_rate,
-                "trigger",
-                result.score,
-                result.verifier_score,
-                self._clip_channels,
-            )
+        self._mic.save_trigger_clip(result)
 
         _wake_context = (
             "barge_in"
@@ -742,7 +605,7 @@ class AudioOrchestrator:
             self._pending_verification = asyncio.get_running_loop().run_in_executor(
                 self._executor,
                 self._verifier.verify,
-                list(self._preroll_buffer),
+                self._mic.preroll(),
             )
 
         if self._sound_player:
@@ -1399,12 +1262,10 @@ class AudioOrchestrator:
 
     async def _send_preroll(self) -> None:
         """Flush the preroll buffer into the API input queue and recorder."""
-        for frame_data in self._preroll_buffer:
+        for frame_data in self._mic.take_preroll():
             frame = AudioFrame(data=frame_data, mime_type=self.live_cfg.input_mime_type)
             try:
                 self._api_input_queue.put_nowait(frame)
             except asyncio.QueueFull:
                 pass
             self._recorder.write(frame_data)
-
-        self._preroll_buffer.clear()
