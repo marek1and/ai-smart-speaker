@@ -554,7 +554,19 @@ async def test_immediate_tool_result_and_exceptions_reach_the_model(gemini, monk
     monkeypatch.setitem(FUNCTIONS, "get_current_date", boom)
     await gemini._handle_tool_calls([call("get_current_time"), call("get_current_date")])
     assert "result" in gemini.sent[0].response
-    assert "kaput" in gemini.sent[1].response["error"]
+    assert gemini.sent[1].response["status"] == "error" and "kaput" in gemini.sent[1].response["details"]
+
+
+async def test_every_tool_call_is_counted_once_whatever_the_tool(gemini):
+    import metrics
+
+    def count(name):
+        return metrics.AI_TOOL_CALLS.labels(function=name)._value.get()
+
+    names = ("get_current_time", "request_for_user_input")
+    before = {name: count(name) for name in names}
+    await gemini._handle_tool_calls([call(name) for name in names])
+    assert {name: count(name) for name in names} == {n: v + 1 for n, v in before.items()}
 
 
 async def test_request_for_user_input_sets_the_follow_up_flag(gemini):
@@ -654,9 +666,9 @@ async def test_gemini_logs_the_turn_timeline_when_turn_complete_comes(gemini, mo
     monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 0.05)
     gemini.set_callbacks(on_turn_complete=lambda: None)
     gemini._frames_sent, gemini._response_started, gemini._chunks_received = 1000, True, 5
-    gemini._timing_start()
-    gemini._timing["audio"], gemini._timing["silent"] = 12.0, 10.0
-    gemini._timing_mark("first_voice")
+    gemini._turn_log.start(False)
+    gemini._turn_log.timing["audio"], gemini._turn_log.timing["silent"] = 12.0, 10.0
+    gemini._turn_log.mark("first_voice")
     await gemini._process_api_response(server(generation_complete=True))
     await asyncio.sleep(0.1)                          # the turn ends early...
     await gemini._process_api_response(server(turn_complete=True))  # ...its turn_complete comes late
@@ -687,7 +699,7 @@ async def test_gemini_trailing_silence_is_not_played_pauses_are(gemini, monkeypa
         await gemini._process_api_response(audio_msg(0))  # trailing padding
     assert out.qsize() == 4
     await gemini._process_api_response(server(generation_complete=True))
-    assert out.qsize() == 4 and gemini._held_silence == []
+    assert out.qsize() == 4 and gemini._reply.held == []
     gemini._cancel_generation_end()
 
 
@@ -697,10 +709,10 @@ async def test_gemini_trace_logs_one_line_per_turn_with_runs_merged(gemini, monk
     monkeypatch.setattr(gemini.live_cfg, "trace_api_events", True)
     monkeypatch.setattr(gemini.live_cfg, "generation_complete_grace", 5.0)
     gemini._frames_sent, gemini._response_started = 1000, True
-    gemini._trace_event("→audio", 0.032)
-    gemini._trace_event("→audio", 0.032)
-    gemini._timing_start()
-    gemini._trace_event("→activity_end")
+    gemini._turn_log.event("→audio", 0.032)
+    gemini._turn_log.event("→audio", 0.032)
+    gemini._turn_log.start(False)
+    gemini._turn_log.event("→activity_end")
     for level in (8000, 8000, 0, 0, 0):
         await gemini._process_api_response(audio_msg(level))
     await gemini._process_api_response(server(generation_complete=True))
@@ -714,8 +726,8 @@ async def test_gemini_trace_logs_one_line_per_turn_with_runs_merged(gemini, monk
 
 
 def test_gemini_trace_is_off_by_default(gemini):
-    gemini._trace_event("→text")
-    assert gemini._trace == []
+    gemini._turn_log.event("→text")
+    assert gemini._turn_log.events == []
 
 
 async def test_gemini_long_silence_after_speech_ends_the_turn_once(gemini, monkeypatch):
@@ -725,7 +737,7 @@ async def test_gemini_long_silence_after_speech_ends_the_turn_once(gemini, monke
     ended = []
     gemini.set_callbacks(on_turn_complete=lambda: ended.append(True))
     gemini._frames_sent, gemini._response_started = 1000, True
-    await gemini._process_api_response(audio_msg(8000))  # no _timing_start: works without diagnostics
+    await gemini._process_api_response(audio_msg(8000))  # no turn log started: works without diagnostics
     for _ in range(6):
         await gemini._process_api_response(audio_msg(0))
     await asyncio.sleep(0.1)
@@ -776,7 +788,7 @@ async def test_gemini_voice_past_the_transcript_budget_is_not_played_and_ends_th
     ended, recorded = [], []
     gemini.set_callbacks(on_turn_complete=lambda: ended.append(True), on_model_audio=recorded.append)
     gemini._frames_sent, gemini._response_started = 1000, True
-    gemini._timing_start()
+    gemini._turn_log.start(False)
     await gemini._process_api_response(said("abc"))  # budget 0.2 + 3 x 0.1 = 0.5 s
     for _ in range(10):
         await gemini._process_api_response(audio_msg(8000))  # 0.1 s each
@@ -784,7 +796,7 @@ async def test_gemini_voice_past_the_transcript_budget_is_not_played_and_ends_th
     assert len(recorded) == 10  # the recording keeps what was not played
     await asyncio.sleep(0.1)
     assert ended == [True]
-    assert abs(gemini._timing["dropped"] - 0.5) < 1e-6
+    assert abs(gemini._turn_log.timing["dropped"] - 0.5) < 1e-6
 
 
 async def test_gemini_voice_budget_follows_a_lagging_transcript(gemini, monkeypatch):
@@ -1002,7 +1014,7 @@ async def test_gemini_rumble_is_not_played_and_trails_the_voice_as_silence(gemin
     gemini._frames_sent = 1000
     for _ in range(10):
         await gemini._process_api_response(tone_msg(100, 0.012))
-    assert gemini._output_queue.empty() and not gemini._voice_seen
+    assert gemini._output_queue.empty() and not gemini._reply.voice_seen
     await gemini._process_api_response(tone_msg(1000, 0.2))
     played = gemini._output_queue.qsize()
     await gemini._process_api_response(tone_msg(100, 0.012))
@@ -1051,8 +1063,8 @@ async def test_gemini_session_end_logs_the_pending_turn_timing(gemini, caplog):
             raise RuntimeError("no session")
 
     gemini._client = SimpleNamespace(aio=SimpleNamespace(live=Live()))
-    gemini._timing_start()
+    gemini._turn_log.start(False)
     with caplog.at_level("INFO"):
         await gemini._run_conversation()
-    assert gemini._timing == {} and gemini._trace == []
+    assert gemini._turn_log.timing == {} and gemini._turn_log.events == []
     assert "session closed before its turn_complete" in caplog.text

@@ -7,27 +7,33 @@ Input audio from mic (16kHz) is resampled to 24kHz before sending.
 
 import asyncio
 import base64
-import inspect
 import json
 import logging
+import math
 import os
-import traceback
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Optional
 
 import numpy as np
+import websockets
 from scipy.signal import resample_poly
 from websockets.exceptions import ConnectionClosed
 
 import metrics
 from config import AppConfig
-from realtime.base import BaseRealtimeManager
-from functions.registry import get_function
+from realtime.base import INPUT_POLL_INTERVAL, BaseRealtimeManager, SessionRefused
 from functions.schemas import OPENAI_TOOLS as TOOLS
 
 logger = logging.getLogger(__name__)
 
 # OpenAI Realtime API WebSocket endpoint
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
+# The only rate the API takes and returns for audio/pcm.
+OPENAI_SAMPLE_RATE = 24000
+_PCM16_BYTES_PER_SAMPLE = 2
+_WS_MAX_MESSAGE_BYTES = 2**24
+# How often the receive task looks whether the session is still wanted.
+_RECV_POLL_INTERVAL = 1.0
 
 
 class OpenAIRealtimeManager(BaseRealtimeManager):
@@ -43,25 +49,24 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
     - Input/output audio transcription
     """
 
+    provider_name = "OpenAI"
+
     def __init__(
         self,
         config: "AppConfig",
         input_queue: asyncio.Queue,
         output_queue: asyncio.Queue,
     ) -> None:
-        super().__init__(input_queue, output_queue)
-        self.config = config
-        self.live_cfg = config.live
+        super().__init__(config, input_queue, output_queue)
 
         # WebSocket connection
         self._ws = None
-        self._session_tasks: list[asyncio.Task] = []
 
         # API key
         self._api_key: str = ""
 
-        # Resampling: 16kHz -> 24kHz (OpenAI requires 24kHz for pcm16)
-        self._need_resample = self.live_cfg.send_sample_rate != 24000
+        # The microphone rate is resampled to the API's.
+        self._need_resample = self.live_cfg.send_sample_rate != OPENAI_SAMPLE_RATE
 
         # Tracking for conversation.item.truncate on barge-in
         self._current_response_item_id: Optional[str] = None
@@ -88,33 +93,6 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
     def shutdown(self) -> None:
         """Shutdown the manager."""
         self._running = False
-
-    async def open_session(self) -> None:
-        """Start a new conversation by spawning _run_conversation task."""
-        if self._session_active:
-            logger.warning("Session already active, skipping open")
-            return
-
-        self._conversation_task = asyncio.create_task(
-            self._run_conversation(), name="openai_conversation"
-        )
-
-        if not await self._wait_for_session(
-            self.live_cfg.session_open_timeout, "OpenAI"
-        ):
-            # Cancel the retry loop so it cannot open a session (or fire _on_error
-            # for a second error sound) after the caller has given up on us.
-            await self.close_session()
-
-    async def close_session(self) -> None:
-        """Close the active session by cancelling the conversation task."""
-        if self._conversation_task and not self._conversation_task.done():
-            self._conversation_task.cancel()
-            try:
-                await self._conversation_task
-            except asyncio.CancelledError:
-                pass
-        self._conversation_task = None
 
     async def send_activity_start(self) -> None:
         """Signal that user started speaking (manual VAD).
@@ -156,7 +134,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
         try:
             # Give last audio frames a moment to be sent
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(self.live_cfg.openai_commit_delay)
 
             # Commit the audio buffer -> creates user message item
             await self._ws_send({"type": "input_audio_buffer.commit"})
@@ -167,6 +145,8 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             self._activity_started = False
             self._waiting_for_turn_complete = True
             logger.info("Sent activity_end to OpenAI (commit + response.create)")
+            # Ends a turn the API never answers; audio and tool calls restart it.
+            self.start_watchdog()
         except ConnectionClosed as e:
             # The session can be closed between the checks above and the send
             # (e.g. initial-silence close racing local VAD) — normal shutdown,
@@ -231,8 +211,9 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             # This syncs the server's context with the client's playback position
             # so the model knows the user only heard part of the response.
             if self._current_response_item_id and self._audio_bytes_received > 0:
-                # PCM16 @ 24kHz: 2 bytes/sample, 24000 samples/sec
-                audio_end_ms = int(self._audio_bytes_received / 2 / 24000 * 1000)
+                audio_end_ms = int(
+                    self._audio_bytes_received / _PCM16_BYTES_PER_SAMPLE / OPENAI_SAMPLE_RATE * 1000
+                )
                 await self._ws_send(
                     {
                         "type": "conversation.item.truncate",
@@ -268,7 +249,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             await self._ws.send(json.dumps(event))
 
     def _resample_to_24k(self, audio_bytes: bytes) -> bytes:
-        """Resample 16kHz PCM16 audio to 24kHz PCM16."""
+        """Resample PCM16 audio from the microphone rate to the API's."""
         if not self._need_resample:
             return audio_bytes
 
@@ -276,102 +257,45 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         if len(audio_int16) == 0:
             return audio_bytes
 
-        # Resample: 16kHz -> 24kHz = ratio 3/2
-        resampled = resample_poly(audio_int16.astype(np.float64), up=3, down=2)
+        divisor = math.gcd(OPENAI_SAMPLE_RATE, self.live_cfg.send_sample_rate)
+        resampled = resample_poly(
+            audio_int16.astype(np.float64),
+            up=OPENAI_SAMPLE_RATE // divisor,
+            down=self.live_cfg.send_sample_rate // divisor,
+        )
         return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
 
     # -------------------------------------------------------------------------
     # Session lifecycle
     # -------------------------------------------------------------------------
 
-    async def _run_conversation(self) -> None:
-        """Run a conversation session with the OpenAI Realtime API.
-
-        Retries the connection up to max_reconnect_attempts times on network
-        errors.  A CancelledError (from close_session) stops retries immediately.
-        """
-        import websockets
-
+    @asynccontextmanager
+    async def _connect(self) -> AsyncIterator[None]:
         model = self.live_cfg.openai_model
-        url = f"{OPENAI_REALTIME_URL}?model={model}"
-        headers = {"Authorization": f"Bearer {self._api_key}"}
-        max_attempts = self.live_cfg.max_reconnect_attempts
-
-        try:
-            for attempt in range(1, max_attempts + 1):
-                logger.info("Opening OpenAI Realtime API session (model=%s, attempt %d/%d)...", model, attempt, max_attempts)
-                try:
-                    async with websockets.connect(
-                        url,
-                        additional_headers=headers,
-                        max_size=2**24,
-                    ) as ws:
-                        self._ws = ws
-                        self._session_active = True
-
-                        initial_msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                        initial_event = json.loads(initial_msg)
-
-                        if initial_event.get("type") == "session.created":
-                            session_info = initial_event.get("session", {})
-                            logger.info("Session created (id=%s)", session_info.get("id", "unknown"))
-                        elif initial_event.get("type") == "error":
-                            error = initial_event.get("error", {})
-                            logger.error(
-                                "Session creation error: %s - %s",
-                                error.get("type", "unknown"),
-                                error.get("message", ""),
-                            )
-                            break
-
-                        await self._configure_session()
-                        logger.info("Session opened successfully.")
-
-                        send_task = asyncio.create_task(self._send_to_api_task(), name="openai_send")
-                        receive_task = asyncio.create_task(self._receive_from_api_task(), name="openai_receive")
-                        self._session_tasks = [send_task, receive_task]
-
-                        try:
-                            while self._running and self._session_active:
-                                await asyncio.sleep(0.1)
-                        except asyncio.CancelledError:
-                            logger.debug("Conversation task cancelled")
-                            raise
-                        finally:
-                            self.cancel_watchdog()
-                            for task in self._session_tasks:
-                                task.cancel()
-                            await asyncio.gather(*self._session_tasks, return_exceptions=True)
-                            self._session_tasks.clear()
-
-                    # Clean exit from async-with — don't retry.
-                    break
-
-                except asyncio.CancelledError:
-                    raise
-                except (OSError, ConnectionError, TimeoutError) as e:
-                    if attempt >= max_attempts or not self._running:
-                        logger.error("OpenAI session failed after %d attempt(s): %s", attempt, e)
-                        if self._on_error:
-                            self._on_error()
-                        break
-                    delay = min(2.0 ** (attempt - 1), 30.0)
-                    logger.warning(
-                        "Session connection error (attempt %d/%d), retrying in %.0fs: %s",
-                        attempt, max_attempts, delay, e,
+        async with websockets.connect(
+            f"{OPENAI_REALTIME_URL}?model={model}",
+            additional_headers={"Authorization": f"Bearer {self._api_key}"},
+            max_size=_WS_MAX_MESSAGE_BYTES,
+        ) as ws:
+            self._ws = ws
+            try:
+                initial_event = json.loads(
+                    await asyncio.wait_for(ws.recv(), timeout=self.live_cfg.session_open_timeout)
+                )
+                if initial_event.get("type") == "session.created":
+                    logger.info(
+                        "Session created (id=%s, model=%s)",
+                        initial_event.get("session", {}).get("id", "unknown"), model,
                     )
-                    await asyncio.sleep(delay)
-                except Exception as e:
-                    logger.error("Unexpected session error: %s", e)
-                    traceback.print_exc()
-                    if self._on_error:
-                        self._on_error()
-                    break
-        finally:
-            self._ws = None
-            self._session_active = False
-            self._activity_started = False
-            logger.info("Session closed.")
+                elif initial_event.get("type") == "error":
+                    error = initial_event.get("error", {})
+                    raise SessionRefused(
+                        f"{error.get('type', 'unknown')} - {error.get('message', '')}"
+                    )
+                await self._configure_session()
+                yield
+            finally:
+                self._ws = None
 
     async def _configure_session(self) -> None:
         """Send session configuration event.
@@ -383,7 +307,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         audio_input: dict = {
             "format": {
                 "type": "audio/pcm",
-                "rate": 24000,
+                "rate": OPENAI_SAMPLE_RATE,
             },
             "transcription": {
                 "model": "whisper-1",
@@ -405,7 +329,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         audio_output: dict = {
             "format": {
                 "type": "audio/pcm",
-                "rate": 24000,
+                "rate": OPENAI_SAMPLE_RATE,
             },
             "voice": self.live_cfg.openai_voice,
         }
@@ -445,7 +369,9 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
             try:
                 try:
-                    frame = await asyncio.wait_for(self._input_queue.get(), timeout=0.5)
+                    frame = await asyncio.wait_for(
+                        self._input_queue.get(), timeout=INPUT_POLL_INTERVAL
+                    )
                 except asyncio.TimeoutError:
                     continue
 
@@ -480,7 +406,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         """Receive events from OpenAI API via WebSocket."""
         while self._running and self._session_active:
             try:
-                msg = await asyncio.wait_for(self._ws.recv(), timeout=1.0)
+                msg = await asyncio.wait_for(self._ws.recv(), timeout=_RECV_POLL_INTERVAL)
                 event = json.loads(msg)
                 await self._process_event(event)
 
@@ -489,7 +415,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Receive from API error: %s", e)
+                logger.exception("Receive from API error: %s", e)
                 self._session_active = False
                 if self._on_error:
                     self._on_error()
@@ -529,14 +455,11 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 return
 
             # Skip if playback is interrupted (barge-in)
-            if self._playback_interrupted:
+            if self.playback_interrupted:
                 return
 
             # Ignore stale audio (same logic as Gemini manager)
-            if (
-                self._frames_sent < self._min_frames_for_turn_complete
-                and self._chunks_received == 0
-            ):
+            if not self._accepts_reply() and self._chunks_received == 0:
                 logger.debug(
                     "Ignoring early audio (sent=%d < %d)",
                     self._frames_sent,
@@ -556,8 +479,6 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
             if self._chunks_received == 1:
                 logger.info("Receiving audio response...")
-            if self._on_audio_received:
-                self._on_audio_received()
 
         # --- AI transcript (model's speech -> text) ---
         elif event_type == "response.output_audio_transcript.delta":
@@ -570,7 +491,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             transcript = event.get("transcript", "")
             if transcript:
                 # Discard if a new turn already started (late delivery after barge-in)
-                if self._frames_sent >= self._min_frames_for_turn_complete or self._activity_started:
+                if self._accepts_reply() or self._activity_started:
                     self._user_transcript += transcript
 
         # --- Text response ---
@@ -579,8 +500,6 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             if delta:
                 logger.info("Text: %s", delta[:200])
                 self.response_started = True
-                if self._on_text_received:
-                    self._on_text_received(delta)
 
         # --- Response complete (= turn complete) ---
         elif event_type == "response.done":
@@ -619,10 +538,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             # Ignore if we haven't sent enough audio — likely a stale signal after
             # barge-in. Do NOT cancel the watchdog: it must keep running so the
             # session doesn't hang.
-            if (
-                self._frames_sent < self._min_frames_for_turn_complete
-                and not self._response_started
-            ):
+            if not self._accepts_reply() and not self._response_started:
                 logger.debug(
                     "Ignoring early response.done (sent=%d < %d, no response yet)",
                     self._frames_sent,
@@ -633,11 +549,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             # Cancel watchdog only for a real (non-stale) response.done
             self.cancel_watchdog()
 
-            # Log full transcripts at end of turn
-            if self._user_transcript.strip():
-                logger.info("\U0001f4dd USER: %s", self._user_transcript.strip())
-            if self._ai_transcript.strip():
-                logger.info("\U0001f916 AI: %s", self._ai_transcript.strip())
+            self._log_transcripts()
 
             logger.info("API: turn_complete (response.done, status=%s)", status)
             if self._on_turn_complete:
@@ -725,108 +637,35 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         else:
             logger.debug("Unhandled event: %s", event_type)
 
-    async def _handle_tool_call(self, tool_call: dict):
-        """
-        Handle a tool call from the API using an optimistic execution strategy.
-
-        - **Immediate Functions** (`get_radio_status`, etc.): Executed instantly,
-          and their real results are sent back to the API.
-        - **Deferred Functions** (`play...`, `stop...`, `set_volume...`):
-          The action is added to a queue (`self.pending_actions`) for the Orchestrator
-          to execute AFTER the AI finishes speaking. A fake "success" message
-          is sent to the API immediately to prevent deadlocks and allow the AI
-          to generate its verbal response.
-        """
-        call_id = tool_call.get("call_id")
+    async def _handle_tool_call(self, tool_call: dict) -> None:
+        """Run the tool call (see _execute_tool) and send its result back."""
         function_name = tool_call.get("name")
-
         try:
             # Arguments are a JSON string
             args = json.loads(tool_call.get("arguments", "{}"))
         except json.JSONDecodeError:
             args = {}
 
-        logger.info(f"Handling tool call: {function_name} with args {args}")
-
-        output_str: str
-        try:
-            # 1. Immediate override for compatibility with Gemini state machine fix
-            if function_name == "request_for_user_input":
-                logger.info("Received 'request_for_user_input' tool call. Bypassing execution.")
-                self._request_for_user_input = True
-                result = {"status": "success"}
-
-            # 2. Deferred execution handling
-            elif function_name in self.DEFERRED_FUNCTIONS:
-                func = get_function(function_name)
-                # Defer execution by getting metadata from the function call
-                payload = (
-                    await func(**args)
-                    if inspect.iscoroutinefunction(func)
-                    else func(**args)
-                )
-                if isinstance(payload, dict) and payload.get("status") == "error":
-                    # The lookup already failed: nothing to defer. Hand the model the
-                    # real error, or it announces a station that never starts.
-                    logger.warning(
-                        f"'{function_name}' failed before deferral: {payload.get('details')}"
-                    )
-                    result = payload
-                else:
-                    # Add to the queue for the orchestrator to handle later
-                    self._defer(function_name, payload)
-                    logger.info(
-                        f"Deferring '{function_name}' for post-response execution. Payload: {payload}"
-                    )
-                    # Lie to the model, telling it the action was successful
-                    # Facts the function already knows (e.g. the radio is already
-                    # playing) go back with it, so the reply matches what will happen.
-                    result = {"status": "success", **payload.get("for_model", {})}
-
-            # 3. Standard execution for immediate functions
-            else:
-                func = get_function(function_name)
-                # Execute immediately for non-deferred functions
-                logger.info(f"Executing '{function_name}' immediately.")
-                result = (
-                    await func(**args)
-                    if inspect.iscoroutinefunction(func)
-                    else func(**args)
-                )
-
-            logger.info(
-                f"Tool call '{function_name}' handled. Result for API: {result}"
-            )
-
-            # Format the output for the OpenAI API, which expects a JSON string.
-            if isinstance(result, (dict, list)):
-                output_str = json.dumps(result)
-            else:
-                output_str = str(result)
-
-        except Exception as e:
-            logger.error(f"Error executing tool call {function_name}: {e}")
-            output_str = json.dumps(
-                {"status": "error", "details": f"Error executing function: {e}"}
-            )
+        result = await self._execute_tool(function_name, args)
+        # The API expects the output as a string.
+        output = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
 
         try:
-            # Send the real or faked result back to the API
             await self._ws_send(
                 {
                     "type": "conversation.item.create",
                     "item": {
                         "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": output_str,
+                        "call_id": tool_call.get("call_id"),
+                        "output": output,
                     },
                 }
             )
             # Ask the model to respond to the tool call result
             await self._ws_send({"type": "response.create"})
-            logger.debug(f"Sent tool result for '{function_name}' and requested new response.")
-            
-            # Start watchdog in case API hangs after function call without sending turn_complete
-            self.start_watchdog(timeout=self.live_cfg.turn_watchdog_timeout)
         except Exception as e:
-            logger.error(f"Failed to send tool call result for {function_name}: {e}")
+            logger.error("Failed to send tool call result for %s: %s", function_name, e)
+            return
+
+        # Start watchdog in case API hangs after function call without sending turn_complete
+        self.start_watchdog()
