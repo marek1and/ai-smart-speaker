@@ -892,3 +892,17 @@ async def test_a_failing_duck_does_not_reach_the_microphone_loop(make):
     await o._handle_wake_word_result(orch.WakeWordResult(True, 0.9, 0.9))
     await o._finish_turn()
     assert o.mpd_client.calls == ["unduck"]
+
+
+async def test_a_wake_word_while_listening_is_silent(make):
+    # 14.11.2026: the model fired on "Która jest godzina?" and the wake sound played over the turn
+    o = make()
+    o.mpd_client.playing = True
+    resets = []
+    o._wake_gate.reset = lambda **k: resets.append(k)
+    o._state = SpeakerState.LISTENING
+    await o._handle_wake_word_result(orch.WakeWordResult(True, 1.0, 1.0))
+    await asyncio.sleep(0.01)
+    assert o._sound_player.played == [] and o.mpd_client.calls == []
+    assert o.state == SpeakerState.LISTENING and not o._wake_event.is_set()
+    assert resets == [{"short_warmup": True}]

@@ -597,6 +597,13 @@ class AudioOrchestrator:
             context=_wake_context, mode=_mode_label(result.relaxed_mode)
         ).inc()
 
+        if self._state == SpeakerState.LISTENING:
+            # Already listening, so there is nothing to start and no sound to
+            # play: the model fires on some commands themselves ("Która jest
+            # godzina?", 14.11.2026). The clip above is kept for retraining.
+            self._wake_gate.reset(short_warmup=True)
+            return
+
         self._duck_radio_in_background()
 
         if self._state == SpeakerState.IDLE and self._verifier is not None:
@@ -619,10 +626,6 @@ class AudioOrchestrator:
         elif self._state == SpeakerState.RESPONDING:
             logger.info("BARGE-IN: Interrupting AI playback!")
             await self._execute_barge_in()
-
-        elif self._state == SpeakerState.LISTENING:
-            # Re-wake while already listening — quick reset, no cooldown needed.
-            self._wake_gate.reset(short_warmup=True)
 
     def _print_status(self, result: WakeWordResult) -> None:
         """Print current status line based on state."""
