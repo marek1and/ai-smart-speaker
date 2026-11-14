@@ -131,7 +131,7 @@ class FakeHA:
 def fake_ha(monkeypatch):
     def make(**kw):
         f = FakeHA(**kw)
-        monkeypatch.setattr(d, "ha_client", f)
+        monkeypatch.setattr(d.ctx, "ha", f)
         return f
     return make
 

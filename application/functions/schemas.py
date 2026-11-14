@@ -1,6 +1,6 @@
 from google.genai.types import Behavior, FunctionDeclaration, Schema, Tool, Type
 
-from functions.definitions import ACTIVE_SMARTHOME_BACKEND as _BACKEND, music_provider
+from functions.definitions import ctx
 from music.providers import KINDS
 
 
@@ -304,7 +304,7 @@ _COMMON_DECLARATIONS = [
     SET_PLAYBACK_VOLUME_FUNC,
     GET_RADIO_STATUS_FUNC,
     REQUEST_FOR_USER_INPUT_FUNC,
-] + ([PLAY_MUSIC_FUNC, NEXT_TRACK_FUNC] if music_provider is not None else [])
+] + ([PLAY_MUSIC_FUNC, NEXT_TRACK_FUNC] if ctx.music is not None else [])
 
 _OH_DECLARATIONS = [
     GET_OPENHAB_ITEM_STATE_FUNC,
@@ -322,8 +322,8 @@ _HA_DECLARATIONS = [
 
 
 _ALL_DECLARATIONS = _COMMON_DECLARATIONS + (
-    _HA_DECLARATIONS if _BACKEND == "home_assistant"
-    else _OH_DECLARATIONS if _BACKEND == "openhab"
+    _HA_DECLARATIONS if ctx.smarthome_backend == "home_assistant"
+    else _OH_DECLARATIONS if ctx.smarthome_backend == "openhab"
     else []
 )
 

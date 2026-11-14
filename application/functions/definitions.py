@@ -1,15 +1,16 @@
 import asyncio
 import re
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime
 from functions.registry import register_function
 from openhab.client import OpenHabClient
 from homeassistant.client import HomeAssistantClient
-from config import get_config
+from config import AppConfig, TVConfig, get_config
 from mpd_client.client import MPDClientWrapper
 from radio.client import RadioClient
-from music.providers import KINDS, create_provider
+from music.providers import KINDS, FallbackProvider, MopidyMusicProvider, create_provider
 import metrics
 
 logger = logging.getLogger(__name__)
@@ -21,82 +22,101 @@ TV_ALREADY_ON_HINT = (
     "turn the TV off now instead of asking the user to confirm."
 )
 
-config = get_config()
 
-# Strong references to fire-and-forget tasks (TV boot watchers). The event
-# loop only keeps weak refs — an unreferenced task can be garbage-collected
-# mid-flight and silently never finish.
-_bg_tasks: set[asyncio.Task] = set()
+@dataclass
+class ToolContext:
+    """What the tool functions work with.
+
+    Built from the config when this module is imported: schemas.py reads the
+    backend and the music provider then, to decide which tools the model gets.
+    """
+
+    config: AppConfig
+    openhab: Optional[OpenHabClient]
+    ha: Optional[HomeAssistantClient]
+    radio: RadioClient
+    music: MopidyMusicProvider | FallbackProvider | None
+    # Set by AudioOrchestrator.start(), so all tool functions share its
+    # connection and see the same duck/unduck state.
+    mpd_client: Optional[MPDClientWrapper] = None
+    # Queue entries added by prefetch; removed at the end of the turn in case
+    # the deferred play never ran (a barge-in, a follow-up question).
+    prefetched_tlids: list[int] = field(default_factory=list)
+    # Strong references to fire-and-forget tasks (TV boot watchers). The event
+    # loop only keeps weak refs — an unreferenced task can be garbage-collected
+    # mid-flight and silently never finish.
+    bg_tasks: set[asyncio.Task] = field(default_factory=set)
+
+    @classmethod
+    def from_config(cls, config: AppConfig) -> "ToolContext":
+        return cls(
+            config=config,
+            openhab=(
+                OpenHabClient(config.openhab)
+                if config.openhab.url and config.openhab.api_key
+                else None
+            ),
+            ha=(
+                HomeAssistantClient(config.home_assistant)
+                if config.home_assistant.url and config.home_assistant.api_key
+                else None
+            ),
+            radio=RadioClient(config.radio),
+            music=create_provider(config.music),
+        )
+
+    @property
+    def smarthome_backend(self) -> str:
+        """Which smart home tools the model gets: the clients above decide."""
+        if self.ha is not None:
+            return "home_assistant"
+        return "openhab" if self.openhab is not None else "none"
+
+    @property
+    def mpd(self) -> MPDClientWrapper:
+        if self.mpd_client is None:
+            raise RuntimeError(
+                "MPD client not injected — inject_mpd_client() must be called first"
+            )
+        return self.mpd_client
+
+    def spawn(self, coro, name: str) -> asyncio.Task:
+        task = asyncio.create_task(coro, name=name)
+        self.bg_tasks.add(task)
+        task.add_done_callback(self.bg_tasks.discard)
+        return task
 
 
-def _spawn(coro, name: str) -> asyncio.Task:
-    task = asyncio.create_task(coro, name=name)
-    _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
-    return task
-openhab_client = (
-    OpenHabClient(config.openhab)
-    if config.openhab.url and config.openhab.api_key
-    else None
-)
-ha_client = (
-    HomeAssistantClient(config.home_assistant)
-    if config.home_assistant.url and config.home_assistant.api_key
-    else None
-)
-# Single source of truth for which smarthome backend is active — schemas.py
-# reads this to decide which function declarations to expose to the AI, so
-# it always matches the clients actually instantiated here.
-ACTIVE_SMARTHOME_BACKEND = (
-    "home_assistant" if ha_client is not None
-    else "openhab" if openhab_client is not None
-    else "none"
-)
-radio_client = RadioClient(config.radio)
-music_provider = create_provider(config.music)
-
-# MPD client is injected by the orchestrator at startup so all tool functions
-# share the same connection and see the same duck/unduck state.
-_mpd_client: Optional[MPDClientWrapper] = None
+ctx = ToolContext.from_config(get_config())
 
 
 def inject_mpd_client(client: MPDClientWrapper) -> None:
     """Called once by AudioOrchestrator.start() to share its MPD client."""
-    global _mpd_client
-    _mpd_client = client
-    radio_client.set_state(client.radio_state)
+    ctx.mpd_client = client
+    ctx.radio.set_state(client.radio_state)
 
 
 async def close_radio_client() -> None:
     """Close the RadioBrowser HTTP session. Called from orchestrator cleanup."""
-    await radio_client.close()
+    await ctx.radio.close()
 
 
 def get_radio_client() -> RadioClient:
-    return radio_client
-
-
-def _mpd() -> MPDClientWrapper:
-    if _mpd_client is None:
-        raise RuntimeError(
-            "MPD client not injected — inject_mpd_client() must be called first"
-        )
-    return _mpd_client
+    return ctx.radio
 
 
 @register_function(name="play_internet_radio")
 async def play_internet_radio(station_name: Optional[str] = None) -> dict:
-    metrics.AI_TOOL_CALLS.labels(function="play_internet_radio").inc()
     """
     Finds a radio station URL or determines if playback should be resumed.
     The action is deferred and handled by the orchestrator after the AI response.
     """
     if not station_name:
-        if _mpd().source == "music" and _mpd().get_current_station_name():
+        if ctx.mpd.source == "music" and ctx.mpd.get_current_station_name():
             # resume() switches from the music queue back to the last station.
             return {
                 "action": "play",
-                "for_model": {"already_playing": False, "volume": _mpd().get_restore_volume()},
+                "for_model": {"already_playing": False, "volume": ctx.mpd.get_restore_volume()},
             }
         radio_status = await get_radio_status()
         if radio_status.get("is_radio_on_playlist"):
@@ -104,7 +124,7 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
             # A frozen stream is not "playing": resume() reloads it.
             already_playing = (
                 radio_status.get("playback_state") == "play"
-                and not _mpd().is_stream_stalled()
+                and not ctx.mpd.is_stream_stalled()
             )
             # Nothing to defer: a deferred play would restart a radio stopped meanwhile.
             return {
@@ -120,7 +140,7 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
                 "details": "No radio station is on the playlist. What station would you like to play?",
             }
 
-    result = await radio_client.search_station(station_name)
+    result = await ctx.radio.search_station(station_name)
     if result:
         url, official_name, key = result
         return {"url": url, "name": official_name, "key": key}
@@ -134,40 +154,38 @@ async def play_internet_radio(station_name: Optional[str] = None) -> dict:
 @register_function(name="stop_radio")
 async def stop_radio() -> dict:
     """Stops playback (radio or music) immediately."""
-    metrics.AI_TOOL_CALLS.labels(function="stop_radio").inc()
     metrics.RADIO_STOPS.labels(source="ai").inc()
-    await _mpd().stop()
+    await ctx.mpd.stop()
     return {"status": "success", "message": "Playback stopped."}
 
 
 @register_function(name="play_music")
 async def play_music(query: str, kind: str = "track") -> dict:
     """Finds music for the query; the orchestrator starts it at once, ducked under the reply."""
-    metrics.AI_TOOL_CALLS.labels(function="play_music").inc()
-    if music_provider is None:
+    if ctx.music is None:
         return {"status": "error", "details": "Music playback is not configured."}
     if kind not in KINDS:
         kind = "track"
     # Before the search: a "stop" while it runs or while the AI speaks cancels the start.
-    generation = _mpd().playback_generation
+    generation = ctx.mpd.playback_generation
     try:
-        selection = await music_provider.find(query, kind)
+        selection = await ctx.music.find(query, kind)
     except Exception:
         # The model must hear that it failed; the traceback tells a network
         # error from a bug in parsing Mopidy's reply.
         logger.exception("Music search for '%s' failed", query)
-        return {"status": "error", "details": f"{music_provider.label} search failed."}
+        return {"status": "error", "details": f"{ctx.music.label} search failed."}
     if selection is None:
-        return {"status": "error", "details": f"Nothing found on {music_provider.label} for '{query}'."}
-    metrics.MUSIC_PLAYS.labels(provider=selection.source or music_provider.label, kind=kind).inc()
+        return {"status": "error", "details": f"Nothing found on {ctx.music.label} for '{query}'."}
+    metrics.MUSIC_PLAYS.labels(provider=selection.source or ctx.music.label, kind=kind).inc()
     # Before prefetch, which creates the file.
-    cached = music_provider.is_cached(selection.uris[0])
+    cached = ctx.music.is_cached(selection.uris[0])
     prefetched = False
     try:
         if not cached:
-            tlid = await music_provider.prefetch(selection.uris[0])
+            tlid = await ctx.music.prefetch(selection.uris[0])
             if tlid is not None:
-                _prefetched_tlids.append(tlid)
+                ctx.prefetched_tlids.append(tlid)
                 # Without cache_dir (cached is None) readiness cannot be seen:
                 # the start does not wait, play blocks for the rest as before.
                 prefetched = cached is False
@@ -193,27 +211,22 @@ async def play_music(query: str, kind: str = "track") -> dict:
     }
 
 
-# Queue entries added by prefetch; removed at the end of the turn in case the
-# deferred play never ran (a barge-in, a follow-up question).
-_prefetched_tlids: list[int] = []
-
-
 async def wait_for_music(uri: str, timeout: float) -> bool:
     """Waits until the provider has the first track ready to play."""
-    if music_provider is None:
+    if ctx.music is None:
         return True
-    return await music_provider.wait_ready(uri, timeout)
+    return await ctx.music.wait_ready(uri, timeout)
 
 
 async def drop_prefetched() -> None:
     """Removes prefetched entries left in Mopidy's queue (a no-op once
     play_music replaced the queue)."""
-    if not _prefetched_tlids or music_provider is None:
+    if not ctx.prefetched_tlids or ctx.music is None:
         return
-    tlids = list(_prefetched_tlids)
-    _prefetched_tlids.clear()
+    tlids = list(ctx.prefetched_tlids)
+    ctx.prefetched_tlids.clear()
     try:
-        await music_provider.drop(tlids)
+        await ctx.music.drop(tlids)
     except Exception:
         # Deliberately only logged: a stray entry plays after the radio ends, nothing worse.
         logger.warning("Could not remove prefetched entries %s", tlids, exc_info=True)
@@ -222,8 +235,7 @@ async def drop_prefetched() -> None:
 @register_function(name="next_track")
 async def next_track() -> dict:
     """Skips to the next track in the music queue, executed immediately."""
-    metrics.AI_TOOL_CALLS.labels(function="next_track").inc()
-    client = _mpd()
+    client = ctx.mpd
     if client.source != "music":
         return {"status": "error", "details": "The radio is playing; it has no next track."}
     result, song, remaining = await client.next_track(start_ducked=True)
@@ -246,7 +258,7 @@ async def get_radio_status() -> dict:
     and whether a radio station is currently in the playlist.
     This function is executed immediately.
     """
-    client = _mpd()
+    client = ctx.mpd
     status = await client.get_status() or {}
     volume = client.get_restore_volume()
 
@@ -294,13 +306,12 @@ async def set_playback_volume(volume_percentage: int) -> dict:
     Signals the intent to change the playback volume.
     The action is deferred until after the AI's verbal response.
     """
-    metrics.AI_TOOL_CALLS.labels(function="set_playback_volume").inc()
     metrics.RADIO_VOLUME_CHANGES.labels(source="ai").inc()
     # The previous level lets the model catch a direction mismatch,
     # e.g. "turn it up to 5%" at 52%.
     return {
         "volume_percentage": volume_percentage,
-        "for_model": {"previous_volume": _mpd().get_restore_volume()},
+        "for_model": {"previous_volume": ctx.mpd.get_restore_volume()},
     }
 
 
@@ -331,193 +342,169 @@ _NO_SMARTHOME = "Smart home backend not configured."
 @register_function(name="get_openhab_item_state")
 async def get_openhab_item_state(item_name: str) -> str | None:
     """Gets the state of an item in OpenHab."""
-    if openhab_client is None:
+    if ctx.openhab is None:
         logger.error("get_openhab_item_state: OpenHAB not configured")
         return _NO_SMARTHOME
-    return await asyncio.to_thread(openhab_client.get_openhab_item_state, item_name)
+    return await asyncio.to_thread(ctx.openhab.get_openhab_item_state, item_name)
 
 
 def _resolve_tv_channel(name: str) -> Optional[int]:
-    """Case-insensitive lookup of channel name in config.tv.channels."""
+    """Case-insensitive lookup of channel name in ctx.config.tv.channels."""
     key = name.lower().strip()
-    for ch_name, ch_num in config.tv.channels.items():
+    for ch_name, ch_num in ctx.config.tv.channels.items():
         if ch_name.lower() == key:
             return ch_num
     return None
 
 
-# ---------------------------------------------------------------------------
-# OpenHAB TV helpers
-# ---------------------------------------------------------------------------
+_HA_OFF_STATES = ("off", "unavailable", "unknown", "none")
 
 
-async def _oh_send_tv_channel(channel_name: str, channel_num: int) -> None:
-    assert openhab_client is not None
-    await asyncio.to_thread(
-        openhab_client.set_openhab_item_state, config.tv.channel_item, str(channel_num)
-    )
-    logger.info("TV channel set to %s (%d) via OpenHAB", channel_name, channel_num)
+class _HaTv:
+    """The TV behind Home Assistant. tv.power_item may be a media_player
+    entity, or any other domain HA can turn on/off (e.g. a switch.* wired to
+    Wake-on-LAN for TVs whose media_player integration can't power the TV on
+    itself); only a media_player takes channels."""
+
+    backend = "HA"
+
+    def __init__(self, client: HomeAssistantClient, tv_cfg: TVConfig) -> None:
+        self._client = client
+        self.entity_id = tv_cfg.power_item
+
+    @property
+    def can_switch_channels(self) -> bool:
+        return self.entity_id.split(".")[0] == "media_player"
+
+    def is_on(self) -> bool:
+        state = self._client.get_entity_state(self.entity_id)
+        return str(state).lower() not in _HA_OFF_STATES
+
+    def turn_on(self) -> None:
+        self._client.set_entity_state(self.entity_id, "ON")
+
+    def set_channel(self, number: int) -> None:
+        self._client.play_channel(self.entity_id, number)
 
 
-async def _oh_switch_channel_after_boot(channel_name: str, channel_num: int) -> None:
-    """Wait for TV to boot then send channel command via OpenHAB (background task)."""
-    assert openhab_client is not None
-    power_item = config.tv.power_item
-    timeout = config.tv.boot_wait_timeout
-    interval = config.tv.boot_poll_interval
-    elapsed = 0.0
-    logger.info("Waiting for TV to boot (max %.1fs)...", timeout)
-    while elapsed < timeout:
-        await asyncio.sleep(interval)
-        elapsed += interval
-        state = await asyncio.to_thread(openhab_client.get_openhab_item_state, power_item)
-        if str(state).upper() == "ON":
-            logger.info(
-                "TV confirmed ON after %.1fs, waiting %.1fs before channel switch",
-                elapsed,
-                config.tv.post_boot_delay,
-            )
-            await asyncio.sleep(config.tv.post_boot_delay)
-            break
-    else:
-        logger.warning(
-            "TV did not confirm ON within %.1fs — sending channel anyway", timeout
-        )
-    await _oh_send_tv_channel(channel_name, channel_num)
+class _OpenHabTv:
+    """The TV behind OpenHAB: a power switch item and a channel number item."""
+
+    backend = "OpenHAB"
+    can_switch_channels = True
+
+    def __init__(self, client: OpenHabClient, tv_cfg: TVConfig) -> None:
+        self._client = client
+        self._cfg = tv_cfg
+
+    def is_on(self) -> bool:
+        state = self._client.get_openhab_item_state(self._cfg.power_item)
+        return str(state).upper() == "ON"
+
+    def turn_on(self) -> None:
+        self._client.set_openhab_item_state(self._cfg.power_item, "ON")
+
+    def set_channel(self, number: int) -> None:
+        self._client.set_openhab_item_state(self._cfg.channel_item, str(number))
 
 
-# ---------------------------------------------------------------------------
-# Home Assistant TV helpers
-# ---------------------------------------------------------------------------
+def _tv() -> _HaTv | _OpenHabTv | None:
+    if ctx.ha is not None and ctx.config.tv.power_item:
+        return _HaTv(ctx.ha, ctx.config.tv)
+    if ctx.openhab is not None:
+        return _OpenHabTv(ctx.openhab, ctx.config.tv)
+    return None
 
 
-async def _ha_switch_channel_after_boot(
-    channel_name: str, channel_num: int, entity_id: str
+async def _send_tv_channel(tv: _HaTv | _OpenHabTv, channel_name: str, channel_num: int) -> None:
+    await asyncio.to_thread(tv.set_channel, channel_num)
+    logger.info("TV channel set to %s (%d) via %s", channel_name, channel_num, tv.backend)
+
+
+async def _switch_channel_after_boot(
+    tv: _HaTv | _OpenHabTv, channel_name: str, channel_num: int
 ) -> None:
-    """Wait for TV to boot then switch channel via HA media_player (background task)."""
-    timeout = config.tv.boot_wait_timeout
-    interval = config.tv.boot_poll_interval
+    """Wait for the TV to boot, then send the channel (background task)."""
+    tv_cfg = ctx.config.tv
     elapsed = 0.0
-    logger.info("Waiting for TV to boot (max %.1fs)...", timeout)
-    while elapsed < timeout:
-        await asyncio.sleep(interval)
-        elapsed += interval
-        state = await asyncio.to_thread(ha_client.get_entity_state, entity_id)  # type: ignore[union-attr]
-        if str(state).lower() not in ("off", "unavailable", "unknown", "none"):
+    logger.info("Waiting for TV to boot (max %.1fs)...", tv_cfg.boot_wait_timeout)
+    while elapsed < tv_cfg.boot_wait_timeout:
+        await asyncio.sleep(tv_cfg.boot_poll_interval)
+        elapsed += tv_cfg.boot_poll_interval
+        if await asyncio.to_thread(tv.is_on):
             logger.info(
                 "TV confirmed ON after %.1fs, waiting %.1fs before channel switch",
                 elapsed,
-                config.tv.post_boot_delay,
+                tv_cfg.post_boot_delay,
             )
-            await asyncio.sleep(config.tv.post_boot_delay)
+            await asyncio.sleep(tv_cfg.post_boot_delay)
             break
     else:
         logger.warning(
-            "TV did not confirm ON within %.1fs — sending channel anyway", timeout
+            "TV did not confirm ON within %.1fs — sending channel anyway",
+            tv_cfg.boot_wait_timeout,
         )
-    await asyncio.to_thread(ha_client.play_channel, entity_id, channel_num)  # type: ignore[union-attr]
-    logger.info("TV channel set to %s (%d) via HA", channel_name, channel_num)
+    await _send_tv_channel(tv, channel_name, channel_num)
 
 
 @register_function(name="watch_tv")
 async def watch_tv(channel_name: Optional[str] = None) -> dict:
     """Turn on the TV and/or switch to a channel by name."""
-    metrics.AI_TOOL_CALLS.labels(function="watch_tv").inc()
-
-    power_item = config.tv.power_item
-    if ha_client is not None and power_item:
-        # HA backend. power_item may be a media_player entity, or any other
-        # domain HA can turn on/off (e.g. a switch.* wired to Wake-on-LAN for
-        # TVs whose media_player integration can't power the TV on itself).
-        power_domain = power_item.split(".")[0]
-        current_state = await asyncio.to_thread(ha_client.get_entity_state, power_item)
-        already_on = str(current_state).lower() not in (
-            "off",
-            "unavailable",
-            "unknown",
-            "none",
-        )
-
-        if not already_on:
-            await asyncio.to_thread(ha_client.set_entity_state, power_item, "ON")
-            metrics.TV_COMMANDS.labels(action="power_on").inc()
-            logger.info("TV power ON sent via HA (was off)")
-
-        if not channel_name:
-            return {
-                "status": "success",
-                "message": "TV turned on."
-            if not already_on
-            else TV_ALREADY_ON_HINT,
-            }
-
-        if power_domain != "media_player":
-            logger.warning(
-                "watch_tv: channel switching requires power_item to be a media_player "
-                "entity, got '%s' (domain=%s)", power_item, power_domain,
-            )
-            return {
-                "status": "partial_success",
-                "message": f"TV {'turned on' if not already_on else 'is on'} but channel switching isn't available for this entity.",
-            }
-
-        channel_num = _resolve_tv_channel(channel_name)
-        if channel_num is None:
-            return {
-                "status": "partial_success",
-                "message": f"TV {'turned on' if not already_on else 'is on'} but channel '{channel_name}' not recognised.",
-            }
-
-        if already_on:
-            await asyncio.to_thread(ha_client.play_channel, power_item, channel_num)
-            logger.info("TV channel set to %s (%d) via HA", channel_name, channel_num)
-        else:
-            _spawn(
-                _ha_switch_channel_after_boot(channel_name, channel_num, power_item),
-                name="ha_tv_boot",
-            )
-
-        metrics.TV_COMMANDS.labels(action="channel_switch").inc()
-        return {"status": "success", "message": f"TV on, switching to {channel_name}."}
-
-    # OpenHAB backend
-    if openhab_client is None:
+    tv = _tv()
+    if tv is None:
         return {"status": "error", "message": _NO_SMARTHOME}
 
-    power_item = config.tv.power_item
-    current_state = await asyncio.to_thread(openhab_client.get_openhab_item_state, power_item)
-    already_on = str(current_state).upper() == "ON"
-
+    already_on = await asyncio.to_thread(tv.is_on)
     if not already_on:
-        await asyncio.to_thread(openhab_client.set_openhab_item_state, power_item, "ON")
+        await asyncio.to_thread(tv.turn_on)
         metrics.TV_COMMANDS.labels(action="power_on").inc()
-        logger.info("TV power ON sent via OpenHAB (was off)")
+        logger.info("TV power ON sent via %s (was off)", tv.backend)
 
     if not channel_name:
         return {
             "status": "success",
-            "message": "TV turned on."
-            if not already_on
-            else TV_ALREADY_ON_HINT,
+            "message": TV_ALREADY_ON_HINT if already_on else "TV turned on.",
+        }
+
+    power = "is on" if already_on else "turned on"
+    if not tv.can_switch_channels:
+        logger.warning(
+            "watch_tv: channel switching requires tv.power_item to be a media_player "
+            "entity, got '%s'", ctx.config.tv.power_item,
+        )
+        return {
+            "status": "partial_success",
+            "message": f"TV {power} but channel switching isn't available for this entity.",
         }
 
     channel_num = _resolve_tv_channel(channel_name)
     if channel_num is None:
         return {
             "status": "partial_success",
-            "message": f"TV {'turned on' if not already_on else 'is on'} but channel '{channel_name}' not recognised.",
+            "message": f"TV {power} but channel '{channel_name}' not recognised.",
         }
 
     if already_on:
-        await _oh_send_tv_channel(channel_name, channel_num)
+        await _send_tv_channel(tv, channel_name, channel_num)
     else:
-        _spawn(
-            _oh_switch_channel_after_boot(channel_name, channel_num),
-            name="oh_tv_boot",
-        )
+        ctx.spawn(_switch_channel_after_boot(tv, channel_name, channel_num), name="tv_boot")
 
     metrics.TV_COMMANDS.labels(action="channel_switch").inc()
     return {"status": "success", "message": f"TV on, switching to {channel_name}."}
+
+
+def _multi_set_result(names: list[str], results: list[bool], backend: str) -> dict:
+    """Result of one state set on several items: which of them failed."""
+    outcome = dict(zip(names, results))
+    failed = [name for name, ok in outcome.items() if not ok]
+    if not failed:
+        return {"status": "success", "results": outcome}
+    return {
+        "status": "partial" if len(failed) < len(names) else "error",
+        "failed": failed,
+        "message": f"{backend} did not execute the command for: " + ", ".join(failed),
+        "results": outcome,
+    }
 
 
 @register_function(name="set_openhab_item_state")
@@ -526,27 +513,34 @@ async def set_openhab_item_state(
     state: Optional[str] = None,
     item: Optional[str] = None,
     **kwargs,
-) -> bool:
-    metrics.AI_TOOL_CALLS.labels(function="set_openhab_item_state").inc()
+) -> dict:
     """Sets the state of an item in OpenHab.
 
     Accepts both ``item_name`` and ``item`` as the first argument so that
     hallucinated keyword names from OpenAI/Gemini do not cause a crash.
     Any extra unexpected keyword arguments are silently absorbed via **kwargs.
+    Returns a status dict, like set_ha_entity_state: a bare False let the
+    model confirm an action that did not happen.
     """
     resolved_name = item_name or item
+    if ctx.openhab is None:
+        logger.error("set_openhab_item_state: OpenHAB not configured")
+        return {"status": "error", "message": _NO_SMARTHOME}
     if not resolved_name:
         logger.warning(
             "set_openhab_item_state called without item_name/item — ignoring. kwargs=%s",
             kwargs,
         )
-        return False
-    if openhab_client is None:
-        logger.error("set_openhab_item_state: OpenHAB not configured")
-        return False
+        return {"status": "error", "message": "No item_name provided."}
     if kwargs:
         logger.debug("set_openhab_item_state: ignoring unexpected kwargs=%s", kwargs)
-    return await asyncio.to_thread(openhab_client.set_openhab_item_state, resolved_name, state)
+    ok = await asyncio.to_thread(ctx.openhab.set_openhab_item_state, resolved_name, state)
+    if ok:
+        return {"status": "success"}
+    return {
+        "status": "error",
+        "message": f"OpenHAB did not execute the command for {resolved_name}.",
+    }
 
 
 @register_function(name="get_openhab_items_state")
@@ -556,14 +550,13 @@ async def get_openhab_items_state(item_names: Optional[list[str]] = None) -> dic
     Use for aggregate questions ("are all lights off?", "are any windows open?")
     instead of calling get_openhab_item_state once per item.
     """
-    metrics.AI_TOOL_CALLS.labels(function="get_openhab_items_state").inc()
-    if openhab_client is None:
+    if ctx.openhab is None:
         logger.error("get_openhab_items_state called but OpenHAB is not configured")
         return {"status": "error", "message": _NO_SMARTHOME}
     if not item_names:
         logger.warning("get_openhab_items_state called without item_names — ignoring.")
         return {"status": "error", "message": "No item_names provided."}
-    states = await asyncio.to_thread(openhab_client.get_items_state, item_names)
+    states = await asyncio.to_thread(ctx.openhab.get_items_state, item_names)
     missing = [name for name in item_names if name not in states]
     if missing:
         logger.warning("get_openhab_items_state: items not found: %s", missing)
@@ -577,8 +570,7 @@ async def set_openhab_items_state(
     **kwargs,
 ) -> dict:
     """Sets the same state on multiple OpenHAB items in a single tool call (saves round trips)."""
-    metrics.AI_TOOL_CALLS.labels(function="set_openhab_items_state").inc()
-    if openhab_client is None:
+    if ctx.openhab is None:
         logger.error("set_openhab_items_state called but OpenHAB is not configured")
         return {"status": "error", "message": _NO_SMARTHOME}
     if not item_names:
@@ -588,11 +580,11 @@ async def set_openhab_items_state(
         logger.debug("set_openhab_items_state: ignoring unexpected kwargs=%s", kwargs)
     results = await asyncio.gather(
         *(
-            asyncio.to_thread(openhab_client.set_openhab_item_state, name, state)
+            asyncio.to_thread(ctx.openhab.set_openhab_item_state, name, state)
             for name in item_names
         )
     )
-    return {"results": dict(zip(item_names, results))}
+    return _multi_set_result(item_names, results, "OpenHAB")
 
 
 # ---------------------------------------------------------------------------
@@ -603,11 +595,10 @@ async def set_openhab_items_state(
 @register_function(name="get_ha_entity_state")
 async def get_ha_entity_state(entity_id: str) -> str | None:
     """Gets the state of any Home Assistant entity."""
-    metrics.AI_TOOL_CALLS.labels(function="get_ha_entity_state").inc()
-    if ha_client is None:
+    if ctx.ha is None:
         logger.error("get_ha_entity_state called but Home Assistant is not configured")
         return None
-    return await asyncio.to_thread(ha_client.get_entity_state, entity_id)
+    return await asyncio.to_thread(ctx.ha.get_entity_state, entity_id)
 
 
 @register_function(name="get_ha_entities_state")
@@ -618,14 +609,13 @@ async def get_ha_entities_state(entity_ids: Optional[list[str]] = None) -> dict:
     instead of calling get_ha_entity_state once per entity — this fetches all
     requested entities in one round trip.
     """
-    metrics.AI_TOOL_CALLS.labels(function="get_ha_entities_state").inc()
-    if ha_client is None:
+    if ctx.ha is None:
         logger.error("get_ha_entities_state called but Home Assistant is not configured")
         return {"status": "error", "message": _NO_SMARTHOME}
     if not entity_ids:
         logger.warning("get_ha_entities_state called without entity_ids — ignoring.")
         return {"status": "error", "message": "No entity_ids provided."}
-    states = await asyncio.to_thread(ha_client.get_states, entity_ids)
+    states = await asyncio.to_thread(ctx.ha.get_states, entity_ids)
     missing = [eid for eid in entity_ids if eid not in states]
     if missing:
         logger.warning("get_ha_entities_state: entities not found: %s", missing)
@@ -640,7 +630,7 @@ async def _no_change_off(entity_id: str, current: str) -> dict:
     """
     domain = entity_id.split(".", 1)[0]
     states = (
-        await asyncio.to_thread(ha_client.get_area_states, entity_id)  # type: ignore[union-attr]
+        await asyncio.to_thread(ctx.ha.get_area_states, entity_id)
         if domain == "light"
         else None
     )
@@ -682,8 +672,7 @@ async def set_ha_entity_state(
     and still confirm the action ("Turning off the TV") — an explicit status with a
     message gives it an unambiguous signal that the operation failed.
     """
-    metrics.AI_TOOL_CALLS.labels(function="set_ha_entity_state").inc()
-    if ha_client is None:
+    if ctx.ha is None:
         logger.error("set_ha_entity_state called but Home Assistant is not configured")
         return {"status": "error", "message": _NO_SMARTHOME}
     if not entity_id:
@@ -696,9 +685,9 @@ async def set_ha_entity_state(
     requested = (state or "").upper()
     if (
         requested in ("ON", "OFF")
-        and entity_id.split(".", 1)[0] in config.home_assistant.power_guard_domains
+        and entity_id.split(".", 1)[0] in ctx.config.home_assistant.power_guard_domains
     ):
-        current = await asyncio.to_thread(ha_client.get_entity_state, entity_id)
+        current = await asyncio.to_thread(ctx.ha.get_entity_state, entity_id)
         if current is not None and current.upper() == requested:
             logger.info(
                 "set_ha_entity_state: %s is already %s — not sent, reporting no_change",
@@ -714,7 +703,7 @@ async def set_ha_entity_state(
                     "The command was probably misheard."
                 ),
             }
-    ok = await asyncio.to_thread(ha_client.set_entity_state, entity_id, state or "")
+    ok = await asyncio.to_thread(ctx.ha.set_entity_state, entity_id, state or "")
     if ok:
         return {"status": "success"}
     return {
@@ -733,8 +722,7 @@ async def set_ha_entities_state(
     **kwargs,
 ) -> dict:
     """Sets the same state on multiple Home Assistant entities in a single tool call (saves round trips)."""
-    metrics.AI_TOOL_CALLS.labels(function="set_ha_entities_state").inc()
-    if ha_client is None:
+    if ctx.ha is None:
         logger.error("set_ha_entities_state called but Home Assistant is not configured")
         return {"status": "error", "message": _NO_SMARTHOME}
     if not entity_ids:
@@ -744,19 +732,11 @@ async def set_ha_entities_state(
         logger.debug("set_ha_entities_state: ignoring unexpected kwargs=%s", kwargs)
     results = await asyncio.gather(
         *(
-            asyncio.to_thread(ha_client.set_entity_state, eid, state or "")
+            asyncio.to_thread(ctx.ha.set_entity_state, eid, state or "")
             for eid in entity_ids
         )
     )
-    failed = [eid for eid, ok in zip(entity_ids, results) if not ok]
-    if not failed:
-        return {"status": "success", "results": dict(zip(entity_ids, results))}
-    return {
-        "status": "partial" if len(failed) < len(entity_ids) else "error",
-        "failed": failed,
-        "message": "Home Assistant did not execute the command for: " + ", ".join(failed),
-        "results": dict(zip(entity_ids, results)),
-    }
+    return _multi_set_result(entity_ids, results, "Home Assistant")
 
 
 _PROMPT_STATE_HEADER = (
@@ -771,11 +751,11 @@ _PROMPT_STATE_HEADER = (
 
 def _prompt_state_entities() -> list[str]:
     """Entity ids of the configured domains, as the system prompt lists them."""
-    domains = config.home_assistant.prompt_state_domains
+    domains = ctx.config.home_assistant.prompt_state_domains
     if not domains:
         return []
     pattern = r"\b(?:" + "|".join(re.escape(d) for d in domains) + r")\.[a-z0-9_]+"
-    return sorted(set(re.findall(pattern, config.live.system_instruction or "")))
+    return sorted(set(re.findall(pattern, ctx.config.live.system_instruction or "")))
 
 
 def _describe_state(item: dict) -> str:
@@ -789,16 +769,16 @@ def _describe_state(item: dict) -> str:
 async def prompt_state_context() -> str:
     """The prompt block with current states, or "" (no HA, disabled, HA too slow)."""
     entity_ids = _prompt_state_entities()
-    if ha_client is None or not entity_ids:
+    if ctx.ha is None or not entity_ids:
         return ""
     try:
         items = await asyncio.wait_for(
-            asyncio.to_thread(ha_client.get_state_objects, entity_ids),
-            config.home_assistant.prompt_state_timeout,
+            asyncio.to_thread(ctx.ha.get_state_objects, entity_ids),
+            ctx.config.home_assistant.prompt_state_timeout,
         )
     except asyncio.TimeoutError:
         logger.warning("HA states not read within %.1fs, session starts without them",
-                       config.home_assistant.prompt_state_timeout)
+                       ctx.config.home_assistant.prompt_state_timeout)
         return ""
     if not items:
         return ""

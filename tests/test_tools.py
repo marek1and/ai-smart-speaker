@@ -16,7 +16,7 @@ from realtime.gemini import GeminiRealtimeManager
 
 @pytest.fixture
 def mpd(client, monkeypatch):
-    monkeypatch.setattr(d, "_mpd_client", client)
+    monkeypatch.setattr(d.ctx, "mpd_client", client)
     return client
 
 
@@ -49,7 +49,7 @@ async def test_resume_from_music_goes_back_to_the_radio(mpd, mopidy, eska):
 async def test_unknown_station_is_an_error(mpd, monkeypatch):
     async def none(name):
         return None
-    monkeypatch.setattr(d.radio_client, "search_station", none)
+    monkeypatch.setattr(d.ctx.radio, "search_station", none)
     assert (await d.play_internet_radio("Nonexistent FM"))["status"] == "error"
 
 
@@ -72,7 +72,7 @@ def music_needs_mpd(request, monkeypatch):
     """play_music reads the playback generation; tests that use the real
     client inject it through the mpd fixture."""
     if "mpd" not in request.fixturenames:
-        monkeypatch.setattr(d, "_mpd_client", SimpleNamespace(playback_generation=0))
+        monkeypatch.setattr(d.ctx, "mpd_client", SimpleNamespace(playback_generation=0))
 
 
 class FakeProvider:
@@ -102,7 +102,7 @@ class FakeProvider:
 
 
 async def test_play_music_logs_the_traceback(monkeypatch, caplog):
-    monkeypatch.setattr(d, "music_provider", FakeProvider(exc=KeyError("uri")))
+    monkeypatch.setattr(d.ctx, "music", FakeProvider(exc=KeyError("uri")))
     await d.play_music("x")
     assert any(r.exc_info for r in caplog.records if "Music search" in r.getMessage())
 
@@ -113,14 +113,14 @@ async def test_play_music_logs_the_traceback(monkeypatch, caplog):
     (FakeProvider(selection=None), "Nothing found"),
 ])
 async def test_play_music_failures_are_reported(monkeypatch, provider, expected):
-    monkeypatch.setattr(d, "music_provider", provider)
+    monkeypatch.setattr(d.ctx, "music", provider)
     result = await d.play_music("x")
     assert result["status"] == "error" and expected in result["details"]
 
 
 async def test_play_music_unknown_kind_falls_back_to_track(monkeypatch):
     p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"))
-    monkeypatch.setattr(d, "music_provider", p)
+    monkeypatch.setattr(d.ctx, "music", p)
     result = await d.play_music("x", kind="podcast")
     assert p.kinds == ["track"] and result["uris"] == ["youtube:video:a"]
     assert result["for_model"] == {"title": "T", "artist": "A", "tracks": 1}
@@ -128,7 +128,7 @@ async def test_play_music_unknown_kind_falls_back_to_track(monkeypatch):
 
 async def test_play_music_prefetches_only_the_first_track(monkeypatch):
     p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a", "youtube:video:b"], "T", "A"))
-    monkeypatch.setattr(d, "music_provider", p)
+    monkeypatch.setattr(d.ctx, "music", p)
     await d.play_music("x", kind="artist")
     assert p.prefetched == ["youtube:video:a"]
 
@@ -136,21 +136,21 @@ async def test_play_music_prefetches_only_the_first_track(monkeypatch):
 @pytest.mark.parametrize("cached,starts", [(True, "now"), (False, "in_a_few_seconds"), (None, None)])
 async def test_play_music_tells_the_model_when_it_starts(monkeypatch, cached, starts):
     p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=cached)
-    monkeypatch.setattr(d, "music_provider", p)
+    monkeypatch.setattr(d.ctx, "music", p)
     result = await d.play_music("x")
     assert result["for_model"].get("starts") == starts
 
 
 async def test_prefetched_entry_is_remembered_and_dropped_once(monkeypatch):
     p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=False)
-    monkeypatch.setattr(d, "music_provider", p)
-    monkeypatch.setattr(d, "_prefetched_tlids", [])
-    monkeypatch.setattr(d, "_mpd_client", SimpleNamespace(playback_generation=9))
+    monkeypatch.setattr(d.ctx, "music", p)
+    monkeypatch.setattr(d.ctx, "prefetched_tlids", [])
+    monkeypatch.setattr(d.ctx, "mpd_client", SimpleNamespace(playback_generation=9))
     result = await d.play_music("x")
-    assert result["prefetched"] is True and d._prefetched_tlids == [41]
+    assert result["prefetched"] is True and d.ctx.prefetched_tlids == [41]
     assert result["generation"] == 9
     await d.drop_prefetched()
-    assert p.dropped == [41] and d._prefetched_tlids == []
+    assert p.dropped == [41] and d.ctx.prefetched_tlids == []
 
 
 async def test_stop_during_the_search_still_cancels(monkeypatch):
@@ -162,23 +162,23 @@ async def test_stop_during_the_search_still_cancels(monkeypatch):
             client.playback_generation += 1  # the stop arrives meanwhile
             return await super().find(query, kind)
 
-    monkeypatch.setattr(d, "_mpd_client", client)
-    monkeypatch.setattr(d, "music_provider", Slow(selection=providers.MusicSelection(["local:track:a"], "T", "A")))
+    monkeypatch.setattr(d.ctx, "mpd_client", client)
+    monkeypatch.setattr(d.ctx, "music", Slow(selection=providers.MusicSelection(["local:track:a"], "T", "A")))
     assert (await d.play_music("x"))["generation"] == 3
 
 
 async def test_without_cache_info_the_start_does_not_wait(monkeypatch):
     # review: cache_dir unset -> wait_ready returned at once and play blocked anyway
     p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=None)
-    monkeypatch.setattr(d, "music_provider", p)
-    monkeypatch.setattr(d, "_prefetched_tlids", [])
+    monkeypatch.setattr(d.ctx, "music", p)
+    monkeypatch.setattr(d.ctx, "prefetched_tlids", [])
     result = await d.play_music("x")
     assert p.prefetched == ["youtube:video:a"] and result["prefetched"] is False
 
 
 async def test_cached_track_is_not_prefetched(monkeypatch):
     p = FakeProvider(selection=providers.MusicSelection(["youtube:video:a"], "T", "A"), cached=True)
-    monkeypatch.setattr(d, "music_provider", p)
+    monkeypatch.setattr(d.ctx, "music", p)
     await d.play_music("x")
     assert p.prefetched == []
 
@@ -188,7 +188,7 @@ async def test_failed_prefetch_still_plays_and_is_logged(monkeypatch, caplog):
         selection=providers.MusicSelection(["youtube:video:a"], "T", "A"),
         prefetch_exc=OSError("mopidy down"),
     )
-    monkeypatch.setattr(d, "music_provider", p)
+    monkeypatch.setattr(d.ctx, "music", p)
     result = await d.play_music("x")
     assert result["uris"] == ["youtube:video:a"] and "status" not in result
     assert any(r.exc_info for r in caplog.records if "Prefetch" in r.getMessage())
@@ -481,7 +481,7 @@ def test_local_first_builds_the_chain():
 
 async def test_play_music_tells_the_model_the_source(monkeypatch):
     p = FakeProvider(selection=providers.MusicSelection(["local:track:1"], "Whisky", "Dżem", "collection"))
-    monkeypatch.setattr(d, "music_provider", p)
+    monkeypatch.setattr(d.ctx, "music", p)
     assert (await d.play_music("Dżem Whisky"))["for_model"]["source"] == "collection"
 
 
@@ -536,7 +536,7 @@ def call(name, **args):
 async def test_failed_lookup_reaches_the_model_and_is_not_deferred(gemini, mpd, monkeypatch):
     async def none(name):
         return None
-    monkeypatch.setattr(d.radio_client, "search_station", none)
+    monkeypatch.setattr(d.ctx.radio, "search_station", none)
     await gemini._handle_tool_calls([call("play_internet_radio", station_name="Nope FM")])
     assert gemini.pending_actions == []
     assert gemini.sent[0].response["status"] == "error"
@@ -897,14 +897,14 @@ ITEMS = [
 
 @pytest.fixture
 def prompt_cfg(monkeypatch):
-    monkeypatch.setattr(d.config.live, "system_instruction", PROMPT)
-    monkeypatch.setattr(d.config.home_assistant, "prompt_state_domains", ["light", "switch", "fan", "media_player"])
-    monkeypatch.setattr(d.config.home_assistant, "prompt_state_timeout", 0.2)
+    monkeypatch.setattr(d.ctx.config.live, "system_instruction", PROMPT)
+    monkeypatch.setattr(d.ctx.config.home_assistant, "prompt_state_domains", ["light", "switch", "fan", "media_player"])
+    monkeypatch.setattr(d.ctx.config.home_assistant, "prompt_state_timeout", 0.2)
 
 
 async def test_prompt_states_cover_the_switchable_entities_the_prompt_lists(prompt_cfg, monkeypatch):
     ha = StatesHA(ITEMS)
-    monkeypatch.setattr(d, "ha_client", ha)
+    monkeypatch.setattr(d.ctx, "ha", ha)
     block = await d.prompt_state_context()
     assert sorted(ha.asked) == ["light.salon_glowne", "media_player.telewizor_salon", "switch.fontanna"]
     assert "- light.salon_glowne: on, jasność 50%" in block and "- switch.fontanna: off" in block
@@ -913,9 +913,9 @@ async def test_prompt_states_cover_the_switchable_entities_the_prompt_lists(prom
 
 @pytest.mark.parametrize("case", ["slow_ha", "disabled", "no_ha"])
 async def test_session_starts_without_states_when_they_are_not_available(prompt_cfg, monkeypatch, case):
-    monkeypatch.setattr(d, "ha_client", None if case == "no_ha" else StatesHA(ITEMS, delay=0.5 if case == "slow_ha" else 0))
+    monkeypatch.setattr(d.ctx, "ha", None if case == "no_ha" else StatesHA(ITEMS, delay=0.5 if case == "slow_ha" else 0))
     if case == "disabled":
-        monkeypatch.setattr(d.config.home_assistant, "prompt_state_domains", [])
+        monkeypatch.setattr(d.ctx.config.home_assistant, "prompt_state_domains", [])
     assert await d.prompt_state_context() == ""
 
 
