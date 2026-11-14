@@ -261,6 +261,8 @@ class LiveConfig:
 
     # --- OpenAI-specific settings ---
     openai_model: str = "gpt-realtime"
+    # Transcribes the user's speech for the log and MQTT, in the language of live.lang.
+    openai_transcription_model: str = "whisper-1"
     # Wait between the end of speech and committing the audio buffer, so the
     # last frames reach the API first.
     openai_commit_delay: float = 0.15

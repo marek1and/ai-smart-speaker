@@ -182,6 +182,7 @@ live:
   
   # OpenAI-specific settings
   openai_model: "gpt-realtime"
+  openai_transcription_model: "whisper-1"  # Transcript of the user for the log and MQTT
   openai_commit_delay: 0.15  # Wait before committing the audio buffer at the end of speech
   openai_voice: "shimmer" # Options: alloy, ash, ballad, coral, echo, sage, shimmer, verse
 

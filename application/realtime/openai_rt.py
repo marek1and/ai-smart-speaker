@@ -207,10 +207,15 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             if cancel_response:
                 await self._ws_send({"type": "response.cancel"})
 
-            # Truncate assistant audio to what was actually played.
-            # This syncs the server's context with the client's playback position
-            # so the model knows the user only heard part of the response.
-            if self._current_response_item_id and self._audio_bytes_received > 0:
+            # Truncate the interrupted reply to the audio received so far, so
+            # the model knows the user did not hear the rest. Only for a reply
+            # cut short: a finished one was truncated at its full length on
+            # every following turn, which changed nothing.
+            if (
+                cancel_response
+                and self._current_response_item_id
+                and self._audio_bytes_received > 0
+            ):
                 audio_end_ms = int(
                     self._audio_bytes_received / _PCM16_BYTES_PER_SAMPLE / OPENAI_SAMPLE_RATE * 1000
                 )
@@ -227,6 +232,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                     audio_end_ms,
                     self._current_response_item_id,
                 )
+                self._current_response_item_id = None
 
             await self._ws_send({"type": "input_audio_buffer.clear"})
 
@@ -278,6 +284,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             max_size=_WS_MAX_MESSAGE_BYTES,
         ) as ws:
             self._ws = ws
+            # Nothing of an earlier session exists in this one: truncating its
+            # last reply got "Item with item_id not found" on every first turn.
+            self._current_response_item_id = None
+            self._audio_bytes_received = 0
+            self._is_response_item_in_progress = False
+            self._pending_cancel = None
             try:
                 initial_event = json.loads(
                     await asyncio.wait_for(ws.recv(), timeout=self.live_cfg.session_open_timeout)
@@ -309,8 +321,11 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                 "type": "audio/pcm",
                 "rate": OPENAI_SAMPLE_RATE,
             },
+            # Without the language the transcript guessed it: Korean for
+            # "Która jest godzina?" (14.11.2026).
             "transcription": {
-                "model": "whisper-1",
+                "model": self.live_cfg.openai_transcription_model,
+                "language": self.live_cfg.lang.split("-")[0],
             },
         }
 
@@ -566,6 +581,9 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         elif event_type == "response.created":
             self._audio_bytes_received = 0
             self._current_response_item_id = None
+            # A turn with a tool call is spoken in two responses.
+            if self._ai_transcript and not self._ai_transcript[-1].isspace():
+                self._ai_transcript += " "
             logger.debug("API: response.created")
 
         # --- Track assistant item ID (needed for conversation.item.truncate) ---
