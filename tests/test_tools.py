@@ -31,7 +31,7 @@ async def test_resume_reports_already_playing(mpd, mopidy, eska):
 
 async def test_resume_of_a_frozen_stream_is_not_already_playing(mpd, mopidy, eska):
     await mpd.play_station(*eska)
-    mpd._position_stalled_since = 1.0
+    mpd._health.stalled_since = 1.0
     result = await d.play_internet_radio()
     assert result["action"] == "play" and result["for_model"]["already_playing"] is False
 

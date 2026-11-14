@@ -126,32 +126,32 @@ async def test_unduck_returns_without_waiting_for_the_fade(client, monkeypatch):
 # --- dead and frozen streams ------------------------------------------------
 
 def test_stop_inside_grace_window_is_a_dead_stream(client, eska):
-    client._playback_started_at = time.monotonic() - 3
-    client._started_key = "eska"
+    client._health.started_at = time.monotonic() - 3
+    client._health.started_key = "eska"
     client._report_silent_stop()
     assert client.radio_state.get_cached_url("eska") is None
 
 
 def test_stop_after_listening_is_a_person_pressing_stop(client, eska):
-    client._playback_started_at = time.monotonic() - 600
-    client._seen_play_since_start = True
-    client._started_key = "eska"
+    client._health.started_at = time.monotonic() - 600
+    client._health.seen_play = True
+    client._health.started_key = "eska"
     client._report_silent_stop()
     assert client.radio_state.get_cached_url("eska") == eska[0]
 
 
 def test_silent_stop_is_reported_once_per_attempt(client, eska):
-    client._playback_started_at = time.monotonic() - 3
-    client._started_key = "eska"
+    client._health.started_at = time.monotonic() - 3
+    client._health.started_key = "eska"
     client._report_silent_stop()
     client.radio_state.update_station("eska", eska[0], "Radio Eska")
-    client._playback_started_at = time.monotonic() - 3
+    client._health.started_at = time.monotonic() - 3
     client._report_silent_stop()
     assert client.radio_state.get_cached_url("eska") == eska[0]
 
 
 def test_frozen_position_is_detected_and_a_moving_one_is_not(client):
-    client._playback_started_at = None
+    client._health.started_at = None
     client._track_position({"state": "play", "songid": "1", "elapsed": "10.0"})
     client._track_position({"state": "play", "songid": "1", "elapsed": "12.0"})
     assert not client.is_stream_stalled()
@@ -160,14 +160,14 @@ def test_frozen_position_is_detected_and_a_moving_one_is_not(client):
 
 
 def test_position_is_not_judged_while_the_stream_buffers(client):
-    client._playback_started_at = time.monotonic()
+    client._health.started_at = time.monotonic()
     for _ in range(3):
         client._track_position({"state": "play", "songid": "1", "elapsed": "0.0"})
     assert not client.is_stream_stalled()
 
 
 def test_next_track_restarting_elapsed_is_not_a_stall(client):
-    client._playback_started_at = None
+    client._health.started_at = None
     client._track_position({"state": "play", "songid": "1", "elapsed": "230.0"})
     client._track_position({"state": "play", "songid": "2", "elapsed": "1.0"})
     client._track_position({"state": "play", "songid": "2", "elapsed": "3.0"})
@@ -183,17 +183,17 @@ async def test_frozen_radio_is_reloaded_then_stopped_after_max_restarts(client, 
         return eska
 
     for _ in range(client.config.stream_stall_max_restarts):
-        client._position_stalled_since = time.monotonic() - 100
+        client._health.stalled_since = time.monotonic() - 100
         await client._recover_stalled_stream(resolve)
     assert reloads == ["eska", "eska"] and mopidy.state == "play"
-    client._position_stalled_since = time.monotonic() - 100
+    client._health.stalled_since = time.monotonic() - 100
     await client._recover_stalled_stream(resolve)
     assert mopidy.state == "stop"
 
 
 async def test_frozen_stream_waits_while_ducked(client, eska):
     client._is_ducked = True
-    client._position_stalled_since = time.monotonic() - 100
+    client._health.stalled_since = time.monotonic() - 100
     called = []
 
     async def resolve(key):
@@ -206,8 +206,8 @@ async def test_frozen_stream_waits_while_ducked(client, eska):
 async def test_watcher_reports_external_stop_to_mqtt(client, mopidy, eska, mpd_config):
     mpd_config.state_poll_interval = 0.01
     await client.play_station(*eska)
-    client._seen_play_since_start = True
-    client._playback_started_at = time.monotonic() - 600
+    client._health.seen_play = True
+    client._health.started_at = time.monotonic() - 600
     client.events.clear()
     watcher = asyncio.create_task(client.watch_external_changes(resolve_eska))
     await asyncio.sleep(0.03)
@@ -247,7 +247,7 @@ async def test_resume_reloads_when_the_cached_url_was_dropped(client, mopidy, es
 
 async def test_resume_reloads_a_frozen_stream(client, mopidy, eska):
     await client.play_station(*eska)
-    client._position_stalled_since = time.monotonic() - 5
+    client._health.stalled_since = time.monotonic() - 5
     mopidy.calls.clear()
     await client.resume(resolve_eska)
     assert "clear" in mopidy.names()
@@ -341,7 +341,7 @@ async def test_frozen_music_skips_to_the_next_track(client, mopidy, eska):
     async def resolve(key):
         called.append(key)
 
-    client._position_stalled_since = time.monotonic() - 100
+    client._health.stalled_since = time.monotonic() - 100
     await client._recover_stalled_stream(resolve)
     assert called == [] and mopidy.state == "play" and mopidy.song == 1
     assert not client._is_ducked  # not a turn: nobody would unduck it
@@ -354,14 +354,14 @@ async def test_frozen_last_music_track_stops(client, mopidy, eska):
     async def resolve(key):
         called.append(key)
 
-    client._position_stalled_since = time.monotonic() - 100
+    client._health.stalled_since = time.monotonic() - 100
     await client._recover_stalled_stream(resolve)
     assert called == [] and mopidy.state == "stop"
 
 
 async def test_dead_music_track_keeps_the_station_url(client, eska):
     await client.play_music(["youtube:video:a"], "Song")
-    client._playback_started_at = time.monotonic() - 2
+    client._health.started_at = time.monotonic() - 2
     client._report_silent_stop()
     assert client.radio_state.get_cached_url("eska") == eska[0]
 

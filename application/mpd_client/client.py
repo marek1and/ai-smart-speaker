@@ -4,10 +4,11 @@ import math
 import re
 import time
 import numpy as np
-from typing import Awaitable, Callable, Optional, Dict, Any, List
+from typing import Awaitable, Callable, Optional, Dict, Any, List, TypeVar
 from mpd import MPDClient, MPDError, ConnectionError as MPDConnectionError
 from config import MPDConfig
 from mpd_client.state import RadioStateManager
+from mpd_client.stream_health import StreamHealth
 import metrics
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,13 @@ logger = logging.getLogger(__name__)
 _MOPIDY_MUTE_OUTPUT = "Mute"
 # Poll interval while waiting for Mopidy to report a started track.
 _START_POLL_SECONDS = 0.1
+# A command gets this long on top of the socket timeout before it is abandoned.
+_HARD_TIMEOUT_MARGIN = 1.0
+# Mopidy reports no volume for a moment after a start.
+_VOLUME_READ_RETRIES = 5
+_VOLUME_READ_RETRY_SECONDS = 0.05
+
+T = TypeVar("T")
 
 
 class MPDClientWrapper:
@@ -25,35 +33,11 @@ class MPDClientWrapper:
 
     def __init__(self, config: MPDConfig):
         self.config = config
-        self.client = MPDClient()
-        self.client.timeout = config.connection_timeout
+        self.client = self._new_client()
         self.is_connected = False
         self._fade_task: Optional[asyncio.Task] = None
         self._playback_generation = 0
-
-        # Stream-failure detection. MPD reports a dead stream in status.error,
-        # but Mopidy (mopidy-mpd) never sets that field, so a second signal is
-        # needed: playback that stops on its own shortly after we started it.
-        self._playback_started_at: Optional[float] = None
-        self._expecting_stop = False
-        # One failure per playback attempt: MPD often flips to "stop" seconds
-        # before it fills in status.error, so both detectors can see the same
-        # death and would otherwise report it twice.
-        self._stream_failure_reported = False
-        # Mopidy reports "stop" for a moment after play while it buffers the
-        # stream, so a stop seen before the first "play" is not a verdict yet.
-        self._seen_play_since_start = False
-        # Station of the last start; a stream that dies is blamed on it, not on
-        # whatever station became current meanwhile.
-        self._started_key: Optional[str] = None
-        # Mid-stream stall detection. When a stream breaks after it started,
-        # Mopidy shuts its GStreamer pipeline down but keeps reporting "play"
-        # with elapsed frozen at 0 (core only mirrors PAUSED from the audio
-        # layer) — 03-05.10.2026 the radio sat silent for 37 h that way.
-        self._last_elapsed: Optional[float] = None
-        self._position_stalled_since: Optional[float] = None
-        self._stall_restarts = 0
-        self._last_songid: Optional[str] = None
+        self._health = StreamHealth(config)
         # Queue position of the last track seen playing. Mopidy drops "song"
         # from status once playback stops (also when a track fails), and
         # next_track still has to know where it was.
@@ -69,9 +53,9 @@ class MPDClientWrapper:
         self._restore_volume = self.config.default_playback_volume
         metrics.RADIO_VOLUME.set(self._restore_volume)
 
-        # One-shot cache set by stop()/play_station()/play() so that the next
-        # is_playing() call returns immediately without a network round-trip.
-        # None means "unknown — ask MPD".
+        # Last known play state: set by the start and stop operations and
+        # refreshed by every status query, so is_playing() rarely needs a
+        # round-trip. None means "unknown — ask MPD".
         self._is_playing: Optional[bool] = None
 
         # Radio state (station list, current station, play counts)
@@ -84,6 +68,11 @@ class MPDClientWrapper:
         # Last play/stop state sent to listeners — lets the external-change
         # watcher notify only on changes it didn't originate itself.
         self._last_notified_state: Optional[str] = None
+
+    def _new_client(self) -> MPDClient:
+        client = MPDClient()
+        client.timeout = self.config.connection_timeout
+        return client
 
     def add_state_listener(self, cb: Callable[[dict], None]) -> None:
         self._state_listeners.append(cb)
@@ -127,13 +116,13 @@ class MPDClientWrapper:
                 self._track_position(status)
                 if (
                     resolve_station is not None
-                    and self._stall_duration() >= self.config.stream_stall_timeout
+                    and self._health.stall_duration() >= self.config.stream_stall_timeout
                 ):
                     await self._recover_stalled_stream(resolve_station)
                     continue
                 if state_str == "ON":
-                    self._seen_play_since_start = True
-                elif not error and self._still_starting():
+                    self._health.seen_play = True
+                elif not error and self._health.still_starting():
                     # Still buffering — judge it on a later poll. Notifying now
                     # flickered HA to OFF and back, and reported a live stream
                     # as dead (26.09.2026: stop seen 0.0s after play, playing 2s later).
@@ -158,53 +147,18 @@ class MPDClientWrapper:
                 logger.error("MPD external-change watcher error: %s", e)
 
     def _track_position(self, status: Dict[str, Any]) -> None:
-        """Follows status.elapsed across polls to spot a frozen stream.
-
-        Not judged while a start we issued is still inside stream_start_grace:
-        Mopidy reports "play" with elapsed 0 for as long as it buffers.
-        """
-        starting = (
-            self._playback_started_at is not None
-            and time.monotonic() - self._playback_started_at
-            <= self.config.stream_start_grace
-        )
-        try:
-            elapsed = float(status.get("elapsed"))
-        except (TypeError, ValueError):
-            elapsed = None
+        """Takes what a status poll tells about the position in the queue and
+        in the stream."""
         if status.get("song") is not None:
             try:
                 self._last_song_pos = int(status["song"])
             except (TypeError, ValueError):
                 pass
-        songid = status.get("songid")
-        if songid != self._last_songid:
-            # Next track in a music queue: elapsed restarts from 0.
-            self._last_songid = songid
-            self._last_elapsed = None
-            self._position_stalled_since = None
-        if status.get("state") != "play" or starting or elapsed is None:
-            self._last_elapsed = None
-            self._position_stalled_since = None
-            return
-        if self._last_elapsed is None or elapsed > self._last_elapsed:
-            if self._last_elapsed is not None:
-                self._position_stalled_since = None
-                self._stall_restarts = 0
-            self._last_elapsed = elapsed
-            return
-        if self._position_stalled_since is None:
-            self._position_stalled_since = time.monotonic()
-
-    def _stall_duration(self) -> float:
-        """Seconds the position has not moved while the server reports "play"."""
-        if self._position_stalled_since is None:
-            return 0.0
-        return time.monotonic() - self._position_stalled_since
+        self._health.track_position(status)
 
     def is_stream_stalled(self) -> bool:
         """True when the last poll found the position frozen during "play"."""
-        return self._position_stalled_since is not None
+        return self._health.stalled
 
     async def _recover_stalled_stream(
         self,
@@ -215,9 +169,8 @@ class MPDClientWrapper:
         if self._is_ducked:
             # A restart fades to the restore volume — wait for the conversation to end.
             return
-        stalled_for = self._stall_duration()
-        self._last_elapsed = None
-        self._position_stalled_since = None
+        stalled_for = self._health.stall_duration()
+        self._health.clear_stall()
         if self._source == "music":
             metrics.RADIO_STREAM_ERRORS.labels(station="music").inc()
             result, _, _ = await self.next_track()
@@ -229,19 +182,19 @@ class MPDClientWrapper:
             return
         station = self._radio_state.get_current_name() or "unknown"
         metrics.RADIO_STREAM_ERRORS.labels(station=station).inc()
-        if self._stall_restarts >= self.config.stream_stall_max_restarts:
+        if self._health.stall_restarts >= self.config.stream_stall_max_restarts:
             logger.error(
                 "Stream %s still frozen after %d restarts — stopping playback",
-                station, self._stall_restarts,
+                station, self._health.stall_restarts,
             )
-            self._stall_restarts = 0
+            self._health.stall_restarts = 0
             await self.stop()
             return
-        self._stall_restarts += 1
+        self._health.stall_restarts += 1
         logger.error(
             "Playback position of %s frozen for %.0fs while the server reports "
             "play — restarting the stream (attempt %d/%d)",
-            station, stalled_for, self._stall_restarts,
+            station, stalled_for, self._health.stall_restarts,
             self.config.stream_stall_max_restarts,
         )
         await self._reload_current_station(resolve_station)
@@ -265,42 +218,22 @@ class MPDClientWrapper:
         idle websocket ~2.5 min later with a 1008.
         """
         try:
-            await asyncio.to_thread(self.client.clearerror)
+            await self._run_mpd_cmd(self.client.clearerror)
         except (MPDError, IOError, OSError, ValueError) as e:
             logger.debug("clearerror not available (%s) — continuing", e)
-
-    def _still_starting(self) -> bool:
-        """True while a start we issued has not reached "play" yet and the
-        grace window is still open."""
-        return (
-            self._playback_started_at is not None
-            and not self._expecting_stop
-            and not self._seen_play_since_start
-            and time.monotonic() - self._playback_started_at
-            <= self.config.stream_start_grace
-        )
 
     def _report_silent_stop(self) -> None:
         """Flags playback that died on its own, without MPD reporting an error.
 
         Mopidy (mopidy-mpd) never sets status.error, so on that backend a dead
         stream shows up only as playback quietly reverting to "stop" — which
-        looks exactly like someone pressing stop. The discriminator is timing:
-        a stream that fails does so within seconds of the start, while a manual
-        stop comes after listening. Anything past the grace window is treated as
-        a legitimate stop and left alone.
+        looks exactly like someone pressing stop. StreamHealth tells them apart.
         """
-        if (
-            self._expecting_stop
-            or self._playback_started_at is None
-            or self._stream_failure_reported
-        ):
-            return
-        played_for = time.monotonic() - self._playback_started_at
-        if played_for > self.config.stream_start_grace and self._seen_play_since_start:
+        played_for = self._health.silent_stop_age()
+        if played_for is None:
             return
 
-        key = self._started_key
+        key = self._health.started_key
         entry = self._radio_state.get_entry(key) if key else None
         station = entry.name if entry else ("music" if self._source == "music" else "unknown")
         logger.error(
@@ -310,8 +243,7 @@ class MPDClientWrapper:
         metrics.RADIO_STREAM_ERRORS.labels(station=station).inc()
         if key:
             self._radio_state.forget_url(key)
-        self._stream_failure_reported = True
-        self._playback_started_at = None
+        self._health.mark_failure_reported()
 
     async def _handle_stream_error(self, error: str) -> None:
         """Reacts to a stream failure that MPD reports in status.error.
@@ -333,7 +265,7 @@ class MPDClientWrapper:
         entry = self._radio_state.get_entry(key) if key else None
         station = entry.name if entry else self._radio_state.get_current_name() or "unknown"
 
-        if self._stream_failure_reported:
+        if self._health.failure_reported:
             # The silent-stop path already accounted for this death; MPD just
             # took a few more seconds to name it. Still clear the error below.
             logger.debug("MPD named an already-reported failure: %s", error)
@@ -345,8 +277,7 @@ class MPDClientWrapper:
             # current station's entry.
             if key:
                 self._radio_state.forget_url(key)
-            self._stream_failure_reported = True
-            self._playback_started_at = None
+            self._health.mark_failure_reported()
 
         # Clear it, or every poll would report the same failure again.
         async with self._mpd_lock:
@@ -427,19 +358,19 @@ class MPDClientWrapper:
         "Enabling MPD output: Mute".
         """
         try:
-            outputs = await asyncio.to_thread(self.client.outputs)
+            outputs = await self._run_mpd_cmd(self.client.outputs)
             for output in outputs:
                 name = output.get("outputname")
                 enabled = output.get("outputenabled") == "1"
                 if name == _MOPIDY_MUTE_OUTPUT:
                     if enabled:
                         logger.info("Unmuting Mopidy (its 'Mute' output is on)")
-                        await asyncio.to_thread(
+                        await self._run_mpd_cmd(
                             self.client.disableoutput, output.get("outputid")
                         )
                 elif not enabled:
                     logger.info("Enabling MPD output: %s", name)
-                    await asyncio.to_thread(
+                    await self._run_mpd_cmd(
                         self.client.enableoutput, output.get("outputid")
                     )
         except (MPDError, OSError) as e:
@@ -462,8 +393,7 @@ class MPDClientWrapper:
                 logger.error("Error disconnecting from MPD: %s", e)
             finally:
                 self.is_connected = False
-                self.client = MPDClient()
-                self.client.timeout = self.config.connection_timeout or 5
+                self.client = self._new_client()
 
     async def _reconnect_unsafe(self) -> bool:
         """Disconnect and immediately reconnect. Must be called within a lock.
@@ -476,47 +406,52 @@ class MPDClientWrapper:
         await self._disconnect_unsafe()
         return await self._connect()
 
+    async def _run_with_reconnect(self, op: Callable[[], Awaitable[T]], what: str) -> T:
+        """Runs op, and once more after a reconnect when the connection was
+        reset under it. Must be called within a lock. Raises what the last
+        attempt raised."""
+        try:
+            return await op()
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.warning(
+                "MPD connection reset during %s (%s), reconnecting...", what, type(e).__name__
+            )
+            if not await self._reconnect_unsafe():
+                raise MPDConnectionError("reconnect failed") from e
+            return await op()
+
+    def _station_key(
+        self, url: str, station_name: Optional[str], key: Optional[str]
+    ) -> Optional[str]:
+        return (
+            key
+            or self._radio_state.get_key_by_url(url)
+            or (station_name.lower() if station_name else None)
+        )
+
     async def load_station(
         self, url: str, station_name: Optional[str] = None, key: Optional[str] = None
     ) -> None:
         """Loads a station into the MPD playlist without starting playback."""
+        async def load() -> None:
+            await self._run_mpd_cmd(self.client.clear)
+            await self._run_mpd_cmd(self.client.add, url)
+
         async with self._mpd_lock:
             if not await self._connect():
                 return
             try:
-                await asyncio.to_thread(self.client.clear)
-                await asyncio.to_thread(self.client.add, url)
+                await self._run_with_reconnect(load, "load_station")
                 logger.info(
                     "Loaded station %s into playlist (not playing)", station_name or url
                 )
-            except (BrokenPipeError, ConnectionResetError) as e:
-                logger.warning(
-                    "MPD connection reset during load_station (%s), reconnecting...",
-                    type(e).__name__,
-                )
-                if await self._reconnect_unsafe():
-                    try:
-                        await asyncio.to_thread(self.client.clear)
-                        await asyncio.to_thread(self.client.add, url)
-                    except (MPDError, IOError) as retry_e:
-                        logger.error(
-                            "Failed to load station after reconnect: %s", retry_e
-                        )
-                        await self._disconnect_unsafe()
-                        return
-                else:
-                    return
             except (MPDError, IOError) as e:
                 logger.error("Error loading station: %s", e)
                 await self._disconnect_unsafe()
                 return
 
         self._source = "radio"
-        effective_key = (
-            key
-            or self._radio_state.get_key_by_url(url)
-            or (station_name.lower() if station_name else None)
-        )
+        effective_key = self._station_key(url, station_name, key)
         if effective_key:
             self._radio_state.set_current(effective_key)
         self._notify(station=station_name)
@@ -540,49 +475,26 @@ class MPDClientWrapper:
         self._playback_generation += 1
 
         async def start() -> None:
-            await asyncio.to_thread(self.client.clear)
+            await self._run_mpd_cmd(self.client.clear)
             for uri in uris:
-                await asyncio.to_thread(self.client.add, uri)
+                await self._run_mpd_cmd(self.client.add, uri)
             await self._clear_error_unsafe()
             await self._set_internal_volume_unsafe(0)
-            previous = self.client.timeout
-            if play_timeout is not None:
-                self.client.timeout = play_timeout
-            try:
-                await asyncio.to_thread(self.client.play)
-            finally:
-                self.client.timeout = previous
+            await self._run_mpd_cmd(self.client.play, socket_timeout=play_timeout)
 
         async with self._mpd_lock:
             if not await self._connect():
                 return False
             try:
-                await start()
+                await self._run_with_reconnect(start, f"the start of {description}")
                 logger.info("Started playing %s", description)
-            except (BrokenPipeError, ConnectionResetError) as e:
-                logger.warning(
-                    "MPD connection reset while starting %s (%s), reconnecting...",
-                    description, type(e).__name__,
-                )
-                if not await self._reconnect_unsafe():
-                    return False
-                try:
-                    await start()
-                    logger.info("Started playing %s after reconnect", description)
-                except (MPDError, IOError) as retry_e:
-                    logger.error("Failed to start %s after reconnect: %s", description, retry_e)
-                    await self._disconnect_unsafe()
-                    return False
             except (MPDError, IOError) as e:
                 logger.error("Error starting %s: %s", description, e)
                 await self._disconnect_unsafe()
                 return False
             self._is_playing = True
 
-        self._playback_started_at = time.monotonic()
-        self._expecting_stop = False
-        self._stream_failure_reported = False
-        self._seen_play_since_start = False
+        self._health.playback_started()
         self._last_song_pos = 0
         return True
 
@@ -594,12 +506,8 @@ class MPDClientWrapper:
             return
         self._source = "radio"
 
-        effective_key = (
-            key
-            or self._radio_state.get_key_by_url(url)
-            or (station_name.lower() if station_name else None)
-        )
-        self._started_key = effective_key
+        effective_key = self._station_key(url, station_name, key)
+        self._health.started_key = effective_key
         if effective_key:
             self._radio_state.set_current_and_play(effective_key)
             entry = self._radio_state.get_entry(effective_key)
@@ -640,7 +548,7 @@ class MPDClientWrapper:
             await self._abandon_music_start()
             return False
         self._source = "music"
-        self._started_key = None
+        self._health.started_key = None
         self._notify(state="ON", volume=self._restore_volume)
         if start_ducked:
             async with self._mpd_lock:
@@ -743,10 +651,7 @@ class MPDClientWrapper:
             if duck_now:
                 self._is_ducked = True
         # Mopidy buffers the new track like a fresh start; same grace window.
-        self._playback_started_at = time.monotonic()
-        self._expecting_stop = False
-        self._stream_failure_reported = False
-        self._seen_play_since_start = False
+        self._health.playback_started()
         logger.info("Skipped to the next track: %s", song.get("title"))
         if not was_playing:
             metrics.RADIO_PLAYING.set(1)
@@ -793,7 +698,7 @@ class MPDClientWrapper:
         log_msg = f"Set MPD volume to {final_volume} (mapped from {linear_volume}%)"
 
         try:
-            await asyncio.to_thread(self.client.setvol, final_volume)
+            await self._run_mpd_cmd(self.client.setvol, final_volume)
             logger.debug(log_msg)
         except MPDError as e:
             if "All outputs are disabled" in str(e):
@@ -802,7 +707,7 @@ class MPDClientWrapper:
                 )
                 await self._ensure_outputs_enabled_unsafe()
                 try:
-                    await asyncio.to_thread(self.client.setvol, final_volume)
+                    await self._run_mpd_cmd(self.client.setvol, final_volume)
                     logger.debug(f"Retry successful: {log_msg}")
                 except (MPDError, IOError) as retry_e:
                     logger.error(f"Failed to set volume on retry: {retry_e}")
@@ -880,7 +785,7 @@ class MPDClientWrapper:
             self._is_ducked = True
             return
 
-        logger.info(f"Ducking volume from {current_volume}%% to {duck_percentage}%%")
+        logger.info("Ducking volume from %d%% to %d%%", current_volume, duck_percentage)
         # Set volume directly without a fade for a quick duck
         async with self._mpd_lock:
             if await self._connect():
@@ -963,9 +868,12 @@ class MPDClientWrapper:
 
         # Retry loop if volume is not available immediately after playback starts
         retry_count = 0
-        while start_volume is None and retry_count < 5:
-            logger.debug(f"Volume not yet available, retrying... ({retry_count + 1}/5)")
-            await asyncio.sleep(0.05)
+        while start_volume is None and retry_count < _VOLUME_READ_RETRIES:
+            logger.debug(
+                "Volume not yet available, retrying... (%d/%d)",
+                retry_count + 1, _VOLUME_READ_RETRIES,
+            )
+            await asyncio.sleep(_VOLUME_READ_RETRY_SECONDS)
             start_volume = await self.get_volume()
             retry_count += 1
 
@@ -979,7 +887,7 @@ class MPDClientWrapper:
         logger.debug(
             f"Fade async started: from {start_volume} to {target_volume} over {duration:.2f}s"
         )
-        num_steps = 25
+        num_steps = self.config.volume_fade_steps
         if duration <= 0:
             delay = 0
             num_steps = 1
@@ -1058,11 +966,11 @@ class MPDClientWrapper:
             if not await self._connect():
                 return
             try:
-                self._expecting_stop = True
+                self._health.expecting_stop = True
                 await self._run_mpd_cmd(self.client.stop)
                 logger.info("Stopped MPD playback.")
                 self._is_playing = False
-                self._playback_started_at = None
+                self._health.started_at = None
             except asyncio.TimeoutError:
                 # Command timed out — assume stopped to avoid a stale True cache
                 # causing duck/unduck to behave as if music is still playing.
@@ -1081,9 +989,17 @@ class MPDClientWrapper:
         async with self._mpd_lock:
             return await self._get_status_unsafe()
 
-    async def _run_mpd_cmd(self, cmd, *args):
-        """Run a blocking python-mpd2 call in a thread with a hard timeout."""
-        timeout = (self.config.connection_timeout or 5) + 1
+    async def _run_mpd_cmd(self, cmd, *args, socket_timeout: Optional[float] = None):
+        """Run a blocking python-mpd2 call in a thread with a hard timeout.
+
+        socket_timeout replaces the connection timeout for this command only
+        (a play that waits for a download).
+        """
+        client = self.client
+        previous = client.timeout
+        if socket_timeout is not None:
+            client.timeout = socket_timeout
+        timeout = client.timeout + _HARD_TIMEOUT_MARGIN
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(cmd, *args),
@@ -1094,40 +1010,29 @@ class MPDClientWrapper:
                 "MPD command timed out after %.0fs, marking disconnected.", timeout
             )
             self.is_connected = False
-            self.client = MPDClient()
-            self.client.timeout = self.config.connection_timeout or 5
+            self.client = self._new_client()
             raise
+        finally:
+            if socket_timeout is not None:
+                client.timeout = previous
 
     async def _get_status_unsafe(self) -> Optional[Dict[str, Any]]:
         """Gets status without acquiring lock. Must be called from a locked context."""
         if not await self._connect():
             return None
         try:
-            result = await self._run_mpd_cmd(self.client.status)
-            if result:
-                self._is_playing = result.get("state") == "play"
-            return result
+            result = await self._run_with_reconnect(
+                lambda: self._run_mpd_cmd(self.client.status), "status check"
+            )
         except asyncio.TimeoutError:
             return None
-        except (BrokenPipeError, ConnectionResetError) as e:
-            logger.warning(
-                "MPD connection reset during status check (%s), reconnecting...",
-                type(e).__name__,
-            )
-            if await self._reconnect_unsafe():
-                try:
-                    result = await self._run_mpd_cmd(self.client.status)
-                    if result:
-                        self._is_playing = result.get("state") == "play"
-                    return result
-                except Exception as retry_e:
-                    logger.error("MPD status failed after reconnect: %s", retry_e)
-                    await self._disconnect_unsafe()
-            return None
-        except (MPDError, IOError, MPDConnectionError) as e:
-            logger.error(f"Failed to get MPD status: {e}")
+        except (MPDError, IOError) as e:
+            logger.error("Failed to get MPD status: %s", e)
             await self._disconnect_unsafe()
             return None
+        if result:
+            self._is_playing = result.get("state") == "play"
+        return result
 
     async def get_current_song_info(self) -> Optional[Dict[str, Any]]:
         """Gets information about the currently playing song."""
@@ -1135,7 +1040,7 @@ class MPDClientWrapper:
             if not await self._connect():
                 return None
             try:
-                return await asyncio.to_thread(self.client.currentsong)
+                return await self._run_mpd_cmd(self.client.currentsong)
             except (MPDError, IOError, MPDConnectionError) as e:
                 logger.error("Error getting current song info: %s", e)
                 await self._disconnect_unsafe()
@@ -1147,7 +1052,7 @@ class MPDClientWrapper:
             if not await self._connect():
                 return []
             try:
-                return await asyncio.to_thread(self.client.playlistinfo)
+                return await self._run_mpd_cmd(self.client.playlistinfo)
             except (MPDError, IOError, MPDConnectionError) as e:
                 logger.error("Error getting playlist info: %s", e)
                 await self._disconnect_unsafe()
@@ -1219,20 +1124,17 @@ class MPDClientWrapper:
                 return
             try:
                 await self._set_internal_volume_unsafe(0)
-                await asyncio.to_thread(self.client.play)
+                await self._run_mpd_cmd(self.client.play)
                 logger.info("Playback started.")
                 self._is_playing = True
-                self._playback_started_at = time.monotonic()
-                self._expecting_stop = False
-                self._stream_failure_reported = False
-                self._seen_play_since_start = False
+                self._health.playback_started()
             except (MPDError, IOError, MPDConnectionError) as e:
                 logger.error("Error starting playback: %s", e)
                 await self._disconnect_unsafe()
                 return
 
         current_key = self._radio_state.get_current_key()
-        self._started_key = current_key
+        self._health.started_key = current_key
         if current_key:
             self._radio_state.record_play(current_key)
             entry = self._radio_state.get_entry(current_key)
