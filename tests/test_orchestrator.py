@@ -126,7 +126,7 @@ def make():
         o._recorder = o._session.recorder = FakeRecorder()
         o._sound_player = FakeSounds()
         o._hybrid_vad = None
-        o._reset_wake_detector = lambda **k: None
+        o._wake_gate.reset = lambda **k: None
         return o
     return factory
 
@@ -819,26 +819,26 @@ async def test_wake_detection_does_not_wait_for_a_hung_mopidy(make, client, mopi
     release = threading.Event()
     mopidy.connect = lambda host, port: release.wait(5)
     o = make()
-    o.mpd_client = client
-    o._wake_detector = FakeDetector()
+    o.mpd_client = o._wake_gate.mpd_client = client
+    o._wake_gate.detector = FakeDetector()
     try:
-        await asyncio.wait_for(o._detect_wake_word_async(asyncio.get_running_loop(), FRAME), 0.5)
+        await asyncio.wait_for(o._wake_gate.detect(FRAME), 0.5)
     finally:
         release.set()
-    assert o._wake_detector.relaxed == [False]
+    assert o._wake_gate.detector.relaxed == [False]
 
 
 async def test_wake_gates_relax_from_the_cached_play_state(make, client, mopidy, monkeypatch):
     o = make()
     monkeypatch.setattr(o.wake_cfg, "relaxed_verifier_threshold", 0.3)
-    o.mpd_client = client
-    o._wake_detector = FakeDetector()
+    o.mpd_client = o._wake_gate.mpd_client = client
+    o._wake_gate.detector = FakeDetector()
     await client.get_status()  # what the watcher does on every poll
-    await o._detect_wake_word_async(asyncio.get_running_loop(), FRAME)
+    await o._wake_gate.detect(FRAME)
     mopidy.queue, mopidy.state, mopidy.song = ["http://x.invalid/a.mp3"], "play", 0
     await client.get_status()
-    await o._detect_wake_word_async(asyncio.get_running_loop(), FRAME)
-    assert o._wake_detector.relaxed == [False, True]
+    await o._wake_gate.detect(FRAME)
+    assert o._wake_gate.detector.relaxed == [False, True]
 
 
 async def test_wake_word_does_not_wait_for_the_duck(make):

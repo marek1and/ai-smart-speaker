@@ -46,12 +46,11 @@ from mpd_client.client import MPDClientWrapper
 from realtime import BaseRealtimeManager, create_realtime_manager
 from session_keeper import SessionKeeper
 from state import AudioFrame, SpeakerState, WakeWordResult
+from wake_gate import WakeGate
 from tools.xvf_client import ReSpeakerLeds, open_respeaker
 from tools.respeaker_monitor import respeaker_monitor_task
 
 logger = logging.getLogger(__name__)
-
-BARGE_IN_COOLDOWN: float = 0.5
 
 
 def _mode_label(relaxed: bool) -> str:
@@ -91,7 +90,6 @@ class AudioOrchestrator:
         self._state = SpeakerState.IDLE
         self._running = False
         self._last_activity_time: float = 0.0
-        self._last_barge_in_time: float = 0.0
         # True from the moment a wake word fires until the state leaves IDLE.
         # The session is opened during that window while the state is still
         # IDLE, so the inactivity monitor must not treat it as an idle session.
@@ -162,7 +160,6 @@ class AudioOrchestrator:
         # Components (initialized in start())
         self._audio_input: Optional[AudioInput] = None
         self._audio_output: Optional[AudioOutput] = None
-        self._wake_detector: Optional[WakeWordDetector] = None
         self._hybrid_vad: Optional[HybridVAD] = None
         self._executor: Optional[ThreadPoolExecutor] = None
         self._sound_player: Optional[SoundPlayer] = None
@@ -176,15 +173,9 @@ class AudioOrchestrator:
         )
         self._session = SessionKeeper(self.live_cfg, self._recorder)
 
-        # Warmup control (prevent false wake word triggers after state transitions)
-        self._frames_since_reset: int = 0
-        self._warmup_frames_needed: int = 0
-
         # Initial silence timeout: tracks when we entered LISTENING from IDLE.
         # None means the check is disabled (barge-in or follow-up path).
         self._listening_entry_time: Optional[float] = None
-        # Wake gates stay relaxed until then, see _detect_wake_word_async.
-        self._radio_playing_until: float = 0.0
         # The deadline was re-armed after a reply without audio: when it
         # passes, the turn ends normally instead of as a false trigger.
         self._reply_was_empty: bool = False
@@ -207,6 +198,12 @@ class AudioOrchestrator:
         # MPD watcher). The event loop keeps only weak refs — an unreferenced
         # task can be garbage-collected mid-flight and silently disappear.
         self._bg_tasks: set[asyncio.Task] = set()
+        self._wake_gate = WakeGate(
+            self.wake_cfg,
+            self.audio_cfg,
+            self.mpd_client,
+            responding=lambda: self._state == SpeakerState.RESPONDING,
+        )
         self._deferred_playback = DeferredPlayback(
             config,
             self.mpd_client,
@@ -269,28 +266,6 @@ class AudioOrchestrator:
                 self._leds.set_listening()
             elif new_state == SpeakerState.RESPONDING:
                 self._leds.set_responding()
-
-    def _reset_wake_detector(
-        self, *, short_warmup: bool = False, cooldown: bool = False
-    ) -> None:
-        """Reset the wake word detector and recalculate the warmup budget.
-
-        Args:
-            short_warmup: Use 0.5 s warmup (barge-in or re-wake while LISTENING).
-                          Default (False) uses 1.5 s warmup after a full turn ends.
-            cooldown:     Additionally arm the detector cooldown to prevent
-                          immediate re-triggering on the same audio event.
-        """
-        if self._wake_detector:
-            self._wake_detector.reset()
-            if cooldown:
-                self._wake_detector.set_cooldown()
-        self._frames_since_reset = 0
-        self._warmup_frames_needed = int(
-            (0.5 if short_warmup else 1.5)
-            * self.audio_cfg.input_sample_rate
-            / self.audio_cfg.input_chunk
-        )
 
     def _begin_turn(self, text: Optional[str] = None) -> None:
         """Start a turn: spoken, or answering a typed request when text is given."""
@@ -357,7 +332,7 @@ class AudioOrchestrator:
         self._audio_output = AudioOutput(self.audio_cfg, self._speaker_queue)
 
         # Initialize wake word detector
-        self._wake_detector = WakeWordDetector(self.wake_cfg, self.audio_cfg)
+        self._wake_gate.detector = WakeWordDetector(self.wake_cfg, self.audio_cfg)
 
         # Initialize STT verifier (loads faster-whisper model — takes a few seconds)
         if self.wake_cfg.verify_with_stt:
@@ -399,9 +374,10 @@ class AudioOrchestrator:
 
         # Thread pool for CPU-bound tasks (wake word, VAD)
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="audio")
+        self._wake_gate.executor = self._executor
 
         # Long initial warmup to suppress false triggers on startup noise
-        self._reset_wake_detector()
+        self._wake_gate.reset()
 
         self._running = True
         self._last_activity_time = time.time()
@@ -521,8 +497,6 @@ class AudioOrchestrator:
 
     async def _audio_capture_task(self) -> None:
         """Continuous audio capture from microphone with VAD processing."""
-        loop = asyncio.get_running_loop()
-
         while self._running:
             try:
                 try:
@@ -557,9 +531,8 @@ class AudioOrchestrator:
                     )
                 if stereo:
                     self._update_aec_metric(raw_audio)
-                self._frames_since_reset += 1
 
-                wake_result = await self._detect_wake_word_async(loop, mono)
+                wake_result = await self._wake_gate.detect(mono)
                 await self._handle_wake_word_result(wake_result)
 
                 if self._state == SpeakerState.LISTENING:
@@ -593,7 +566,7 @@ class AudioOrchestrator:
         now = time.time()
         if (
             now - self._last_candidate_time < self.wake_cfg.cooldown_seconds
-            or now - self._last_barge_in_time < self.wake_cfg.cooldown_seconds
+            or now - self._wake_gate.last_trigger_time < self.wake_cfg.cooldown_seconds
         ):
             return
         self._last_candidate_time = now
@@ -710,66 +683,6 @@ class AudioOrchestrator:
         self._listening_entry_time = None
         self._set_state(SpeakerState.LISTENING)
 
-    async def _detect_wake_word_async(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        mono: np.ndarray,
-    ) -> WakeWordResult:
-        """Run wake word inference in executor."""
-
-        # Relax gating whenever THIS speaker produces output — radio playing OR
-        # our own TTS during RESPONDING (barge-in). Voice spoken over that output
-        # scores lower on every gate (post-AEC residue + postfilter artefacts),
-        # so the detector adapts per config (relaxed verifier threshold,
-        # relaxed VAD gate). Without covering RESPONDING, barge-in fails: the
-        # strict IDLE verifier rejects wake word spoken over the residue of
-        # speaker own voice. Only the cached play state is read, which the MPD
-        # watcher refreshes every state_poll_interval: asking MPD here made every
-        # frame wait for the connect timeout while Mopidy did not answer.
-        relaxation_configured = (
-            self.wake_cfg.relaxed_verifier_threshold is not None
-            or self.wake_cfg.relaxed_vad_threshold is not None
-            or self.wake_cfg.relaxed_min_activation_frames is not None
-        )
-        # Debounce: the play state flips to False transiently even while
-        # MPD plays steadily (stale/corrupted status reads in the client cache; MPD
-        # itself is rock-stable). Those bad reads
-        # flipped the wake thresholds to strict IDLE mid-radio, dropping ~half of valid
-        # calls. Hold "radio playing" for 5s after the last True so gaps are bridged.
-        # A frozen stream is silent, so it must not relax the gates either.
-        playing = (
-            self.mpd_client.is_playing_cached()
-            and not self.mpd_client.is_stream_stalled()
-        )
-        if playing:
-            self._radio_playing_until = time.monotonic() + 5.0
-        relaxed_mode = relaxation_configured and (
-            self._state == SpeakerState.RESPONDING
-            or playing
-            or time.monotonic() < self._radio_playing_until
-        )
-
-        def _inference() -> tuple[float, float, float, bool]:
-            return self._wake_detector.process(mono, relaxed_mode=relaxed_mode)
-
-        if self._frames_since_reset <= self._warmup_frames_needed:
-            await loop.run_in_executor(self._executor, _inference)
-            return WakeWordResult(triggered=False, score=0.0, max_score=0.0)
-
-        score, max_score, vad_score, triggered = await loop.run_in_executor(
-            self._executor, _inference
-        )
-        assert self._wake_detector is not None
-        return WakeWordResult(
-            triggered=triggered,
-            score=score,
-            max_score=max_score,
-            vad_score=vad_score,
-            verifier_score=self._wake_detector.last_verifier_score,
-            window_rms=self._wake_detector.last_window_rms,
-            relaxed_mode=relaxed_mode,
-        )
-
     async def _handle_wake_word_result(self, result: WakeWordResult) -> None:
         """Handle wake word detection result based on current state."""
         if not result.triggered:
@@ -777,8 +690,7 @@ class AudioOrchestrator:
             self._print_status(result)
             return
 
-        now = time.time()
-        if now - self._last_barge_in_time < BARGE_IN_COOLDOWN:
+        if not self._wake_gate.accept_trigger():
             return
 
         if self._is_tty:
@@ -796,7 +708,6 @@ class AudioOrchestrator:
                 result.score,
                 result.window_rms,
             )
-        self._last_barge_in_time = now
 
         if self._trigger_clip_buffer is not None:
             # Snapshot before more frames roll the deque; write off-loop.
@@ -848,16 +759,16 @@ class AudioOrchestrator:
 
         elif self._state == SpeakerState.LISTENING:
             # Re-wake while already listening — quick reset, no cooldown needed.
-            self._reset_wake_detector(short_warmup=True)
+            self._wake_gate.reset(short_warmup=True)
 
     def _print_status(self, result: WakeWordResult) -> None:
         """Print current status line based on state."""
         if not self._is_tty:
             return
         if self._state == SpeakerState.IDLE:
-            if self._frames_since_reset <= self._warmup_frames_needed:
+            if self._wake_gate.warming_up:
                 print(
-                    f"\r[WARMUP] {self._frames_since_reset}/{self._warmup_frames_needed}",
+                    f"\r[WARMUP] {self._wake_gate.frames_since_reset}/{self._wake_gate.warmup_frames_needed}",
                     end="",
                     flush=True,
                 )
@@ -905,7 +816,7 @@ class AudioOrchestrator:
         self._drain_queue(self._api_input_queue)
 
         # Short warmup — user is actively speaking, re-arm quickly
-        self._reset_wake_detector(short_warmup=True)
+        self._wake_gate.reset(short_warmup=True)
         if self._hybrid_vad:
             self._hybrid_vad.reset()
 
@@ -1358,7 +1269,7 @@ class AudioOrchestrator:
             return
 
         self._drain_queue(self._api_input_queue)
-        self._reset_wake_detector(cooldown=True)
+        self._wake_gate.reset(cooldown=True)
 
         if self._hybrid_vad:
             self._hybrid_vad.reset()
@@ -1407,7 +1318,7 @@ class AudioOrchestrator:
             reason="initial_silence", mode=self._wake_mode_label()
         ).inc()
 
-        self._reset_wake_detector(cooldown=True)
+        self._wake_gate.reset(cooldown=True)
         if self._hybrid_vad:
             self._hybrid_vad.reset()
 
