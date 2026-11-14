@@ -11,6 +11,10 @@ OVERLAYFS_ETC_DEVICE = "LABEL=data"
 OVERLAYFS_ETC_FSTYPE = "ext4"
 OVERLAYFS_ETC_MOUNT_OPTIONS = "defaults,noatime"
 OVERLAYFS_ETC_USE_ORIG_INIT_NAME = "1"
+# The preinit would otherwise remount the rootfs read-write on every boot to
+# create its mount points; they are all in the image (/data comes from
+# aispeaker-system-config).
+OVERLAYFS_ETC_CREATE_MOUNT_DIRS = "0"
 # oe-core's preinit plus an e2fsck of /data before it is mounted
 OVERLAYFS_ETC_INIT_TEMPLATE := "${THISDIR}/files/overlayfs-etc-preinit.sh.in"
 

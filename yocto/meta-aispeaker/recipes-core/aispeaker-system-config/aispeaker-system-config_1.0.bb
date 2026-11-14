@@ -76,12 +76,14 @@ do_install() {
     # mount points for the NFS shares (logs/updates, music collection); the
     # rootfs is read-only, so systemd cannot create them at boot
     install -d ${D}/mnt/nas ${D}/mnt/music
+    # mount point of the data partition (overlayfs-etc preinit)
+    install -d ${D}/data
     # NFS mount/automount units are NOT baked here — scripts/provision-data.sh
     # generates them from yocto/local/nfs.env (server, mount point, options are
     # all site-specific) into the /etc overlay on /data.
 }
 
-FILES:${PN} = "${sysconfdir} ${sbindir} ${systemd_system_unitdir} /mnt/nas /mnt/music"
+FILES:${PN} = "${sysconfdir} ${sbindir} ${systemd_system_unitdir} /mnt/nas /mnt/music /data"
 
 RDEPENDS:${PN} = "networkmanager"
 RRECOMMENDS:${PN} = "kernel-module-zram"
