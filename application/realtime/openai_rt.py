@@ -34,6 +34,10 @@ _PCM16_BYTES_PER_SAMPLE = 2
 _WS_MAX_MESSAGE_BYTES = 2**24
 # How often the receive task looks whether the session is still wanted.
 _RECV_POLL_INTERVAL = 1.0
+# Context kept on each side of a frame when it is resampled, in units of the
+# rate ratio's denominator: 16 x 2 = 32 samples at 16 kHz (2 ms), more than
+# resample_poly's filter half-length.
+_RESAMPLE_CONTEXT_BLOCKS = 16
 
 
 class OpenAIRealtimeManager(BaseRealtimeManager):
@@ -67,6 +71,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
 
         # The microphone rate is resampled to the API's.
         self._need_resample = self.live_cfg.send_sample_rate != OPENAI_SAMPLE_RATE
+        divisor = math.gcd(OPENAI_SAMPLE_RATE, self.live_cfg.send_sample_rate)
+        self._resample_up = OPENAI_SAMPLE_RATE // divisor
+        self._resample_down = self.live_cfg.send_sample_rate // divisor
+        # a multiple of down, so the output offsets stay whole samples
+        self._resample_pad = self._resample_down * _RESAMPLE_CONTEXT_BLOCKS
+        self._reset_resampler()
 
         # Tracking for conversation.item.truncate on barge-in
         self._current_response_item_id: Optional[str] = None
@@ -255,7 +265,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             await self._ws.send(json.dumps(event))
 
     def _resample_to_24k(self, audio_bytes: bytes) -> bytes:
-        """Resample PCM16 audio from the microphone rate to the API's."""
+        """Resample PCM16 audio from the microphone rate to the API's.
+
+        Each frame is filtered together with the end of the previous ones and
+        the output lags by _resample_pad input samples: resampled alone, every
+        32 ms frame was zero-padded at both ends, a click at each boundary.
+        """
         if not self._need_resample:
             return audio_bytes
 
@@ -263,13 +278,17 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         if len(audio_int16) == 0:
             return audio_bytes
 
-        divisor = math.gcd(OPENAI_SAMPLE_RATE, self.live_cfg.send_sample_rate)
-        resampled = resample_poly(
-            audio_int16.astype(np.float64),
-            up=OPENAI_SAMPLE_RATE // divisor,
-            down=self.live_cfg.send_sample_rate // divisor,
-        )
-        return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
+        up, down, pad = self._resample_up, self._resample_down, self._resample_pad
+        x = np.concatenate([self._resample_history, audio_int16.astype(np.float64)])
+        self._resample_history = x[-2 * pad:]
+        resampled = resample_poly(x, up=up, down=down)
+        # input samples [pad, pad + n) have pad samples of context on both sides
+        start = pad * up // down
+        out = resampled[start:start + len(audio_int16) * up // down]
+        return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+
+    def _reset_resampler(self) -> None:
+        self._resample_history = np.zeros(2 * self._resample_pad)
 
     # -------------------------------------------------------------------------
     # Session lifecycle
@@ -290,6 +309,7 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
             self._audio_bytes_received = 0
             self._is_response_item_in_progress = False
             self._pending_cancel = None
+            self._reset_resampler()
             try:
                 initial_event = json.loads(
                     await asyncio.wait_for(ws.recv(), timeout=self.live_cfg.session_open_timeout)
@@ -519,7 +539,6 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
         # --- Response complete (= turn complete) ---
         elif event_type == "response.done":
             self._is_response_item_in_progress = False
-            self._waiting_for_turn_complete = False
             response = event.get("response", {})
             status = response.get("status", "")
             usage = response.get("usage", {})
@@ -542,8 +561,12 @@ class OpenAIRealtimeManager(BaseRealtimeManager):
                         tool_calls_handled = True
 
                 if tool_calls_handled:
-                    return  # Stop further processing, as a new response will be created
+                    # The answer comes in the next response: the user's part
+                    # stays over (awaiting_reply), or local VAD would commit
+                    # room audio on top of it.
+                    return
 
+            self._waiting_for_turn_complete = False
             if status == "cancelled":
                 logger.info("API: response cancelled (via response.done)")
                 if self._on_interrupted:

@@ -196,6 +196,14 @@ class BaseRealtimeManager(ABC):
         errors. A CancelledError (from close_session) stops retries immediately.
         """
         max_attempts = self.live_cfg.max_reconnect_attempts
+        # Before the session first came up, open_session() is still waiting and
+        # its caller reports the failure: _on_error then played a second error sound.
+        opened = False
+
+        def report_error() -> None:
+            if opened and self._on_error:
+                self._on_error()
+
         try:
             for attempt in range(1, max_attempts + 1):
                 logger.info(
@@ -204,6 +212,7 @@ class BaseRealtimeManager(ABC):
                 )
                 try:
                     async with self._connect():
+                        opened = True
                         self._session_active = True
                         logger.info("Session opened successfully.")
                         await self._serve_session()
@@ -220,8 +229,7 @@ class BaseRealtimeManager(ABC):
                             "%s session failed after %d attempt(s): %s",
                             self.provider_name, attempt, e,
                         )
-                        if self._on_error:
-                            self._on_error()
+                        report_error()
                         break
                     delay = min(
                         self.live_cfg.reconnect_backoff_base ** (attempt - 1),
@@ -234,8 +242,7 @@ class BaseRealtimeManager(ABC):
                     await asyncio.sleep(delay)
                 except Exception:
                     logger.exception("Unexpected %s session error", self.provider_name)
-                    if self._on_error:
-                        self._on_error()
+                    report_error()
                     break
         finally:
             self._session_active = False

@@ -2,6 +2,8 @@
 start_new_turn queued for the send task."""
 import asyncio
 
+import numpy as np
+
 from config import get_config
 from realtime.openai_rt import OpenAIRealtimeManager
 
@@ -94,3 +96,41 @@ async def test_transcripts_of_the_two_responses_around_a_tool_call_are_separated
     await mgr._process_event({"type": "response.created"})
     await mgr._process_event({"type": "response.output_audio_transcript.delta", "delta": "Jest 12:47."})
     assert mgr.ai_transcript == "Sprawdzam. Jest 12:47."
+
+
+async def test_reply_is_still_awaited_after_the_response_with_the_tool_call(monkeypatch):
+    # the answer comes in a second response; until then room audio must not
+    # reach the API, or local VAD commits it on top of the answer
+    mgr = manager()
+    mgr._waiting_for_turn_complete = True
+
+    async def tool(item):
+        pass
+
+    mgr._handle_tool_call = tool
+    await mgr._process_event({"type": "response.done", "response": {
+        "status": "completed", "output": [{"type": "function_call", "name": "get_current_time"}]}})
+    assert mgr.awaiting_reply
+    mgr._frames_sent = mgr._min_frames_for_turn_complete
+    await mgr._process_event({"type": "response.done", "response": {"status": "completed", "output": []}})
+    assert not mgr.awaiting_reply
+
+
+def test_frames_resampled_one_by_one_match_the_whole_signal():
+    # each 32 ms frame resampled alone was zero-padded at both ends (a click
+    # at every boundary); the stream now matches the signal resampled at once,
+    # delayed by the context kept between frames
+    from scipy.signal import resample_poly
+
+    mgr = OpenAIRealtimeManager(get_config(), asyncio.Queue(), asyncio.Queue())
+    t = np.arange(512 * 8) / 16000
+    signal = (8000 * np.sin(2 * np.pi * 440 * t)).astype(np.int16)
+    streamed = np.concatenate([
+        np.frombuffer(mgr._resample_to_24k(signal[i:i + 512].tobytes()), dtype=np.int16)
+        for i in range(0, len(signal), 512)
+    ]).astype(float)
+    assert len(streamed) == len(signal) * 3 // 2
+    delay = mgr._resample_pad * 3 // 2
+    whole = resample_poly(signal.astype(float), up=3, down=2)
+    # past the first frame (the history starts as zeros)
+    assert np.max(np.abs(streamed[768 + delay:] - whole[768:len(streamed) - delay])) < 2
