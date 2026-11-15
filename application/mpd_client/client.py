@@ -1044,7 +1044,12 @@ class MPDClientWrapper:
             await self._disconnect_unsafe()
             return None
         if result:
-            self._is_playing = result.get("state") == "play"
+            playing = result.get("state") == "play"
+            # Mopidy reports "stop" for a moment after play while it buffers;
+            # read as "not playing", it made unduck() jump to the restore
+            # volume instead of fading (15.11.2026).
+            if playing or not self._health.still_starting():
+                self._is_playing = playing
         return result
 
     async def get_current_song_info(self) -> Optional[Dict[str, Any]]:

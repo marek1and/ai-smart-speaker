@@ -491,3 +491,15 @@ async def test_radio_started_mid_turn_stays_ducked_for_unduck(client, mopidy, es
     assert client._is_ducked
     await client.unduck()
     assert client._is_ducked is False
+
+
+async def test_stop_reported_while_a_start_buffers_does_not_count_as_stopped(client, mopidy, eska):
+    # Mopidy answers play before it reports "play": a status read in between
+    # made unduck() take the stopped path and jump to the restore volume
+    await client.play_station("http://pinned.invalid/eska.mp3", "Radio Eska", key="eska", start_ducked=True)
+    mopidy.state = "stop"
+    await client.get_status()
+    assert await client.is_playing()
+    client._health.started_at -= client.config.stream_start_grace + 1  # past the start
+    await client.get_status()
+    assert not await client.is_playing()
