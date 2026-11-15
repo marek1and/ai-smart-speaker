@@ -428,12 +428,15 @@ class MPDConfig:
     stream_stall_timeout: float = 20.0
     # Restarts of a frozen stream before giving up and stopping playback.
     stream_stall_max_restarts: int = 2
-    volume_fade_in_seconds: float = 2.0  # Duration of volume fade-in (resuming)
+    # Fade-in after a start and back from the duck level after a turn; at 2 s
+    # the radio came back noticeably late.
+    volume_fade_in_seconds: float = 1.0
     volume_fade_steps: int = 25  # Volume changes a fade is made of
     volume_duck_percentage: int = 20  # Volume percentage during conversation
-    default_playback_volume: int = (
-        50  # Default playback volume if no previous volume is known
-    )
+    # Volume the radio starts at after an app restart. Mopidy's software mixer
+    # is linear and the assistant speaks at full scale: at 50 the radio was
+    # clearly quieter than the voice.
+    default_playback_volume: int = 70
     state_file: str = "radio_state.json"
 
 

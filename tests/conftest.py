@@ -127,6 +127,7 @@ def mpd_config(tmp_path):
     return MPDConfig(
         state_file=str(tmp_path / "radio_state.json"),
         volume_fade_in_seconds=0.0,
+        default_playback_volume=50,
         stream_start_grace=15.0,
         stream_stall_timeout=20.0,
         stream_stall_max_restarts=2,
