@@ -1,10 +1,12 @@
+# Prometheus + Grafana for the speaker's metrics. Images pinned: bump them
+# deliberately, together with any deployment created from this file.
 services:
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.15.0
     container_name: speaker-prometheus
     restart: unless-stopped
     ports:
-      - "9091:9090"
+      - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -15,15 +17,21 @@ services:
       - "--web.enable-lifecycle"
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.2
     container_name: speaker-grafana
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
+      # Only read when grafana_data is first initialised; after that the admin
+      # password lives in grafana.db.
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/speaker.json
+      # Panels embedded in Home Assistant (/d-solo/...) as an anonymous viewer.
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

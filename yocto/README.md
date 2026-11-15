@@ -335,7 +335,8 @@ Build, publish, install:
 ```bash
 yocto/kas.sh build yocto/kas/aispeaker.yml
 yocto/kas.sh build --target aispeaker-bundle yocto/kas/aispeaker.yml
-cp yocto/build/tmp/deploy/images/raspberrypi5/aispeaker-bundle-raspberrypi5.raucb /mnt/qnap/aispeaker/updates/
+# copy the bundle to the share the speaker mounts (NFS_MOUNTPOINT, see below)
+cp yocto/build/tmp/deploy/images/raspberrypi5/aispeaker-bundle-raspberrypi5.raucb <share>/updates/
 ssh aispeaker-root aispeaker-update /mnt/nas/updates/aispeaker-bundle-raspberrypi5.raucb
 ssh aispeaker-root rauc status        # after the reboot: booted and activated slot
 ```
@@ -443,8 +444,7 @@ Two layers, deliberately separate from the application:
 Configure via `/etc/default/aispeaker-log-shipping` (`LOG_DEST`, `LOG_UNITS`,
 `LOG_RETENTION_DAYS`). `LOG_DEST` must sit **under the NFS mount point** from
 `local/nfs.env` — writing over NFS means the destination has to be inside the
-share the speaker mounts (on Raspbian the logs went to a separate QNAP volume
-over ssh with a forced command; that machinery is gone).
+share the speaker mounts.
 
 **Why not log to NFS from inside the application:** a `FileHandler` writing to
 the share would block the audio event loop whenever the NAS stalls (up to the
@@ -459,16 +459,16 @@ state, recordings); the NFS share only receives the log copies. It can't
 replace `/data`: the network isn't up in early boot, and a read-only rootfs needs
 a local writable partition to come up at all.
 
-1. Export a share on the NAS (NFSv4) **for the speaker's IP** — QNAP grants
-   access per host; a missing host shows up as "No such file or directory" from
-   the NFSv4 pseudo-root, not as "access denied".
+1. Export a share on the NAS (NFSv4) **for the speaker's IP**. A NAS that
+   grants access per host and does not list the speaker answers with "No such
+   file or directory" from the NFSv4 pseudo-root, not with "access denied".
 2. Set in `local/nfs.env`: `NFS_EXPORT` (server:export), `NFS_MOUNTPOINT`
    (default `/mnt/nas`; it must exist in the image), `NFS_OPTIONS`.
    `provision-data.sh` then **generates** the `<mountpoint>.mount` + `.automount`
    units into the `/etc` overlay and enables the automount. Nothing NFS is
    baked into the image.
-   > QNAP with NFSv4 uses a pseudo-root, so the export path is `/<share>`
-   > (e.g. `192.168.1.15:/aispeaker`), not the `/share/...` v3 path.
+   > With an NFSv4 pseudo-root the export path is the one relative to that
+   > root (e.g. `nas.local:/aispeaker`), not the server's NFSv3 path.
 
 `soft,timeo=50` + automount = an absent NAS never hangs boot.
 

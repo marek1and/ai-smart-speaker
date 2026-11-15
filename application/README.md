@@ -12,7 +12,7 @@ The project is organized into the following directories:
 - `openhab/`: Contains the client for interacting with the OpenHAB REST API.
 - `mpd_client/`: MPD-protocol client (MPD or Mopidy) with volume ducking, stream-failure detection and the persisted radio state (`radio_state.json`).
 - `radio/`: Resolves station names to stream URLs (config pins, URL cache, RadioBrowser).
-- `mqtt_bridge/`: Exposes the radio over MQTT (power/station/volume commands and state) for Home Assistant/KNX. Also takes typed requests on `<topic_prefix>/assistant/ask` (spoken reply on the speaker) and publishes every finished turn as JSON (`source`, `request`, `reply`, optional `error`) on `<topic_prefix>/assistant/reply`.
+- `mqtt_bridge/`: Exposes the radio over MQTT (power/station/volume commands and state) for Home Assistant or another home automation system. Also takes typed requests on `<topic_prefix>/assistant/ask` (spoken reply on the speaker) and publishes every finished turn as JSON (`source`, `request`, `reply`, optional `error`) on `<topic_prefix>/assistant/reply`.
 - `music/`: On-demand music search through Mopidy's JSON-RPC (YouTube; providers are keyed by Mopidy URI scheme).
 - `realtime/`: Manages the real-time communication with the selected API (Gemini or OpenAI).
 - `sounds/`: Stores sound effects for different events (e.g., wake word, end of conversation).

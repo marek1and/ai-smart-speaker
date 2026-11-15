@@ -143,7 +143,7 @@ class MQTTBridge:
                 elif now - last_logged >= self._config.reconnect_log_interval:
                     last_logged = now
                     # Past the first repeat this is no longer a blink: radio
-                    # control from HA/KNX is down and nobody has noticed, so say
+                    # control from home automation is down and nobody has noticed, so say
                     # so at ERROR — still only once per interval.
                     logger.error(
                         "MQTT still down after %.0fs: %s — retrying every %.0fs",

@@ -167,7 +167,7 @@ The system uses **PipeWire** with the following configuration files (all under `
 | File | Purpose |
 | --- | --- |
 | `home/user/.config/pipewire/pipewire.conf.d/50-fixed-clock.conf` | Pins PipeWire to 48kHz, fixed quantum 480 (10ms) for consistent scheduling |
-| `home/user/.config/wireplumber/wireplumber.conf.d/51-lowlatency-alsa.conf` | Keeps the XVF3800 always active (the application continuously reads mic audio for wake word detection) and tunes ALSA buffer |
+| `home/user/.config/wireplumber/wireplumber.conf.d/51-lowlatency-alsa.conf` | Keeps the XVF3800 always active (the application continuously reads mic audio for wake word detection); ALSA period sizes are left to PipeWire |
 | `home/user/.config/systemd/user/pipewire.service.d/rt.conf` | Grants PipeWire the `RLIMIT_RTPRIO` needed for real-time scheduling |
 | `etc/polkit-1/rules.d/50-rtkit-pipewire.rules` | Allows RTKit to promote PipeWire's audio thread to `SCHED_RR` on headless systems |
 
