@@ -154,3 +154,21 @@ async def test_openhab_multi_set_names_what_failed(monkeypatch, ok, status, fail
     result = await d.set_openhab_items_state(item_names=["A", "B"], state="OFF")
     assert result["status"] == status and result.get("failed") == failed
     assert result["results"] == {"A": "A" not in (failed or []), "B": "B" not in (failed or [])}
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_tv_that_did_not_turn_on_is_an_error_and_gets_no_channel(tv, backend):
+    # the model used to hear "TV turned on." when the backend refused it
+    fake = tv(backend, on=False)
+    fake.set_entity_state = fake.set_openhab_item_state = lambda *a: False
+    result = await d.watch_tv("Polsat")
+    assert result["status"] == "error"
+    await asyncio.sleep(0.1)  # no boot watcher may send the channel later
+    assert fake.calls == []
+
+
+async def test_tv_power_on_that_ha_did_not_confirm_still_counts_as_sent(tv):
+    # a TV power-on outlasts HA's request timeout (ReadTimeout -> None)
+    fake = tv("ha", on=False)
+    fake.set_entity_state = lambda *a: None
+    assert await d.watch_tv() == {"status": "success", "message": "TV turned on."}

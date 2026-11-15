@@ -380,8 +380,8 @@ class _HaTv:
         state = self._client.get_entity_state(self.entity_id)
         return str(state).lower() not in _HA_OFF_STATES
 
-    def turn_on(self) -> None:
-        self._client.set_entity_state(self.entity_id, "ON")
+    def turn_on(self) -> bool | None:
+        return self._client.set_entity_state(self.entity_id, "ON")
 
     def set_channel(self, number: int) -> None:
         self._client.play_channel(self.entity_id, number)
@@ -401,8 +401,8 @@ class _OpenHabTv:
         state = self._client.get_openhab_item_state(self._cfg.power_item)
         return str(state).upper() == "ON"
 
-    def turn_on(self) -> None:
-        self._client.set_openhab_item_state(self._cfg.power_item, "ON")
+    def turn_on(self) -> bool:
+        return self._client.set_openhab_item_state(self._cfg.power_item, "ON")
 
     def set_channel(self, number: int) -> None:
         self._client.set_openhab_item_state(self._cfg.channel_item, str(number))
@@ -456,7 +456,10 @@ async def watch_tv(channel_name: Optional[str] = None) -> dict:
 
     already_on = await asyncio.to_thread(tv.is_on)
     if not already_on:
-        await asyncio.to_thread(tv.turn_on)
+        # None: HA got the command but is still executing it (a TV power-on
+        # outlasts the request timeout), so it counts as sent.
+        if await asyncio.to_thread(tv.turn_on) is False:
+            return {"status": "error", "message": f"{tv.backend} did not turn the TV on."}
         metrics.TV_COMMANDS.labels(action="power_on").inc()
         logger.info("TV power ON sent via %s (was off)", tv.backend)
 
@@ -493,18 +496,36 @@ async def watch_tv(channel_name: Optional[str] = None) -> dict:
     return {"status": "success", "message": f"TV on, switching to {channel_name}."}
 
 
-def _multi_set_result(names: list[str], results: list[bool], backend: str) -> dict:
-    """Result of one state set on several items: which of them failed."""
+_UNCONFIRMED_MESSAGE = (
+    "Home Assistant received the command for {} but did not confirm it in time; "
+    "it may still be executing. Do not claim it is done."
+)
+
+
+def _multi_set_result(names: list[str], results: list[bool | None], backend: str) -> dict:
+    """Result of one state set on several items: which of them failed, and
+    which HA got but did not confirm (None)."""
     outcome = dict(zip(names, results))
-    failed = [name for name, ok in outcome.items() if not ok]
-    if not failed:
+    failed = [name for name, ok in outcome.items() if ok is False]
+    unconfirmed = [name for name, ok in outcome.items() if ok is None]
+    if not failed and not unconfirmed:
         return {"status": "success", "results": outcome}
-    return {
+    if not failed:
+        return {
+            "status": "unconfirmed",
+            "unconfirmed": unconfirmed,
+            "message": _UNCONFIRMED_MESSAGE.format(", ".join(unconfirmed)),
+            "results": outcome,
+        }
+    result = {
         "status": "partial" if len(failed) < len(names) else "error",
         "failed": failed,
         "message": f"{backend} did not execute the command for: " + ", ".join(failed),
         "results": outcome,
     }
+    if unconfirmed:
+        result["unconfirmed"] = unconfirmed
+    return result
 
 
 @register_function(name="set_openhab_item_state")
@@ -706,6 +727,8 @@ async def set_ha_entity_state(
     ok = await asyncio.to_thread(ctx.ha.set_entity_state, entity_id, state or "")
     if ok:
         return {"status": "success"}
+    if ok is None:
+        return {"status": "unconfirmed", "message": _UNCONFIRMED_MESSAGE.format(entity_id)}
     return {
         "status": "error",
         "message": (

@@ -61,9 +61,10 @@ def test_write_is_retried_when_it_never_reached_ha(ha):
 
 
 def test_write_is_not_repeated_after_a_read_timeout(ha):
-    # HA got the command and is still executing it (TV power-on)
+    # HA got the command and is still executing it (TV power-on): not repeated,
+    # and reported as unconfirmed (None), not as failed
     ha.script += [requests.exceptions.ReadTimeout(), Resp(200, {})]
-    assert ha.call_service("media_player", "turn_on", "media_player.tv") is False
+    assert ha.call_service("media_player", "turn_on", "media_player.tv") is None
     assert len(ha.sent) == 1
 
 
@@ -101,7 +102,11 @@ def test_state_strings_map_to_services(ha, entity, state, service, extra):
     assert payload == {"entity_id": entity, **extra}
 
 
-@pytest.mark.parametrize("entity,state", [("light.x", "bright"), ("cover.x", "open"), ("sensor.t", "ON")])
+@pytest.mark.parametrize("entity,state", [
+    ("light.x", "bright"), ("cover.x", "open"), ("sensor.t", "ON"),
+    # an empty or unknown state used to turn a switch off and report success
+    ("switch.pump", ""), ("switch.pump", "toggle"), ("fan.x", "50"), ("input_boolean.x", "maybe"),
+])
 def test_unmappable_state_sends_nothing(ha, entity, state):
     assert ha.set_entity_state(entity, state) is False
     assert ha.sent == []
@@ -190,3 +195,28 @@ async def test_set_without_entity_is_an_error_not_a_crash(fake_ha):
     fake_ha()
     assert (await d.set_ha_entity_state(None, "ON", bogus=1))["status"] == "error"
     assert (await d.set_ha_entities_state([], "ON"))["status"] == "error"
+
+
+@pytest.mark.parametrize("state,service", [("OFF", "turn_off"), ("false", "turn_off"), ("0", "turn_off"), ("1", "turn_on")])
+def test_switch_takes_only_explicit_on_off(ha, state, service):
+    assert ha.set_entity_state("switch.pump", state) is True
+    assert ha.sent[0][1].endswith(f"/services/switch/{service}")
+
+
+async def test_set_that_ha_did_not_confirm_is_not_reported_as_done(fake_ha):
+    f = fake_ha(states={"media_player.tv": "off"})
+    f.set_entity_state = lambda eid, state: None  # ReadTimeout: HA may still be executing it
+    result = await d.set_ha_entity_state("media_player.tv", "ON")
+    assert result["status"] == "unconfirmed" and "media_player.tv" in result["message"]
+
+
+async def test_group_set_names_unconfirmed_entities_apart_from_failed_ones(fake_ha):
+    f = fake_ha(fail={"light.b"})
+    outcomes = {"light.a": None, "light.b": False, "light.c": True}
+    f.set_entity_state = lambda eid, state: outcomes[eid]
+    result = await d.set_ha_entities_state(list(outcomes), "OFF")
+    assert result["status"] == "partial"
+    assert result["failed"] == ["light.b"] and result["unconfirmed"] == ["light.a"]
+    outcomes["light.b"] = True
+    result = await d.set_ha_entities_state(list(outcomes), "OFF")
+    assert result["status"] == "unconfirmed" and result["unconfirmed"] == ["light.a"]

@@ -25,6 +25,10 @@ _RETRYABLE_EXC = (
 # and on toggle-style entities undo it. ConnectTimeout is a ConnectionError, so
 # a lost SYN is still retried.
 _RETRYABLE_WRITE_EXC = (requests.exceptions.ConnectionError,)
+_ON_OFF_SERVICES = {
+    "ON": "turn_on", "TRUE": "turn_on", "1": "turn_on",
+    "OFF": "turn_off", "FALSE": "turn_off", "0": "turn_off",
+}
 
 
 class HomeAssistantClient:
@@ -139,8 +143,9 @@ class HomeAssistantClient:
             metrics.HA_REQUESTS.labels(method='get', status='error').inc()
             return None
 
-    def call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> bool:
-        """Calls a HA service."""
+    def call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> bool | None:
+        """Calls a HA service. None when HA got the call but did not answer in
+        time (ReadTimeout): it may still be executing it, e.g. a TV power-on."""
         payload = {"entity_id": entity_id, **kwargs}
         try:
             self._request(
@@ -151,12 +156,16 @@ class HomeAssistantClient:
             )
             metrics.HA_REQUESTS.labels(method='set', status='ok').inc()
             return True
+        except requests.exceptions.ReadTimeout as e:
+            logger.warning("%s.%s for %s not confirmed in time: %s", domain, service, entity_id, e)
+            metrics.HA_REQUESTS.labels(method='set', status='error').inc()
+            return None
         except requests.exceptions.RequestException as e:
             logger.error("Error calling %s.%s for %s: %s", domain, service, entity_id, e)
             metrics.HA_REQUESTS.labels(method='set', status='error').inc()
             return False
 
-    def set_entity_state(self, entity_id: str, state: str) -> bool:
+    def set_entity_state(self, entity_id: str, state: str) -> bool | None:
         """
         Smart dispatcher: translates a state string to the appropriate HA service call.
 
@@ -172,9 +181,12 @@ class HomeAssistantClient:
         if domain == "light":
             return self._set_light(entity_id, state, state_upper)
         elif domain in ("switch", "input_boolean", "fan"):
-            svc = "turn_on" if state_upper in ("ON", "TRUE", "1") else "turn_off"
-            metrics.HA_ENTITY_SETS.labels(entity=entity_id).inc()
-            return self.call_service(domain, svc, entity_id)
+            # Only an explicit OFF turns off: an empty or unknown state did, and
+            # reported success.
+            svc = _ON_OFF_SERVICES.get(state_upper)
+            if svc:
+                metrics.HA_ENTITY_SETS.labels(entity=entity_id).inc()
+                return self.call_service(domain, svc, entity_id)
         elif domain == "cover":
             try:
                 pos = int(state.strip())
@@ -188,7 +200,7 @@ class HomeAssistantClient:
         logger.warning("Cannot map state '%s' for entity '%s' (domain: %s)", state, entity_id, domain)
         return False
 
-    def _set_light(self, entity_id: str, state: str, state_upper: str) -> bool:
+    def _set_light(self, entity_id: str, state: str, state_upper: str) -> bool | None:
         if state_upper in ("ON", "TRUE"):
             metrics.HA_ENTITY_SETS.labels(entity=entity_id).inc()
             return self.call_service("light", "turn_on", entity_id)
@@ -223,7 +235,7 @@ class HomeAssistantClient:
         logger.warning("Cannot parse light state '%s' for %s", state, entity_id)
         return False
 
-    def _set_media_player(self, entity_id: str, state: str, state_upper: str) -> bool:
+    def _set_media_player(self, entity_id: str, state: str, state_upper: str) -> bool | None:
         if state_upper == "ON":
             metrics.HA_ENTITY_SETS.labels(entity=entity_id).inc()
             return self.call_service("media_player", "turn_on", entity_id)
@@ -247,7 +259,7 @@ class HomeAssistantClient:
         logger.warning("Cannot parse media_player state '%s' for %s", state, entity_id)
         return False
 
-    def play_channel(self, entity_id: str, channel_num: int) -> bool:
+    def play_channel(self, entity_id: str, channel_num: int) -> bool | None:
         """Switches TV to a channel number via media_player.play_media."""
         return self.call_service(
             "media_player", "play_media", entity_id,
