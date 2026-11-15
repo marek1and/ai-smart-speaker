@@ -1,0 +1,88 @@
+From: Marek Andrzejewski <marek1and@gmail.com>
+Subject: [PATCH] Add audio/output_buffer_time to limit the output queue
+
+Each output gets a queue after the tee, and the tee sits after the volume
+element. With GStreamer's default limit the queue fills to 1 s, so a volume
+change (ducking under a voice assistant) is heard about 1.2 s later,
+measured on a Raspberry Pi 5 with pulsesink. output_buffer_time (ms) sets
+max-size-time of these queues; unset keeps the default.
+
+Upstream-Status: Pending
+---
+ src/mopidy/_app/config.py    | 1 +
+ src/mopidy/_app/default.conf | 1 +
+ src/mopidy/audio/_gst.py     | 9 +++++++--
+ src/mopidy/config/_types.py  | 1 +
+ 4 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/src/mopidy/_app/config.py b/src/mopidy/_app/config.py
+index 88fbd60..86d1578 100644
+--- a/src/mopidy/_app/config.py
++++ b/src/mopidy/_app/config.py
+@@ -65,6 +65,7 @@ app_schemas: list[ConfigSchema | MapConfigSchema] = [
+             "mixer_volume": types.Integer(optional=True, minimum=0, maximum=100),
+             "output": types.String(),
+             "buffer_time": types.Integer(optional=True, minimum=1),
++            "output_buffer_time": types.Integer(optional=True, minimum=1),
+         },
+     ),
+     ConfigSchema(
+diff --git a/src/mopidy/_app/default.conf b/src/mopidy/_app/default.conf
+index af47e6c..1fb90d0 100644
+--- a/src/mopidy/_app/default.conf
++++ b/src/mopidy/_app/default.conf
+@@ -16,6 +16,7 @@ mixer = software
+ mixer_volume =
+ output = autoaudiosink
+ buffer_time =
++output_buffer_time =
+ 
+ [proxy]
+ scheme =
+diff --git a/src/mopidy/audio/_gst.py b/src/mopidy/audio/_gst.py
+index aa7f940..9311de0 100644
+--- a/src/mopidy/audio/_gst.py
++++ b/src/mopidy/audio/_gst.py
+@@ -47,8 +47,11 @@ _GST_STATE_MAPPING: dict[Gst.State, PlaybackState] = {
+ 
+ # TODO: expose this as a property on audio when #790 gets further along.
+ class _Outputs(Gst.Bin):
+-    def __init__(self) -> None:
++    def __init__(self, buffer_time: int | None = None) -> None:
+         Gst.Bin.__init__(self)
++        # The queue of each output sits after the volume element: with the
++        # default limit (1 s) a volume change is heard only that much later.
++        self._buffer_time = buffer_time
+         # TODO(gst1): Set 'outputs' as the Bin name for easier debugging
+ 
+         tee = Gst.ElementFactory.make("tee")
+@@ -87,6 +90,8 @@ class _Outputs(Gst.Bin):
+         if queue is None:
+             msg = "Failed to create GStreamer queue."
+             raise exceptions.AudioException(msg)
++        if self._buffer_time is not None and self._buffer_time > 0:
++            queue.set_property("max-size-time", self._buffer_time * Gst.MSECOND)
+         self.add(queue)
+ 
+         queue.link(element)
+@@ -495,7 +500,7 @@ class GstAudio(Audio, pykka.ThreadingActor):
+                 )
+             self._outputs = fakesink
+         else:
+-            self._outputs = _Outputs()
++            self._outputs = _Outputs(self._config["audio"].get("output_buffer_time"))
+             try:
+                 self._outputs.add_output(self._config["audio"]["output"])
+             except exceptions.AudioException:
+diff --git a/src/mopidy/config/_types.py b/src/mopidy/config/_types.py
+index cd4be0e..aa639c2 100644
+--- a/src/mopidy/config/_types.py
++++ b/src/mopidy/config/_types.py
+@@ -115,6 +115,7 @@ class AudioConfig(TypedDict):
+     mixer_volume: int | None
+     output: str
+     buffer_time: int | None
++    output_buffer_time: int | None
+ 
+ 
+ class ProxyConfig(TypedDict):
