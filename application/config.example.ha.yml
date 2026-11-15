@@ -380,6 +380,9 @@ mqtt:
   # During an outage the retry log is repeated at most this often (and escalated
   # to ERROR after the first repeat), instead of one WARNING per attempt.
   reconnect_log_interval: 300.0
+  # The broker keeps the session this long after a disconnect: commands sent
+  # meanwhile arrive on reconnect, older ones are dropped, not replayed.
+  session_expiry_seconds: 60.0
   # Topics published (retain=true):
   #   {topic_prefix}/radio/availability → online / offline (LWT; HA availability_topic)
   #   {topic_prefix}/radio/state    → ON / OFF

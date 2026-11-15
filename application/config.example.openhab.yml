@@ -297,6 +297,9 @@ mqtt:
   # username: ~
   # password: ~
   reconnect_interval: 5.0
+  # The broker keeps the session this long after a disconnect: commands sent
+  # meanwhile arrive on reconnect, older ones are dropped, not replayed.
+  session_expiry_seconds: 60.0
   # Topics published (retain=true):
   #   {topic_prefix}/radio/availability → online / offline (LWT)
   #   {topic_prefix}/radio/state    → ON / OFF

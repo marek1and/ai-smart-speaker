@@ -297,6 +297,40 @@ def test_example_configs_load():
         assert cfg.music.enabled is False and cfg.mqtt.topic_prefix
 
 
+class BrokerClient(Client):
+    def __init__(self, *a, **k):
+        super().__init__([])
+        BrokerClient.last = self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def subscribe(self, topic, qos=0):
+        pass
+
+
+async def test_state_queued_during_an_outage_is_not_replayed_on_reconnect(bridge, monkeypatch):
+    # 71 h without the broker: HA would replay every ON/OFF of the outage
+    # after the fresh initial state
+    import mqtt_bridge.bridge as bridge_module
+    monkeypatch.setattr(bridge_module.aiomqtt, "Client", BrokerClient)
+    bridge._mpd.get_restore_volume = lambda: 35
+    bridge._connected = False
+    bridge.on_state_change({"state": "ON"})
+    bridge.on_state_change({"volume": 10})
+    task = asyncio.create_task(bridge.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    published = BrokerClient.last.published
+    assert (f"{P}/radio/volume", "35", True) in published
+    assert (f"{P}/radio/volume", "10", True) not in published
+    assert (f"{P}/radio/state", "ON", True) not in published  # FakeMPD is not playing
+    assert bridge._connected
+
+
 def test_reset_waits_for_a_frame_in_progress():
     # predict() runs in the executor and reset() on the event loop: clearing
     # the model mid-frame corrupted its buffers
@@ -310,3 +344,25 @@ def test_reset_waits_for_a_frame_in_progress():
     assert done.wait(1)
     t.join()
 
+
+async def test_broker_session_expires_so_a_long_outage_is_not_replayed(bridge, monkeypatch):
+    # clean_session=False kept the session forever: every QoS 1 power/volume
+    # command of a long outage was replayed on reconnect
+    import aiomqtt
+    import mqtt_bridge.bridge as bridge_module
+    seen = {}
+
+    class Recording(BrokerClient):
+        def __init__(self, *a, **k):
+            super().__init__()
+            seen.update(k)
+
+    monkeypatch.setattr(bridge_module.aiomqtt, "Client", Recording)
+    bridge._mpd.get_restore_volume = lambda: 35
+    task = asyncio.create_task(bridge.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert seen["protocol"] == aiomqtt.ProtocolVersion.V5
+    assert seen["clean_start"] is False  # a short blip keeps its queued commands
+    assert seen["properties"].SessionExpiryInterval == int(get_config().mqtt.session_expiry_seconds)
+    assert "clean_session" not in seen

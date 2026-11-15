@@ -453,6 +453,10 @@ class MQTTConfig:
     # outage (28.5 h, one line per attempt) wrote 15 900 warnings / 1.8 MB a day
     # into the journal and onto the NAS, and still never escalated past WARNING.
     reconnect_log_interval: float = 300.0
+    # How long the broker keeps the session after a disconnect: QoS 1 commands
+    # sent meanwhile are delivered on a reconnect within it, and dropped after
+    # a longer outage instead of replayed (HA power/volume are QoS 1).
+    session_expiry_seconds: float = 60.0
 
 
 @dataclass

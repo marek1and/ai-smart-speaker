@@ -5,6 +5,8 @@ import time
 from typing import TYPE_CHECKING, Callable, Optional
 
 import aiomqtt
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.properties import Properties
 
 from config import MQTTConfig
 from mpd_client.client import MPDClientWrapper
@@ -56,7 +58,8 @@ class MQTTBridge:
         self._publish_queue.put_nowait({"turn": event})
 
     def on_state_change(self, event: dict) -> None:
-        """Sync callback registered with MPDClientWrapper. Enqueues MQTT publish."""
+        """Sync callback registered with MPDClientWrapper. Enqueues MQTT publish;
+        what queues while the broker is down is dropped on reconnect."""
         self._publish_queue.put_nowait(event)
 
     async def run(self) -> None:
@@ -87,9 +90,12 @@ class MQTTBridge:
                     password=self._config.password,
                     will=will,
                     # Persistent session (fixed client_id) so the broker queues
-                    # QoS 1 commands/state while we're briefly disconnected,
-                    # instead of silently dropping them.
-                    clean_session=False,
+                    # QoS 1 commands while we're briefly disconnected. MQTT 5,
+                    # so it expires: a session kept forever replayed every
+                    # command of a long outage (HA power/volume are QoS 1).
+                    protocol=aiomqtt.ProtocolVersion.V5,
+                    clean_start=False,
+                    properties=self._connect_properties(),
                 ) as client:
                     await client.subscribe(f"{radio}/command/#", qos=1)
                     # QoS 0: the persistent session must not queue questions
@@ -106,9 +112,13 @@ class MQTTBridge:
                         "MQTT connected to %s:%d, subscribed to %s/command/# and %s/ask",
                         self._config.broker, self._config.port, radio, assistant,
                     )
+                    # State changes queued during the outage would replay after
+                    # the initial state below; it already carries their outcome.
+                    while not self._publish_queue.empty():
+                        self._publish_queue.get_nowait()
+                    self._connected = True
                     await self._publish_initial_state(client, radio)
                     metrics.MQTT_CONNECTED.set(1)
-                    self._connected = True
                     async with asyncio.TaskGroup() as tg:
                         tg.create_task(self._publish_loop(client, radio, assistant))
                         tg.create_task(self._command_loop(client, radio, assistant))
@@ -141,6 +151,11 @@ class MQTTBridge:
                     )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self._config.reconnect_interval_max)
+
+    def _connect_properties(self) -> Properties:
+        properties = Properties(PacketTypes.CONNECT)
+        properties.SessionExpiryInterval = int(self._config.session_expiry_seconds)
+        return properties
 
     async def _publish_initial_state(self, client: aiomqtt.Client, radio: str) -> None:
         """Publishes current radio state on (re)connect so the broker retain is fresh."""
