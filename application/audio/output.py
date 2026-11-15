@@ -199,9 +199,10 @@ class AudioOutput:
             except queue.Empty:
                 break
 
-        # Stop stream
+        # abort, not stop: stop() blocks until the buffered audio has played
+        # out, on the event loop
         if self._stream is not None:
-            self._stream.stop()
+            self._stream.abort()
             self._stream.close()
             self._stream = None
 

@@ -4,6 +4,7 @@ broker reconnect; the relaxed VAD gate leaked into IDLE; config typos failed
 with a bare TypeError."""
 import asyncio
 import json
+import threading
 from collections import deque
 from types import SimpleNamespace
 
@@ -195,6 +196,7 @@ def detector(scores, verifier_p=None, **cfg):
     d._last_trigger_time = 0.0
     d._consecutive_above_threshold = 0
     d._last_verifier_score = None
+    d._lock = threading.Lock()
     d.model = FakeModel(scores)
     d.model.vad_threshold = d.cfg.vad_threshold
     d._verifier = FakeVerifier(verifier_p) if verifier_p is not None else None
@@ -268,7 +270,9 @@ def test_verifier_with_classes_in_the_wrong_order_is_refused(tmp_path):
     path.write_bytes(pickle.dumps(SimpleNamespace(classes_=[1, 0])))
     d = ww.WakeWordDetector.__new__(ww.WakeWordDetector)
     d.cfg = WakeWordConfig(verifier_path=str(path))
-    assert d._load_verifier() is None
+    # fatal: running without it would let its false triggers through unnoticed
+    with pytest.raises(ValueError, match="positive class"):
+        d._load_verifier()
 
 
 # --- config ------------------------------------------------------------------------------
@@ -291,3 +295,18 @@ def test_example_configs_load():
     for name in ("config.example.ha.yml", "config.example.openhab.yml"):
         cfg = AppConfig.from_yaml(str(app / name))
         assert cfg.music.enabled is False and cfg.mqtt.topic_prefix
+
+
+def test_reset_waits_for_a_frame_in_progress():
+    # predict() runs in the executor and reset() on the event loop: clearing
+    # the model mid-frame corrupted its buffers
+    d = detector([0.0])
+    d._lock.acquire()
+    done = threading.Event()
+    t = threading.Thread(target=lambda: (d.reset(), done.set()))
+    t.start()
+    assert not done.wait(0.05)
+    d._lock.release()
+    assert done.wait(1)
+    t.join()
+

@@ -454,3 +454,23 @@ async def test_next_track_mpd_error(client, mopidy):
 ])
 def test_remaining_tracks_never_negative_or_crashing(client, status):
     assert client.remaining_tracks(status) == 0
+
+
+
+def test_radio_state_survives_a_failed_save(tmp_path, monkeypatch):
+    # write_text truncated the file first: a failure (or a power cut) midway
+    # left it empty, and every station and play count was lost on the next start
+    from mpd_client import state as state_module
+    path = tmp_path / "radio_state.json"
+    s = state_module.RadioStateManager(str(path))
+    s.update_station("eska", "http://eska", "Radio Eska")
+    good = path.read_text()
+
+    def broken(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(state_module.json, "dumps", lambda *a, **k: "{\"half")
+    monkeypatch.setattr(state_module.os, "fsync", broken)
+    s.update_station("zet", "http://zet", "Radio Zet")
+    assert path.read_text() == good
+    assert state_module.RadioStateManager(str(path)).get_entry("eska").name == "Radio Eska"

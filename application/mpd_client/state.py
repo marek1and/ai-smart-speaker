@@ -1,4 +1,5 @@
 import json
+import os
 import logging
 import time
 from dataclasses import dataclass, asdict
@@ -45,7 +46,14 @@ class RadioStateManager:
                 "current_station_key": self._current_key,
                 "stations": {k: asdict(v) for k, v in self._stations.items()},
             }
-            self._file.write_text(json.dumps(data, indent=2))
+            # Through a temporary file: a power cut during write_text left an
+            # empty or half file, and _load() then dropped every station.
+            tmp = self._file.with_name(self._file.name + ".tmp")
+            with open(tmp, "w") as f:
+                f.write(json.dumps(data, indent=2))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._file)
         except Exception as e:
             logger.warning("Could not save radio state: %s", e)
 

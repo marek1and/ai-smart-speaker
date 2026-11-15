@@ -1,7 +1,9 @@
 """Wake word detection using openwakeword (ONNX only)."""
 
 import os
+import logging
 import pickle
+import threading
 import time
 from collections import deque
 from typing import Any, Deque, Optional, Tuple
@@ -12,6 +14,8 @@ from openwakeword.utils import download_models
 
 from config import AudioConfig, WakeWordConfig
 
+logger = logging.getLogger(__name__)
+
 _MODELS_CACHE: dict[str, bool] = {}
 
 
@@ -20,7 +24,7 @@ def _ensure_models_downloaded() -> None:
     if _MODELS_CACHE.get("downloaded"):
         return
 
-    print("[INFO] Checking openwakeword models...")
+    logger.info("Checking openwakeword models...")
     download_models()
     _MODELS_CACHE["downloaded"] = True
 
@@ -42,6 +46,9 @@ class WakeWordDetector:
         # Counter for consecutive frames above threshold (false-positive suppression)
         self._consecutive_above_threshold: int = 0
         self._last_verifier_score: Optional[float] = None
+        # process() runs in the executor, reset() on the event loop: the model
+        # and its buffers must not be cleared in the middle of a predict().
+        self._lock = threading.Lock()
         self.model = self._load_model()
         self._verifier: Optional[Any] = self._load_verifier()
 
@@ -91,29 +98,29 @@ class WakeWordDetector:
         self._prediction_key = list(model.models.keys())[0]
 
         vad_info = f", VAD gate={self.cfg.vad_threshold}" if self.cfg.vad_threshold > 0 else ""
-        print(f"[INFO] Loaded wake word model (ONNX): {self._prediction_key}"
-              f", threshold={self.cfg.threshold}{vad_info}")
+        logger.info("Loaded wake word model (ONNX): %s, threshold=%s%s",
+                    self._prediction_key, self.cfg.threshold, vad_info)
         return model
 
     def _load_verifier(self) -> Optional[Any]:
-        """Load sklearn verifier .pkl from disk."""
+        """Load sklearn verifier .pkl from disk.
+
+        A configured verifier that does not load is fatal: running without it
+        silently lets through the false triggers it exists to stop.
+        """
         if not self.cfg.verifier_path:
             return None
-        try:
-            with open(self.cfg.verifier_path, "rb") as f:
-                verifier = pickle.load(f)
-            classes = list(getattr(verifier, "classes_", []))
-            if not classes or classes[-1] != 1:
-                raise ValueError(
-                    f"Verifier classes_ must end with 1 (positive class), got {classes}. "
-                    "predict_proba(...)[0][-1] would index the wrong class."
-                )
-            print(f"[INFO] Loaded verifier: {os.path.basename(self.cfg.verifier_path)}"
-                  f", threshold={self.cfg.verifier_threshold}")
-            return verifier
-        except Exception as e:
-            print(f"[ERROR] Failed to load verifier '{self.cfg.verifier_path}': {e}")
-            return None
+        with open(self.cfg.verifier_path, "rb") as f:
+            verifier = pickle.load(f)
+        classes = list(getattr(verifier, "classes_", []))
+        if not classes or classes[-1] != 1:
+            raise ValueError(
+                f"Verifier classes_ must end with 1 (positive class), got {classes}. "
+                "predict_proba(...)[0][-1] would index the wrong class."
+            )
+        logger.info("Loaded verifier: %s, threshold=%s",
+                    os.path.basename(self.cfg.verifier_path), self.cfg.verifier_threshold)
+        return verifier
 
     def process(
         self, mono: np.ndarray, relaxed_mode: bool = False
@@ -135,6 +142,10 @@ class WakeWordDetector:
         Returns:
             Tuple of (current_score, max_window_score, vad_score, triggered)
         """
+        with self._lock:
+            return self._process(mono, relaxed_mode)
+
+    def _process(self, mono: np.ndarray, relaxed_mode: bool) -> Tuple[float, float, float, bool]:
         verifier_threshold = self.cfg.verifier_threshold
         if relaxed_mode and self.cfg.relaxed_verifier_threshold is not None:
             verifier_threshold = self.cfg.relaxed_verifier_threshold
@@ -221,6 +232,10 @@ class WakeWordDetector:
         Both cause the VAD gate (checking frames -7:-4) to stay closed when the
         user next speaks the wake word, preventing re-detection.
         """
+        with self._lock:
+            self._reset()
+
+    def _reset(self) -> None:
         self.model.reset()
         if self.cfg.vad_threshold > 0 and hasattr(self.model, "vad") and self.model.vad is not None:
             self.model.vad.prediction_buffer.clear()
