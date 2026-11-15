@@ -284,7 +284,7 @@ mpd:
   # Mopidy keeps reporting "play" after a stream breaks mid-way, with the position
   # frozen. After this long without progress the stream is restarted; after
   # stream_stall_max_restarts failed restarts playback is stopped.
-  stream_stall_timeout: 20.0
+  stream_stall_timeout: 10.0
   stream_stall_max_restarts: 2
   volume_fade_in_seconds: 1.0  # Duration of volume fade-in (resuming)
   volume_fade_steps: 25  # Volume changes a fade is made of

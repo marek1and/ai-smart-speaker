@@ -425,7 +425,9 @@ class MPDConfig:
     # How long the playback position may stay frozen while the server reports
     # "play" before the stream is restarted. Mopidy keeps reporting "play"
     # after a stream breaks mid-way (GStreamer error), with elapsed stuck at 0.
-    stream_stall_timeout: float = 20.0
+    # At 20 s the room sat silent that long (15.11.2026); the start of a stream
+    # is not judged anyway (stream_start_grace).
+    stream_stall_timeout: float = 10.0
     # Restarts of a frozen stream before giving up and stopping playback.
     stream_stall_max_restarts: int = 2
     # Fade-in after a start and back from the duck level after a turn; at 2 s
