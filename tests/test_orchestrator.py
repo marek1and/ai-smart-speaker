@@ -70,8 +70,9 @@ class FakeMPD:
     async def unduck(self):
         self.calls.append("unduck")
 
-    async def play_station(self, url, name, key=None):
+    async def play_station(self, url, name, key=None, start_ducked=False):
         self.calls.append(("play_station", url, name, key))
+        self.start_ducked = start_ducked
         self.playing = True
 
     async def play_music(self, uris, title, start_timeout=None, confirm_timeout=None, start_ducked=False):
@@ -82,8 +83,9 @@ class FakeMPD:
         self.playing = self.music_starts
         return self.music_starts
 
-    async def resume(self, resolve):
+    async def resume(self, resolve, start_ducked=False):
         self.calls.append("resume")
+        self.start_ducked = start_ducked
         self.playing = True
 
     async def set_volume(self, v):
@@ -728,7 +730,7 @@ async def test_barge_in_during_the_deferred_actions_stays_ducked(make):
     o._state = SpeakerState.RESPONDING
     release = asyncio.Event()
 
-    async def slow_play_station(url, name, key=None):
+    async def slow_play_station(url, name, key=None, start_ducked=False):
         await release.wait()
 
     o.mpd_client.play_station = slow_play_station
@@ -1068,3 +1070,53 @@ async def test_a_new_session_recording_starts_with_the_full_preroll(make):
     o._state = SpeakerState.IDLE
     await o._open_session_and_listen()  # reused: it has been recording all along
     assert len(started) == 1
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"url": "http://u", "name": "Radio Zet", "key": "zet"}, ("play_station", "http://u", "Radio Zet", "zet")),
+    ({"action": "play"}, "resume"),
+])
+async def test_radio_starts_at_the_tool_call_ducked_and_the_turn_end_waits_for_it(make, payload, expected):
+    # started after the reply, the stream took ~2 s to connect in silence while
+    # the turn sat in RESPONDING (15.11.2026)
+    o = make()
+    o._state = SpeakerState.LISTENING
+    action = DeferredAction("play_internet_radio", payload)
+    o._api_manager.pending_actions.append(action)
+    o._deferred_playback.on_action(action)
+    await action.task
+    assert expected in o.mpd_client.calls and o.mpd_client.start_ducked
+    o._state = SpeakerState.RESPONDING
+    await o._execute_post_response_actions()
+    assert o.mpd_client.calls.count(expected) == 1  # started once
+    assert o.state == SpeakerState.IDLE and SoundEvent.END_CONVERSATION not in o._sound_player.played
+
+
+async def test_a_later_radio_request_wins_over_an_earlier_one(make):
+    # "nie, puść RMF" over the reply: only the later station may start
+    o = make()
+    o._state = SpeakerState.LISTENING
+    first = DeferredAction("play_internet_radio", {"url": "http://zet", "name": "Zet"})
+    second = DeferredAction("play_internet_radio", {"url": "http://rmf", "name": "RMF"})
+    o._deferred_playback.on_action(first)
+    o._deferred_playback.on_action(second)
+    await asyncio.gather(first.task, second.task)
+    stations = [c[2] for c in o.mpd_client.calls if isinstance(c, tuple) and c[0] == "play_station"]
+    assert stations == ["RMF"]
+
+
+async def test_a_failing_radio_start_sounds_and_does_not_break_the_turn_end(make):
+    o = make()
+    o._state = SpeakerState.LISTENING
+
+    async def broken(*a, **k):
+        raise RuntimeError("mopidy gone")
+
+    o.mpd_client.play_station = broken
+    action = DeferredAction("play_internet_radio", {"url": "http://u", "name": "Zet"})
+    o._api_manager.pending_actions.append(action)
+    o._deferred_playback.on_action(action)
+    o._state = SpeakerState.RESPONDING
+    await o._execute_post_response_actions()
+    assert SoundEvent.ERROR in o._sound_player.played
+    assert o.state == SpeakerState.IDLE

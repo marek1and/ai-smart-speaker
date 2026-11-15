@@ -499,9 +499,17 @@ class MPDClientWrapper:
         return True
 
     async def play_station(
-        self, url: str, station_name: Optional[str] = None, key: Optional[str] = None
+        self,
+        url: str,
+        station_name: Optional[str] = None,
+        key: Optional[str] = None,
+        start_ducked: bool = False,
     ) -> None:
-        """Clears the playlist, adds a new station, plays it, and fades the volume in."""
+        """Clears the playlist, adds a new station, plays it, and fades the volume in.
+
+        start_ducked: the AI is still speaking. The station starts at the duck
+        level and unduck() at the end of the turn fades it in.
+        """
         if not await self._start_queue([url], f"station: {station_name or url}"):
             return
         self._source = "radio"
@@ -518,7 +526,7 @@ class MPDClientWrapper:
 
         # Notify immediately so automation system see state=ON before the fade completes.
         self._notify(state="ON", station=station_name, volume=self._restore_volume)
-        await self._fade_in_after_start()
+        await self._raise_after_start(start_ducked)
 
     async def play_music(
         self,
@@ -550,16 +558,7 @@ class MPDClientWrapper:
         self._source = "music"
         self._health.started_key = None
         self._notify(state="ON", volume=self._restore_volume)
-        if start_ducked:
-            async with self._mpd_lock:
-                if await self._connect():
-                    await self._set_internal_volume_unsafe(
-                        min(self.config.volume_duck_percentage, self._restore_volume)
-                    )
-            self._is_ducked = True
-            metrics.RADIO_PLAYING.set(1)
-        else:
-            await self._fade_in_after_start()
+        await self._raise_after_start(start_ducked)
         return True
 
     async def _abandon_music_start(self) -> None:
@@ -582,6 +581,20 @@ class MPDClientWrapper:
             if state == "play" or time.monotonic() >= deadline:
                 return state
             await asyncio.sleep(_START_POLL_SECONDS)
+
+    async def _raise_after_start(self, start_ducked: bool) -> None:
+        """After a start at volume 0: to the duck level under a reply still
+        being spoken (unduck() fades it in), otherwise a fade-in."""
+        if not start_ducked:
+            await self._fade_in_after_start()
+            return
+        async with self._mpd_lock:
+            if await self._connect():
+                await self._set_internal_volume_unsafe(
+                    min(self.config.volume_duck_percentage, self._restore_volume)
+                )
+        self._is_ducked = True
+        metrics.RADIO_PLAYING.set(1)
 
     async def _fade_in_after_start(self) -> None:
         # Run fade-in outside of the main lock to allow other operations.
@@ -1061,6 +1074,7 @@ class MPDClientWrapper:
     async def resume(
         self,
         resolve_station: Callable[[str], Awaitable[Optional[tuple[str, str, str]]]],
+        start_ducked: bool = False,
     ) -> None:
         """Resumes the radio, reloading the last station when the queue is empty
         or holds music.
@@ -1072,6 +1086,7 @@ class MPDClientWrapper:
         A stream frozen mid-play is reloaded the same way, since play() would
         skip it as "already playing".
         resolve_station maps a station key to (url, official_name, key).
+        start_ducked: see play_station.
         """
         status = await self.get_status() or {}
         try:
@@ -1093,13 +1108,14 @@ class MPDClientWrapper:
                 "Resume: server reports play but the position is frozen — reloading the station"
             )
         else:
-            await self.play()
+            await self.play(start_ducked)
             return
-        await self._reload_current_station(resolve_station)
+        await self._reload_current_station(resolve_station, start_ducked)
 
     async def _reload_current_station(
         self,
         resolve_station: Callable[[str], Awaitable[Optional[tuple[str, str, str]]]],
+        start_ducked: bool = False,
     ) -> None:
         """Resolves the current station afresh and starts it from scratch."""
         key = self._radio_state.get_current_key()
@@ -1111,10 +1127,11 @@ class MPDClientWrapper:
             logger.error("Could not resolve the current station '%s'", key)
             return
         url, official_name, key = result
-        await self.play_station(url, official_name, key=key)
+        await self.play_station(url, official_name, key=key, start_ducked=start_ducked)
 
-    async def play(self):
-        """Plays the current playlist and fades the volume in."""
+    async def play(self, start_ducked: bool = False):
+        """Plays the current playlist and fades the volume in (start_ducked:
+        see play_station)."""
         logger.info("Executing play command.")
         if await self.is_playing():
             logger.info("Already playing, skipping play command.")
@@ -1147,6 +1164,4 @@ class MPDClientWrapper:
             station=self._radio_state.get_current_name(),
             volume=self._restore_volume,
         )
-        await self._fade_to(self._restore_volume, self.config.volume_fade_in_seconds)
-        metrics.RADIO_PLAYING.set(1)
-        metrics.RADIO_VOLUME.set(self._restore_volume)
+        await self._raise_after_start(start_ducked)

@@ -474,3 +474,20 @@ def test_radio_state_survives_a_failed_save(tmp_path, monkeypatch):
     s.update_station("zet", "http://zet", "Radio Zet")
     assert path.read_text() == good
     assert state_module.RadioStateManager(str(path)).get_entry("eska").name == "Radio Eska"
+
+
+@pytest.mark.parametrize("start", ["station", "resume"])
+async def test_radio_started_mid_turn_stays_ducked_for_unduck(client, mopidy, eska, start):
+    # started under the reply instead of after it: ~2 s of silence while the
+    # stream connected (15.11.2026); unduck() at the turn end fades it in
+    if start == "station":
+        await client.play_station("http://pinned.invalid/eska.mp3", "Radio Eska", key="eska", start_ducked=True)
+    else:
+        async def resolve(key):
+            return "http://pinned.invalid/eska.mp3", "Radio Eska", "eska"
+        await client.resume(resolve, start_ducked=True)
+    duck = min(client.config.volume_duck_percentage, client.get_restore_volume())
+    assert mopidy.volume == client._map_volume_to_curve(duck)
+    assert client._is_ducked
+    await client.unduck()
+    assert client._is_ducked is False

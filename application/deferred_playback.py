@@ -17,9 +17,10 @@ logger = logging.getLogger(__name__)
 class DeferredPlayback:
     """Runs the deferred tool actions of a turn.
 
-    Music starts as soon as its tool ran (on_action), everything else when the
-    reply is over (dispatch). Requests that start playback are numbered: only
-    the latest may start, whatever order their starts finish in.
+    Music and radio start as soon as their tool ran (on_action), at the duck
+    level under the reply; volume changes wait until the reply is over
+    (dispatch). Requests that start playback are numbered: only the latest may
+    start, whatever order their starts finish in.
     """
 
     def __init__(
@@ -57,6 +58,36 @@ class DeferredPlayback:
             action.task = self._spawn(
                 self.start_music(payload, action.request), name="music_start"
             )
+        elif starts_playback:
+            # Started after the reply, the station took ~2 s of silence to
+            # connect while the turn waited (15.11.2026).
+            action.task = self._spawn(
+                self.start_radio(payload, action.request), name="radio_start"
+            )
+
+    async def start_radio(self, payload: dict, request: Optional[int]) -> None:
+        """Plays the station (url) or resumes the last one. Never raises: the
+        turn end awaits it inside the state machine."""
+        if request is not None and request != self._request:
+            logger.info("Radio start superseded by a later playback request")
+            return
+        in_turn = self._in_turn()
+        try:
+            if payload.get("url"):
+                station = payload.get("name") or ""
+                await self.mpd_client.play_station(
+                    payload["url"], station, key=payload.get("key"), start_ducked=in_turn
+                )
+                metrics.RADIO_PLAYS.labels(source="ai_new", station=station).inc()
+            else:
+                await self.mpd_client.resume(
+                    get_radio_client().search_station, start_ducked=in_turn
+                )
+                station = self.mpd_client.get_current_station_name() or "unknown"
+                metrics.RADIO_PLAYS.labels(source="ai_resume", station=station).inc()
+        except Exception:
+            logger.exception("Radio start failed")
+            self._play_error_sound()
 
     async def start_music(self, payload: dict, request: Optional[int] = None) -> Optional[bool]:
         """Returns True/False for started/failed, None when superseded. Never
@@ -122,23 +153,10 @@ class DeferredPlayback:
                     logger.warning(
                         "play_internet_radio deferred error: %s", payload.get("details")
                     )
-                elif payload.get("url"):
-                    logger.info("Executing deferred action: play_internet_radio (url)")
-                    station = payload.get("name") or ""
-                    await self.mpd_client.play_station(
-                        payload["url"], station, key=payload.get("key")
-                    )
-                    metrics.RADIO_PLAYS.labels(source="ai_new", station=station).inc()
-                    ran_radio_action = True
-                elif payload.get("action") == "play":
-                    logger.info(
-                        "Executing deferred action: play_internet_radio (resume)"
-                    )
-                    await self.mpd_client.resume(get_radio_client().search_station)
-                    station = self.mpd_client.get_current_station_name() or "unknown"
-                    metrics.RADIO_PLAYS.labels(
-                        source="ai_resume", station=station
-                    ).inc()
+                elif payload.get("url") or payload.get("action") == "play":
+                    task = action.task
+                    logger.info("Deferred play_internet_radio: %s", "waiting for the early start" if task else "starting")
+                    await (task if task else self.start_radio(payload, None))
                     ran_radio_action = True
 
             elif action.type == "play_music":

@@ -46,8 +46,8 @@ class BaseRealtimeManager(ABC):
     """
 
     # Tools executed by the orchestrator, the model gets "success" plus
-    # for_model. Radio and volume run after the spoken reply; play_music starts
-    # at once through on_deferred, ducked under the reply.
+    # for_model. Music and radio start at once through on_deferred, ducked
+    # under the reply; volume changes run after it.
     DEFERRED_FUNCTIONS = frozenset({
         "play_internet_radio",
         "play_music",
