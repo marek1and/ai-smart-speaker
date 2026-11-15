@@ -256,7 +256,8 @@ async def test_text_session_recording_does_not_take_an_earlier_wake_words_scores
     o._recorder.start = lambda **k: started.append(k)
     assert o.submit_text("x")
     await o._handle_idle_state()
-    assert started == [{"model_score": None, "verifier_score": None}]
+    assert [{k: v for k, v in s.items() if k != "preroll"} for s in started] == [
+        {"model_score": None, "verifier_score": None}]
 
 
 async def test_stt_rejection_is_counted_once_as_a_false_trigger(make):
@@ -535,12 +536,9 @@ async def test_room_audio_is_not_sent_while_the_reply_is_awaited(make):
     o._forward_audio_to_api = forward
     frame = np.zeros(512, dtype=np.int16)
     await o._process_listening_audio(frame, frame.tobytes())
-    recorded = []
-    o._recorder.write = recorded.append
     o._api_manager.awaiting_reply = True  # activity_end sent / a typed request
     await o._process_listening_audio(frame, frame.tobytes())
-    assert len(sent) == 1
-    assert recorded == [frame.tobytes()]  # kept for diagnosing cut-off commands
+    assert len(sent) == 1  # the recording still gets it, see the capture test
 
 
 async def test_a_newer_music_request_wins_over_one_still_downloading(make, monkeypatch):
@@ -1026,3 +1024,47 @@ async def test_speech_that_never_pauses_is_ended(make, monkeypatch):
     o._hybrid_vad.is_speaking = True
     await o._process_listening_audio(frame, frame.tobytes())
     assert len(o._api_manager.events) == 1
+
+
+
+@pytest.mark.parametrize("state", list(SpeakerState))
+async def test_every_captured_frame_is_recorded_in_every_state(make, state):
+    # only LISTENING frames were recorded, mono: the reply as the room heard
+    # it (reference channel) and everything between turns were missing
+    o = make()
+    o._state = state
+    frames = [(np.zeros(512, dtype=np.int16), b"mono", b"stereo-%d" % i) for i in range(3)]
+    recorded = []
+    o._recorder.write = recorded.append
+
+    async def next_frame():
+        if not frames:
+            o._running = False
+            return None
+        return frames.pop(0)
+
+    async def detect(mono):
+        return orch.WakeWordResult(triggered=False, score=0.0, max_score=0.0)
+
+    async def no_audio_processing(*a):
+        pass
+
+    o._mic.next_frame = next_frame
+    o._wake_gate.detect = detect
+    o._process_listening_audio = o._process_followup_audio = no_audio_processing
+    o._running = True
+    await o._audio_capture_task()
+    assert recorded == [b"stereo-0", b"stereo-1", b"stereo-2"]
+
+
+async def test_a_new_session_recording_starts_with_the_full_preroll(make):
+    o = make()
+    o._mic.preroll_frames = lambda: [b"before-1", b"before-2"]
+    started = []
+    o._recorder.start = lambda **k: started.append(k)
+    o._last_wake_result = orch.WakeWordResult(triggered=True, score=0.9, max_score=0.9)
+    await o._open_session_and_listen()
+    assert started[0]["preroll"] == [b"before-1", b"before-2"]
+    o._state = SpeakerState.IDLE
+    await o._open_session_and_listen()  # reused: it has been recording all along
+    assert len(started) == 1

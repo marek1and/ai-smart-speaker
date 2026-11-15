@@ -1,7 +1,7 @@
 """Lifetime of the realtime API session and of its recording."""
 
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 from audio.recorder import SessionRecorder
 from config import LiveConfig
@@ -30,8 +30,12 @@ class SessionKeeper:
     def active(self) -> bool:
         return self.api is not None and self.api.session_active
 
-    async def open(self, wake_result: Optional[WakeWordResult]) -> bool:
-        """Open a session unless one is live. False when the API refused."""
+    async def open(
+        self, wake_result: Optional[WakeWordResult], preroll: Sequence[bytes] = ()
+    ) -> bool:
+        """Open a session unless one is live. False when the API refused.
+        A new session's recording starts with the preroll frames; a live one
+        has been recording all along."""
         if self.active:
             logger.info("Reusing existing session (recording continues)")
             return True
@@ -47,6 +51,7 @@ class SessionKeeper:
         self.recorder.start(
             model_score=wake_result.score if wake_result else None,
             verifier_score=wake_result.verifier_score if wake_result else None,
+            preroll=preroll,
         )
         self.turn_count = 0
         return True

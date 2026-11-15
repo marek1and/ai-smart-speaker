@@ -163,7 +163,9 @@ class AudioOrchestrator:
 
         # Session recorder — manages WAV file lifecycle per API session
         self._recorder = SessionRecorder(
-            self.audio_cfg.input_sample_rate, self.audio_cfg.output_sample_rate
+            self.audio_cfg.input_sample_rate,
+            self.audio_cfg.output_sample_rate,
+            self.audio_cfg.input_channels,
         )
         self._session = SessionKeeper(self.live_cfg, self._recorder)
 
@@ -508,7 +510,10 @@ class AudioOrchestrator:
                 frame = await self._mic.next_frame()
                 if frame is None:
                     continue
-                mono, mono_bytes = frame
+                mono, mono_bytes, frame_bytes = frame
+                # Every frame while a session is open, whatever the state:
+                # the reply as the room heard it is on the reference channel.
+                self._recorder.write(frame_bytes)
 
                 wake_result = await self._wake_gate.detect(mono)
                 await self._handle_wake_word_result(wake_result)
@@ -560,9 +565,8 @@ class AudioOrchestrator:
             # The utterance is complete. Room audio sent now (radio, TV, our own
             # music) made Gemini produce up to ~20 s of silence before it ended
             # its reply: 5 of 32 probe turns with music, 0 of 30 with no audio
-            # or digital silence (01.11.2026). It is still recorded: shows
+            # or digital silence (01.11.2026). The recording still has it: shows
             # whether the user was cut off mid-sentence.
-            self._recorder.write(mono_bytes)
             return
         await self._forward_audio_to_api(mono_bytes)
 
@@ -762,7 +766,6 @@ class AudioOrchestrator:
         """Forward audio frame to the API send queue."""
         frame = AudioFrame(data=audio_bytes, mime_type=self.live_cfg.input_mime_type)
         self._put_dropping_oldest(self._api_input_queue, frame)
-        self._recorder.write(audio_bytes)
 
     # -------------------------------------------------------------------------
     # Audio Playback Bridge (API queue -> Speaker queue)
@@ -931,7 +934,7 @@ class AudioOrchestrator:
         # A typed request has no wake word: its recording must not carry the
         # scores of an earlier one.
         wake_result = self._last_wake_result if text is None else None
-        if not await self._session.open(wake_result):
+        if not await self._session.open(wake_result, self._mic.preroll_frames()):
             self._play_error_sound()
             await self._unduck_radio()
             self._set_state(SpeakerState.IDLE)
@@ -1285,11 +1288,11 @@ class AudioOrchestrator:
     # -------------------------------------------------------------------------
 
     async def _send_preroll(self) -> None:
-        """Flush the preroll buffer into the API input queue and recorder."""
+        """Flush the preroll buffer into the API input queue (the recording
+        has it already, see SessionKeeper.open)."""
         for frame_data in self._mic.take_preroll():
             frame = AudioFrame(data=frame_data, mime_type=self.live_cfg.input_mime_type)
             try:
                 self._api_input_queue.put_nowait(frame)
             except asyncio.QueueFull:
                 pass
-            self._recorder.write(frame_data)

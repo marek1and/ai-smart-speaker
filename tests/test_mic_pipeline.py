@@ -41,16 +41,18 @@ async def settle():
 
 
 async def test_stereo_capture_yields_the_microphone_channel(mic):
-    mic.queue.put(stereo(mic_level=7, ref_level=9))
-    mono, mono_bytes = await mic.next_frame()
+    frame = stereo(mic_level=7, ref_level=9)
+    mic.queue.put(frame)
+    mono, mono_bytes, frame_bytes = await mic.next_frame()
     assert mono.shape == (512,) and set(mono) == {7}
     assert mono_bytes == mono.tobytes()
+    assert frame_bytes == frame.tobytes()  # both channels, for the session recording
 
 
 async def test_mono_capture_and_empty_frames(mic):
     mic.queue.put(np.full((512, 1), 3, dtype=np.int16))
-    mono, _ = await mic.next_frame()
-    assert mono.shape == (512,)
+    mono, mono_bytes, frame_bytes = await mic.next_frame()
+    assert mono.shape == (512,) and frame_bytes == mono_bytes
     mic.queue.put(np.zeros((0, 2), dtype=np.int16))
     assert await mic.next_frame() is None
 
@@ -120,3 +122,11 @@ async def test_aec_metric_counts_only_frames_with_a_reference_signal(mic):
         mic.queue.put(stereo(mic_level=10, ref_level=ref))
         await mic.next_frame()
     assert len(mic._aec_ratio_window) == 1
+
+
+async def test_preroll_keeps_the_full_frames_for_the_recording(mic):
+    # the session recording starts with the reference channel too
+    mic.queue.put(stereo(mic_level=7, ref_level=9))
+    await mic.next_frame()
+    assert mic.preroll_frames() == [stereo(mic_level=7, ref_level=9).tobytes()]
+    assert mic.preroll() == [np.full(512, 7, dtype=np.int16).tobytes()]

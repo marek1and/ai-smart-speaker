@@ -2,7 +2,7 @@ import logging
 import os
 import wave
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -51,20 +51,26 @@ class SessionRecorder:
 
     Owns the WAV file lifecycle independently of the orchestrator.
     All public methods are safe to call when no recording is active (no-ops).
-    The microphone goes to session_*.wav; the model's audio, every chunk it
-    sent whether played or not, to session_*_model.wav next to it.
+    session_*.wav holds every captured frame from the session open to its
+    close, all channels: with the XVF3800 the microphone (left) and the
+    far-end reference, what the speaker actually played (right). The model's
+    audio, every chunk it sent whether played or not, goes to
+    session_*_model.wav next to it.
 
     Usage::
 
-        recorder = SessionRecorder(sample_rate=16000, model_sample_rate=24000)
-        recorder.start()
-        recorder.write(pcm_bytes)        # called for every audio frame
+        recorder = SessionRecorder(sample_rate=16000, model_sample_rate=24000, channels=2)
+        recorder.start(preroll=frames)   # the frames from before the open
+        recorder.write(pcm_bytes)        # called for every captured frame
         recorder.write_model(pcm_bytes)  # called for every model audio chunk
         recorder.close()
     """
 
-    def __init__(self, sample_rate: int, model_sample_rate: Optional[int] = None) -> None:
+    def __init__(
+        self, sample_rate: int, model_sample_rate: Optional[int] = None, channels: int = 1
+    ) -> None:
         self._sample_rate = sample_rate
+        self._channels = channels
         self._model_sample_rate = model_sample_rate
         self._wav_file: Optional[wave.Wave_write] = None
         self._wav_path: Optional[str] = None
@@ -79,10 +85,11 @@ class SessionRecorder:
         self,
         model_score: Optional[float] = None,
         verifier_score: Optional[float] = None,
+        preroll: Sequence[bytes] = (),
     ) -> None:
-        """Open a new timestamped WAV file and begin recording."""
+        """Open a new timestamped WAV file and begin recording, with the
+        preroll frames (the audio from before the open, wake word included)."""
         self.close()  # a session that died on an API error leaves one open
-        os.makedirs(_RECORDINGS_DIR, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         score_tag = ""
         if model_score is not None:
@@ -90,27 +97,53 @@ class SessionRecorder:
         if verifier_score is not None:
             score_tag += f"_v{verifier_score:.3f}"
         self._wav_path = os.path.join(_RECORDINGS_DIR, f"session_{timestamp}{score_tag}.wav")
-        self._wav_file = wave.open(self._wav_path, "wb")
-        self._wav_file.setnchannels(1)
-        self._wav_file.setsampwidth(2)
-        self._wav_file.setframerate(self._sample_rate)
+        try:
+            os.makedirs(_RECORDINGS_DIR, exist_ok=True)
+            self._wav_file = wave.open(self._wav_path, "wb")
+            self._wav_file.setnchannels(self._channels)
+            self._wav_file.setsampwidth(2)
+            self._wav_file.setframerate(self._sample_rate)
+        except OSError:
+            self._abandon("start")
+            return
         logger.info("Started session recording: %s", self._wav_path)
+        for frame in preroll:
+            self.write(frame)
 
     def write(self, data: bytes) -> None:
         """Write raw PCM16 bytes to the current recording. No-op if inactive."""
         if self._wav_file:
-            self._wav_file.writeframes(data)
+            try:
+                self._wav_file.writeframes(data)
+            except OSError:
+                self._abandon("write")
 
     def write_model(self, data: bytes) -> None:
         """Write model audio; the file is created with the first chunk."""
         if not self._wav_file or not self._model_sample_rate:
             return
-        if not self._model_file:
-            self._model_file = wave.open(self._model_path(self._wav_path), "wb")
-            self._model_file.setnchannels(1)
-            self._model_file.setsampwidth(2)
-            self._model_file.setframerate(self._model_sample_rate)
-        self._model_file.writeframes(data)
+        try:
+            if not self._model_file:
+                self._model_file = wave.open(self._model_path(self._wav_path), "wb")
+                self._model_file.setnchannels(1)
+                self._model_file.setsampwidth(2)
+                self._model_file.setframerate(self._model_sample_rate)
+            self._model_file.writeframes(data)
+        except OSError:
+            self._abandon("model write")
+
+    def _abandon(self, what: str) -> None:
+        """A failed write (e.g. /data full) ends the recording instead of
+        raising into the microphone loop, which every frame would repeat."""
+        logger.exception("Session recording %s failed (%s), recording stopped", what, self._wav_path)
+        for f in (self._model_file, self._wav_file):
+            if f is not None:
+                try:
+                    f.close()
+                except OSError:
+                    pass
+        self._model_file = self._wav_file = None
+        self._wav_path = None
 
     @staticmethod
     def _model_path(wav_path: str) -> str:
@@ -126,12 +159,15 @@ class SessionRecorder:
 
     def close(self) -> None:
         """Close and flush the current recording. No-op if inactive."""
-        self._close_model()
-        if self._wav_file:
-            self._wav_file.close()
-            logger.info("Closed session recording: %s", self._wav_path)
-            self._wav_file = None
-            self._wav_path = None
+        try:
+            self._close_model()
+            if self._wav_file:
+                self._wav_file.close()
+                logger.info("Closed session recording: %s", self._wav_path)
+                self._wav_file = None
+                self._wav_path = None
+        except OSError:
+            self._abandon("close")
 
     def close_as_false_trigger(self) -> None:
         """Close and rename the recording to mark it as a false wake word trigger.
@@ -142,15 +178,18 @@ class SessionRecorder:
         """
         if not self._wav_file:
             return
-        had_model = self._close_model()
-        self._wav_file.close()
-        self._wav_file = None
-        if self._wav_path and os.path.exists(self._wav_path):
-            basename = os.path.basename(self._wav_path)
-            new_basename = basename.replace("session_", "false_wake_", 1)
-            new_path = os.path.join(_RECORDINGS_DIR, new_basename)
-            os.rename(self._wav_path, new_path)
-            if had_model:
-                os.rename(self._model_path(self._wav_path), self._model_path(new_path))
-            logger.info("False trigger recording saved: %s", new_path)
-        self._wav_path = None
+        try:
+            had_model = self._close_model()
+            self._wav_file.close()
+            self._wav_file = None
+            if self._wav_path and os.path.exists(self._wav_path):
+                basename = os.path.basename(self._wav_path)
+                new_basename = basename.replace("session_", "false_wake_", 1)
+                new_path = os.path.join(_RECORDINGS_DIR, new_basename)
+                os.rename(self._wav_path, new_path)
+                if had_model:
+                    os.rename(self._model_path(self._wav_path), self._model_path(new_path))
+                logger.info("False trigger recording saved: %s", new_path)
+            self._wav_path = None
+        except OSError:
+            self._abandon("close as false trigger")

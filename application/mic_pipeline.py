@@ -42,7 +42,9 @@ class MicPipeline:
             * self.audio_cfg.input_sample_rate
             / self.audio_cfg.input_chunk
         )
-        self._preroll: Deque[bytes] = deque(maxlen=max(preroll_frames, 5))
+        # (mono, full frame) pairs: the API gets the mono, the session
+        # recording starts with the full frames.
+        self._preroll: Deque[tuple[bytes, bytes]] = deque(maxlen=max(preroll_frames, 5))
 
         # Detector input ring buffer, dumped to a WAV at trigger time. The
         # preroll buffer can't serve this purpose: it is flushed at session
@@ -66,9 +68,11 @@ class MicPipeline:
         )
         self._aec_frame_counter: int = 0
 
-    async def next_frame(self) -> Optional[tuple[np.ndarray, bytes]]:
-        """The next captured frame as (mono, mono bytes); None when nothing
-        arrived in time, so the caller can check whether to keep running."""
+    async def next_frame(self) -> Optional[tuple[np.ndarray, bytes, bytes]]:
+        """The next captured frame as (mono, mono bytes, full frame bytes);
+        None when nothing arrived in time, so the caller can check whether to
+        keep running. With the XVF3800 the full frame is stereo: the
+        microphone and the far-end reference (what the speaker played)."""
         try:
             raw_audio = await asyncio.wait_for(
                 asyncio.to_thread(self.queue.get, timeout=0.5),
@@ -88,27 +92,30 @@ class MicPipeline:
             return None
 
         mono_bytes = mono.tobytes()
-        self._preroll.append(mono_bytes)
+        frame_bytes = raw_audio.tobytes() if stereo else mono_bytes
+        self._preroll.append((mono_bytes, frame_bytes))
         if self._clip_buffer is not None:
             # Full frame, not just mono: with the XVF3800 right channel
             # muxed to the far-end reference (5 0), a stereo clip
             # self-labels whether our own audio was playing and what it
             # was. Downstream prepare_recordings.py scores channel 0.
             self._clip_channels = raw_audio.shape[1] if stereo else 1
-            self._clip_buffer.append(
-                raw_audio.tobytes() if stereo else mono_bytes
-            )
+            self._clip_buffer.append(frame_bytes)
         if stereo:
             self._update_aec_metric(raw_audio)
-        return mono, mono_bytes
+        return mono, mono_bytes, frame_bytes
 
     def preroll(self) -> list[bytes]:
-        """The frames from before now, oldest first (the wake word is in them)."""
-        return list(self._preroll)
+        """The mono frames from before now, oldest first (the wake word is in them)."""
+        return [mono for mono, _ in self._preroll]
+
+    def preroll_frames(self) -> list[bytes]:
+        """The same frames with all their channels, for a recording that starts now."""
+        return [frame for _, frame in self._preroll]
 
     def take_preroll(self) -> list[bytes]:
-        """The preroll, handed over once: the next turn starts with a fresh one."""
-        frames = list(self._preroll)
+        """The mono preroll, handed over once: the next turn starts with a fresh one."""
+        frames = self.preroll()
         self._preroll.clear()
         return frames
 
