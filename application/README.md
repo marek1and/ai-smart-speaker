@@ -412,4 +412,8 @@ Resolved stream URLs are cached in `radio_state.json` (path configurable via `mp
 The system features automatic audio ducking. If the radio is playing and you say the wake word:
 
 - The radio volume is immediately lowered to `mpd.volume_duck_percentage`.
-- Once the conversation ends, the volume fades back to its previous level.
+- Once the conversation ends, the volume fades back to its previous level over
+  `mpd.volume_fade_in_seconds`.
+- A station or music asked for in a turn starts as soon as the tool runs, at
+  the duck level under the reply, and fades in when the turn ends.
+- After an app restart the radio plays at `mpd.default_playback_volume`.

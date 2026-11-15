@@ -88,7 +88,7 @@ resize2fs /dev/mmcblk0p6
 
 On `/data`:
 
-- `/data/opt/ai-smart-speaker` — application + `.venv` (symlinked from `/opt/ai-smart-speaker`, so `sync-to-rpi.sh` keeps working unchanged); its `recordings/` holds the wake word clips and session recordings
+- `/data/opt/ai-smart-speaker` — application + `.venv` (symlinked from `/opt/ai-smart-speaker`, so `sync-to-rpi.sh` keeps working unchanged); its `recordings/` holds the session recordings (stereo: microphone and the far-end reference, plus the model's audio) and, when enabled, wake word clips
 - `/data/music`, `/data/mopidy` — music, Mopidy state
 - `/data/mopidy/mopidy.conf` — site-specific Mopidy overrides (Spotify/YouTube credentials) — never in git
 - `/data/cache` — pip / huggingface / Mopidy caches (`XDG_CACHE_HOME`)
@@ -272,9 +272,14 @@ typelibs).
   was restarted. With the cache, yt-dlp downloads the track to
   `/data/cache/mopidy/youtube` and Mopidy plays the file, so GStreamer never
   talks to YouTube. `systemd-tmpfiles` drops files older than 30 days.
-- Two patches to mopidy-youtube 4.0.2 for this stack: `pkg_resources` is gone
-  in setuptools 82, and Mopidy 4 dropped `ModelJSONEncoder` (cached track
-  metadata).
+- Patches to mopidy-youtube 4.0.2 for this stack: `pkg_resources` is gone in
+  setuptools 82 (0001), Mopidy 4 dropped `ModelJSONEncoder` (cached track
+  metadata, 0002), video info is extracted once when caching (0003) and only
+  the next tracks are prefetched (0004).
+- A patch to Mopidy 4.0.5 (0005) adds `audio/output_buffer_time`: the queue of
+  each output sits after the software volume and filled to GStreamer's default
+  of 1 s, so ducking was heard ~1.2 s after the wake word. `mopidy.conf` sets
+  it to 100 ms.
 
 To try a newer yt-dlp before rebuilding: install the wheels with
 `pip install --target` under `/data/tmp`, put deno next to them, and point
@@ -472,11 +477,15 @@ a local writable partition to come up at all.
 
 `soft,timeo=50` + automount = an absent NAS never hangs boot.
 
-Recordings stay on `/data` (decided 2026-10-30): about 1 MB per wake-up, tens of
-MB a day, a negligible share of the card's write endurance. Writing them to NFS
-directly is not safe — the app writes session recordings on its event loop, and
-a soft mount can stall a call for ~15 s when the NAS is down. Copy them to the
-NAS by hand when they are needed for training.
+Recordings stay on `/data` (decided 2026-10-30): a stereo recording of every
+session, some tens of MB a day, a negligible share of the card's write
+endurance. Writing them to NFS directly is not safe — the app writes session
+recordings on its event loop, and a soft mount can stall a call for ~15 s when
+the NAS is down. Copy them to the NAS by hand when they are needed.
+
+`aispeaker-recordings-cleanup.timer` (daily) deletes the oldest recordings, one
+at a time, only while `/data` has less than `RECORDINGS_MIN_FREE_MB` free (10 GB,
+`/etc/default/aispeaker-recordings`). There is no age limit.
 
 ## Roadmap
 
