@@ -1,4 +1,4 @@
-SUMMARY = "System configuration: persistent journald on /data, NM without WiFi powersave, /data layout"
+SUMMARY = "System configuration: persistent journald on /data, NM without WiFi powersave, /data layout, recordings cleanup"
 DESCRIPTION = "Configuration for a read-only rootfs with minimal SD card wear: \
 journal in RAM, NetworkManager/Bluetooth state bind-mounted from /data, \
 /data directory skeleton created at boot, optional generic NFS share for \
@@ -19,6 +19,10 @@ SRC_URI = " \
     file://aispeaker-zram.service \
     file://60-aispeaker-zram.conf \
     file://e2fsck.conf \
+    file://aispeaker-recordings-cleanup \
+    file://aispeaker-recordings-cleanup.service \
+    file://aispeaker-recordings-cleanup.timer \
+    file://aispeaker-recordings.default \
 "
 
 S = "${UNPACKDIR}"
@@ -29,6 +33,7 @@ SYSTEMD_SERVICE:${PN} = " \
     aispeaker-data-setup.service \
     var-lib-NetworkManager.mount \
     aispeaker-zram.service \
+    aispeaker-recordings-cleanup.timer \
 "
 SYSTEMD_AUTO_ENABLE = "enable"
 
@@ -64,11 +69,17 @@ do_install() {
     install -d ${D}${sbindir}
     install -m 0755 ${S}/aispeaker-data-setup.sh ${D}${sbindir}/aispeaker-data-setup
     install -m 0755 ${S}/aispeaker-zram ${D}${sbindir}/aispeaker-zram
+    install -m 0755 ${S}/aispeaker-recordings-cleanup ${D}${sbindir}/
+
+    install -d ${D}${sysconfdir}/default
+    install -m 0644 ${S}/aispeaker-recordings.default ${D}${sysconfdir}/default/aispeaker-recordings
 
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${S}/aispeaker-data-setup.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${S}/var-lib-NetworkManager.mount ${D}${systemd_system_unitdir}/
     install -m 0644 ${S}/aispeaker-zram.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${S}/aispeaker-recordings-cleanup.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${S}/aispeaker-recordings-cleanup.timer ${D}${systemd_system_unitdir}/
     install -d ${D}${systemd_system_unitdir}/systemd-timesyncd.service.d
     install -m 0644 ${S}/10-aispeaker-volatile-lib.conf \
         ${D}${systemd_system_unitdir}/systemd-timesyncd.service.d/

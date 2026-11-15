@@ -118,7 +118,7 @@ if [ -f "$LOCAL_DIR/nfs.env" ]; then
 fi
 
 # /data skeleton (also created at boot by aispeaker-data-setup; UID 1000 = speaker)
-mkdir -p "$MNT/opt/ai-smart-speaker" "$MNT/recordings" "$MNT/music" "$MNT/mpd/playlists"
-chown -R 1000:1000 "$MNT/opt" "$MNT/recordings" "$MNT/music" "$MNT/mpd"
+mkdir -p "$MNT/opt/ai-smart-speaker" "$MNT/music"
+chown -R 1000:1000 "$MNT/opt" "$MNT/music"
 
 echo "OK: data partition $DATA_PART provisioned"

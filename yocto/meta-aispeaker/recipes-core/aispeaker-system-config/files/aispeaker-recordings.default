@@ -1,0 +1,4 @@
+# Free space kept on /data by aispeaker-recordings-cleanup (daily): below it
+# the oldest recordings are deleted until it is free again.
+RECORDINGS_MIN_FREE_MB=10240
+RECORDINGS_DIR=/data/opt/ai-smart-speaker/recordings

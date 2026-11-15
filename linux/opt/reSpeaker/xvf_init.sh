@@ -29,6 +29,7 @@ fi
 sleep 1
 
 # 2. Parse and send commands with throttling
+FAILED=0
 if [ -f "$CMD_FILE" ]; then
     echo "Starting command execution from $CMD_FILE..." >> $LOG_FILE
     
@@ -49,7 +50,10 @@ if [ -f "$CMD_FILE" ]; then
         if [ $RET_CODE -ne 0 ]; then
              echo "!!! WARN: Command $cmd returned error $RET_CODE. Retrying once..." >> $LOG_FILE
              sleep 0.5
-             $XVF_BIN -cmd "$cmd" $args >> $LOG_FILE 2>&1
+             if ! $XVF_BIN "$cmd" $args >> $LOG_FILE 2>&1; then
+                 echo "!!! ERROR: Command $cmd failed again." >> $LOG_FILE
+                 FAILED=1
+             fi
         fi
 
         # KEY: Delay between commands. 0.1s is usually enough, 0.2s for safety.
@@ -57,7 +61,8 @@ if [ -f "$CMD_FILE" ]; then
         
     done < "$CMD_FILE"
 
-    echo "Initialization sequence finished." >> $LOG_FILE
+    echo "Initialization sequence finished (failed=$FAILED)." >> $LOG_FILE
+    exit $FAILED
 else
     echo "ERROR: Missing file $CMD_FILE" >> $LOG_FILE
     exit 1

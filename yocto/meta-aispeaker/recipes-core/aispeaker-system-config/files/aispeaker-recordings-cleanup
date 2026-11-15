@@ -1,0 +1,32 @@
+#!/bin/sh
+# Keeps RECORDINGS_MIN_FREE_MB free on /data by deleting the oldest
+# recordings first. No age limit: stereo session recordings take some tens
+# of MB a day against tens of GB free, so this only acts once something
+# fills the partition.
+set -u
+
+CONF=/etc/default/aispeaker-recordings
+[ -f "$CONF" ] && . "$CONF"
+
+DIR="${RECORDINGS_DIR:-/data/opt/ai-smart-speaker/recordings}"
+MIN_FREE_MB="${RECORDINGS_MIN_FREE_MB:-10240}"
+
+free_mb() { df -Pm "$DIR" | awk 'NR == 2 { print $4 }'; }
+
+[ -d "$DIR" ] || exit 0
+[ "$(free_mb)" -lt "$MIN_FREE_MB" ] || exit 0
+
+deleted=0
+# oldest first, checked after every file; the names carry no spaces
+for f in $(ls -1tr "$DIR"); do
+    rm -f "$DIR/$f" && deleted=$((deleted + 1))
+    [ "$(free_mb)" -lt "$MIN_FREE_MB" ] || break
+done
+if [ "$(free_mb)" -lt "$MIN_FREE_MB" ]; then
+    echo "deleted $deleted recordings, still under ${MIN_FREE_MB} MB free on /data" >&2
+    exit 1
+fi
+if [ "$deleted" -gt 0 ]; then
+    echo "deleted $deleted oldest recordings, $(free_mb) MB free"
+fi
+exit 0

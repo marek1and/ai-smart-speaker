@@ -1,0 +1,10 @@
+[Unit]
+Description=Delete the oldest speaker recordings when /data runs low
+RequiresMountsFor=/data
+
+[Service]
+Type=oneshot
+User=speaker
+ExecStart=/usr/sbin/aispeaker-recordings-cleanup
+Nice=10
+IOSchedulingClass=idle

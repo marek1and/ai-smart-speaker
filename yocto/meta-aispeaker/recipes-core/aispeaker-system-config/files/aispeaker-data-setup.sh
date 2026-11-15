@@ -3,8 +3,8 @@
 # Idempotent; runs on every boot before services that use /data.
 set -e
 
+# the app keeps its recordings in its own directory (recordings/)
 mkdir -p /data/opt/ai-smart-speaker
-mkdir -p /data/recordings
 mkdir -p /data/music
 mkdir -p /data/mopidy
 mkdir -p /data/state
@@ -30,5 +30,5 @@ EOF
 # touched every inode under the venv on each boot. What is created inside
 # these directories later belongs to speaker anyway.
 chown speaker:speaker /data/opt /data/opt/ai-smart-speaker \
-    /data/recordings /data/music /data/mopidy /data/state /data/cache \
+    /data/music /data/mopidy /data/state /data/cache \
     /data/cache/mopidy

@@ -1,7 +1,10 @@
 [Unit]
 Description=AI Smart Speaker Service
 After=pipewire.service wireplumber.service mopidy.service
-Requires=pipewire.service wireplumber.service mopidy.service
+Requires=pipewire.service wireplumber.service
+# Wants, not Requires: the app runs without Mopidy (no radio/music), and
+# a stop or restart of Mopidy must not take the assistant down with it.
+Wants=mopidy.service
 # don't fail-loop on a fresh image before the application is deployed
 ConditionPathExists=/opt/ai-smart-speaker/.venv/bin/python
 

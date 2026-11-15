@@ -1,7 +1,10 @@
 [Unit]
 Description=AI Smart Speaker Service
 After=network.target pipewire.service wireplumber.service mopidy.service
-Requires=pipewire.service wireplumber.service mopidy.service
+Requires=pipewire.service wireplumber.service
+# Wants, not Requires: the app runs without Mopidy (no radio/music), and
+# a stop or restart of Mopidy must not take the assistant down with it.
+Wants=mopidy.service
 
 [Service]
 Type=simple
