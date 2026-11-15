@@ -168,6 +168,9 @@ live:
   followup_timeout: 3.0
 
   enable_manual_vad: true
+  # Speech without a pause longer than this is ended as if the user had stopped
+  # (a TV talking next to the speaker). 0 disables.
+  max_utterance_seconds: 30.0
   turn_watchdog_timeout: 5.0
   # Microphone frames sent before the API can be answering this turn (stale-reply guard).
   min_frames_before_reply: 20

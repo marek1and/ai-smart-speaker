@@ -209,6 +209,10 @@ class LiveConfig:
 
     # --- Manual VAD Control (Hybrid Strategy) ---
     enable_manual_vad: bool = True  # Use local Silero VAD for speech boundaries
+    # Speech without a pause longer than this is ended (activity_end) as if
+    # the user had stopped: nothing else ends a turn while VAD hears speech.
+    # 0 disables.
+    max_utterance_seconds: float = 30.0
 
     turn_watchdog_timeout: float = 5.0  # Watchdog timeout for turn completion
     # Microphone frames that must be sent in a turn before audio or

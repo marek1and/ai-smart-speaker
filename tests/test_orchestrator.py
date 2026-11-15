@@ -930,3 +930,99 @@ async def test_a_wake_word_while_listening_is_silent(make):
     assert o._sound_player.played == [] and o.mpd_client.calls == []
     assert o.state == SpeakerState.LISTENING and not o._wake_event.is_set()
     assert resets == [{"short_warmup": True}]
+
+
+# --- barge-in, long speech, lost typed requests ---------------------------------
+
+class RecordingApi(FakeApi):
+    def __init__(self, o_ref, **k):
+        super().__init__(**k)
+        self.o_ref = o_ref
+        self.events = []
+
+    async def send_activity_start(self):
+        self.events.append(("activity_start", self.o_ref[0].state))
+
+    async def send_activity_end(self):
+        self.events.append(("activity_end", self.o_ref[0].state))
+
+
+async def test_barge_in_is_listening_before_it_awaits_the_api(make):
+    # the interrupted turn looks at the state after its post-reply pause: a
+    # barge-in still in RESPONDING while it awaited was finished by it
+    ref = []
+    o = make(RecordingApi(ref))
+    ref.append(o)
+    o._state = SpeakerState.RESPONDING
+    await o._execute_barge_in()
+    assert o._api_manager.events == [("activity_start", SpeakerState.LISTENING)]
+
+
+async def test_barge_in_over_a_typed_answer_still_answers_the_request(make):
+    o = make()
+    o.submit_text("ile to 2+2")
+    await o._handle_idle_state()
+    o._api_manager.ai_transcript = "Czte"
+    o._state = SpeakerState.RESPONDING
+    await o._execute_barge_in()
+    assert o._mqtt_bridge.turns[-1] == {
+        "source": "text", "request": "ile to 2+2", "reply": "Czte", "error": "interrupted"}
+    o._api_manager.user_transcript, o._api_manager.ai_transcript = "stop", "Dobrze."
+    await o._execute_post_response_actions()
+    assert o._mqtt_bridge.turns[-1]["source"] == "voice"
+
+
+async def test_typed_request_that_crashes_is_still_answered(make):
+    class BrokenApi(FakeApi):
+        async def open_session(self):
+            raise RuntimeError("boom")
+
+    o = make(BrokenApi())
+    o.submit_text("x")
+    with pytest.raises(RuntimeError):
+        await o._handle_idle_state()
+    assert o._mqtt_bridge.turns[-1] == {"source": "text", "request": "x", "reply": "", "error": "failed"}
+    assert not o._wake_in_progress
+
+
+class SpeakingVad:
+    is_speaking = True
+    last_probability = 1.0
+
+    def __init__(self):
+        self.resets = 0
+
+    def process_frame(self, mono):
+        return False, False
+
+    def reset(self):
+        self.resets += 1
+        self.is_speaking = False
+
+
+async def test_speech_that_never_pauses_is_ended(make, monkeypatch):
+    # a TV next to the speaker kept the microphone streaming to the API
+    ref = []
+    o = make(RecordingApi(ref))
+    ref.append(o)
+    o._api_manager.session_active = True
+    o._state = SpeakerState.LISTENING
+    o._hybrid_vad = SpeakingVad()
+
+    async def forward(audio):
+        pass
+
+    o._forward_audio_to_api = forward
+    monkeypatch.setattr(o.live_cfg, "max_utterance_seconds", 10.0)
+    frame = np.zeros(512, dtype=np.int16)
+    o._speech_since = orch.time.monotonic() - 5
+    await o._process_listening_audio(frame, frame.tobytes())
+    assert o._api_manager.events == []
+    o._speech_since = orch.time.monotonic() - 11
+    await o._process_listening_audio(frame, frame.tobytes())
+    assert o._api_manager.events == [("activity_end", SpeakerState.LISTENING)]
+    assert o._hybrid_vad.resets == 1
+    monkeypatch.setattr(o.live_cfg, "max_utterance_seconds", 0.0)  # disabled
+    o._hybrid_vad.is_speaking = True
+    await o._process_listening_audio(frame, frame.tobytes())
+    assert len(o._api_manager.events) == 1

@@ -172,6 +172,8 @@ class AudioOrchestrator:
         self._silence_wait: Optional[_SilenceWait] = None
         # When FOLLOW_UP started waiting for the user; cleared by every transition.
         self._follow_up_since: Optional[float] = None
+        # When local VAD last saw speech start, for live.max_utterance_seconds.
+        self._speech_since: float = 0.0
 
         # STT wake word verifier (optional, loaded at startup if enabled)
         self._verifier: Optional[WakeWordVerifier] = None
@@ -538,10 +540,20 @@ class AudioOrchestrator:
             if speech_started:
                 logger.info("VAD: Speech started - sending activity_start")
                 self._silence_wait = None  # user spoke — the timeout no longer applies
+                self._speech_since = time.monotonic()
                 await self._api_manager.send_activity_start()
 
             if speech_ended:
                 logger.info("VAD: Speech ended - sending activity_end")
+                await self._api_manager.send_activity_end()
+            elif self._utterance_too_long():
+                # Speech that never pauses (a TV next to the speaker) kept the
+                # microphone streaming to the API with nothing to end it.
+                logger.warning(
+                    "Speech for over %.0fs without a pause - sending activity_end",
+                    self.live_cfg.max_utterance_seconds,
+                )
+                self._hybrid_vad.reset()
                 await self._api_manager.send_activity_end()
 
         if self._api_manager.awaiting_reply:
@@ -553,6 +565,14 @@ class AudioOrchestrator:
             self._recorder.write(mono_bytes)
             return
         await self._forward_audio_to_api(mono_bytes)
+
+    def _utterance_too_long(self) -> bool:
+        limit = self.live_cfg.max_utterance_seconds
+        return (
+            limit > 0
+            and self._hybrid_vad.is_speaking
+            and time.monotonic() - self._speech_since > limit
+        )
 
     async def _process_followup_audio(
         self, mono: np.ndarray, mono_bytes: bytes
@@ -715,14 +735,21 @@ class AudioOrchestrator:
         if self._hybrid_vad:
             self._hybrid_vad.reset()
 
+        if self._text_turn is not None:
+            # _begin_turn drops it: answer the typed request instead of losing it
+            self._publish_turn(
+                "text", self._text_turn, self._api_manager.ai_transcript.strip(), error="interrupted"
+            )
         self._begin_turn()
-
-        if self.live_cfg.enable_manual_vad:
-            await self._api_manager.send_activity_start()
-
+        # State before the await below: the interrupted turn's RESPONDING
+        # handler looks at the state when its pause after the reply ends, and
+        # would otherwise finish this turn.
         # User is already speaking — silence timeout does not apply.
         self._silence_wait = None
         self._set_state(SpeakerState.LISTENING)
+
+        if self.live_cfg.enable_manual_vad:
+            await self._api_manager.send_activity_start()
 
         await asyncio.sleep(self.live_cfg.barge_in_resume_delay)
         if self._audio_output:
@@ -802,7 +829,7 @@ class AudioOrchestrator:
     async def _handle_follow_up_state(self) -> None:
         """Handle FOLLOW_UP state: wait for the user to answer, or a typed request."""
         if not self._text_requests.empty():
-            await self._open_session_and_listen(self._text_requests.get_nowait())
+            await self._start_text_turn(self._text_requests.get_nowait())
             return
         if self._follow_up_since is None:
             self._follow_up_since = time.monotonic()
@@ -838,11 +865,9 @@ class AudioOrchestrator:
     async def _handle_idle_state(self) -> None:
         """Handle IDLE state: wait for wake word or a typed request."""
         if not self._text_requests.empty():
-            text = self._text_requests.get_nowait()
-            await self._duck_radio_if_playing()
             self._wake_in_progress = True
             try:
-                await self._open_session_and_listen(text)
+                await self._start_text_turn(self._text_requests.get_nowait(), duck=True)
             finally:
                 self._wake_in_progress = False
             return
@@ -878,6 +903,17 @@ class AudioOrchestrator:
             return False
         self._idle_signal.set()
         return True
+
+    async def _start_text_turn(self, text: str, duck: bool = False) -> None:
+        """A typed request that fails here still gets its reply on MQTT; the
+        state machine's recovery knows nothing of it."""
+        try:
+            if duck:
+                await self._duck_radio_if_playing()
+            await self._open_session_and_listen(text)
+        except Exception:
+            self._publish_turn("text", text, "", error="failed")
+            raise
 
     def _drop_queued_text(self) -> None:
         """A voice turn started first: answer a waiting typed request with busy

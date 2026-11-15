@@ -228,6 +228,9 @@ live:
   followup_timeout: 3.0
 
   enable_manual_vad: true
+  # Speech without a pause longer than this is ended as if the user had stopped
+  # (a TV talking next to the speaker). 0 disables.
+  max_utterance_seconds: 30.0
   # Close the session when nobody speaks after the wake word. Keep it clear of the
   # tail of how long people take to start talking (measured p50 1s, tail 4-7s) —
   # too tight and genuine calls are discarded as false triggers.
