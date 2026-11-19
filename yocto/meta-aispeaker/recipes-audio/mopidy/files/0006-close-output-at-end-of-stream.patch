@@ -1,0 +1,32 @@
+From: Marek Andrzejewski <marek1and@gmail.com>
+Subject: [PATCH] Close the audio output when the stream ends
+
+At the end of the last track core sets STOPPED, but playbin stays in
+PLAYING, so pulsesink keeps an uncorked stream with no data open on the
+audio server. pipewire-pulse 1.6 advances the read index of such a stream
+on every underrun cycle; its signed 32-bit fill level wraps after 2^31
+bytes (93 min at 48 kHz stereo F32LE) and it then plays the last 4 MB of
+its ring buffer again: the last ~11 s of the track, every ~93 min.
+
+Stop playback at end of stream, the same as an explicit stop.
+
+Upstream-Status: Pending
+---
+ src/mopidy/core/_actor.py | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/mopidy/core/_actor.py b/src/mopidy/core/_actor.py
+index d484d86..4f36a43 100644
+--- a/src/mopidy/core/_actor.py
++++ b/src/mopidy/core/_actor.py
+@@ -116,6 +116,10 @@ class Core(
+     @override
+     def reached_end_of_stream(self) -> None:
+         self.playback._on_end_of_stream()
++        # Close the output: a sink left playing without data keeps an
++        # uncorked stream open on the audio server.
++        if self.audio:
++            self.audio.stop_playback()
+ 
+     @override
+     def stream_changed(self, uri: Uri) -> None:

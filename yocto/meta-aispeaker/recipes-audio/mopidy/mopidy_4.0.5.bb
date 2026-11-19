@@ -5,7 +5,10 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=3b83ef96387f14655fc854ddc3c6bd57"
 
 PYPI_PACKAGE = "mopidy"
 
-SRC_URI += "file://0005-add-output-buffer-time.patch"
+SRC_URI += " \
+    file://0005-add-output-buffer-time.patch \
+    file://0006-close-output-at-end-of-stream.patch \
+"
 
 SRC_URI[sha256sum] = "8ee57d41dc90923ddbf10d289bbbba8fd589da09f59e9f2c2162d5dc3b4e1328"
 

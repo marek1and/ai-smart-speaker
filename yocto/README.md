@@ -280,6 +280,10 @@ typelibs).
   each output sits after the software volume and filled to GStreamer's default
   of 1 s, so ducking was heard ~1.2 s after the wake word. `mopidy.conf` sets
   it to 100 ms.
+- Another patch to Mopidy (0006) closes the output when the last track ends.
+  Mopidy left the pipeline playing with no data, and pipewire-pulse replayed
+  the last ~11 s of the track every ~93 min (its 32-bit fill level of an
+  underrunning stream wraps after 2^31 bytes).
 
 To try a newer yt-dlp before rebuilding: install the wheels with
 `pip install --target` under `/data/tmp`, put deno next to them, and point
